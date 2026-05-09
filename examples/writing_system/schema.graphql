@@ -1,0 +1,21 @@
+type Query {
+  searchCharacters(projectId: ID!, keyword: String!): [Character!]!
+  listChapterReferences(chapterId: ID!): [Reference!]!
+}
+
+type Mutation {
+  updateCharacterPersona(characterId: ID!, persona: String!): Character!
+  sendEditorialEmail(projectId: ID!, recipient: String!, message: String!): Boolean!
+}
+
+type Character {
+  id: ID!
+  name: String!
+  persona: String
+}
+
+type Reference {
+  id: ID!
+  targetId: ID!
+}
+

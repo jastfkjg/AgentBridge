@@ -1,0 +1,146 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Writing System",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/projects/{project_id}/chapters": {
+      "get": {
+        "operationId": "listChapters",
+        "summary": "List chapters in a writing project",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "createChapter",
+        "summary": "Create a new chapter",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["title"],
+                "properties": {
+                  "title": { "type": "string" },
+                  "outline": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/chapters/{chapter_id}/rewrite": {
+      "post": {
+        "operationId": "rewriteChapter",
+        "summary": "Rewrite chapter content while preserving constraints",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "chapter_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["style"],
+                "properties": {
+                  "style": { "type": "string" },
+                  "preserve_character_voice": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/characters": {
+      "post": {
+        "operationId": "createCharacter",
+        "summary": "Create a character",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "persona": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{project_id}/characters/{character_id}": {
+      "delete": {
+        "operationId": "deleteCharacter",
+        "summary": "Delete a character after checking references",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "character_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ]
+      }
+    },
+    "/projects/{project_id}/publish": {
+      "post": {
+        "operationId": "publishProject",
+        "summary": "Publish a writing project",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ]
+      }
+    }
+  }
+}
+
