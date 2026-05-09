@@ -48,15 +48,34 @@ pip install agentbridge[ai]
 pip install agentbridge[all]
 ```
 
-### 配置 API Key
+### 配置 LLM 提供商
 
-AgentBridge 的 AI 功能需要 Anthropic API Key。通过环境变量设置：
+AgentBridge 的 AI 功能需要 LLM API Key。默认使用 Anthropic Claude，但你可以配置任何兼容 Anthropic 协议的提供商（DeepSeek、OpenRouter 等）：
 
 ```bash
+# 必需：API Key
 export ANTHROPIC_API_KEY="sk-ant-..."
+
+# 可选：自定义 API 端点（用于 DeepSeek、OpenRouter 等）
+# DeepSeek Anthropic 端点：
+export ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"
+# OpenRouter：
+export ANTHROPIC_BASE_URL="https://openrouter.ai/api/v1"
+
+# 可选：自定义模型名称
+export ANTHROPIC_MODEL="deepseek-v4-flash"
 ```
 
-或通过 CLI 参数和编程 API 显式传入。
+或通过 CLI 参数传入：
+
+```bash
+agentbridge generate examples/writing_system --output build/kit --ai \
+  --api-key "sk-..." \
+  --base-url "https://api.deepseek.com/anthropic" \
+  --model "deepseek-v4-flash"
+```
+
+> **注意：** 设置 `ANTHROPIC_BASE_URL` 后，AgentBridge 自动使用 `anthropic` SDK 后端（而非 `claude-agent-sdk`）进行生成，因为自定义端点不被 Agent SDK 支持。
 
 ### 生成 Agent 集成套件
 
@@ -199,16 +218,18 @@ AgentBridge 支持两种 AI 后端，运行时自动检测：
 | 后端 | 包 | 用途 |
 |---|---|---|
 | **Claude Agent SDK**（首选） | `claude-agent-sdk` | 生成 + 交互式 Agent 会话 |
-| **Anthropic API**（备选） | `anthropic` | 仅生成，无需 Node.js |
+| **Anthropic API**（备选） | `anthropic` | 仅生成，支持自定义端点 |
 
-安装了 `claude-agent-sdk` 时，自动用于生成和 Agent 会话。否则使用 `anthropic` SDK 作为生成的备选方案。
+安装了 `claude-agent-sdk` 且未设置自定义 `ANTHROPIC_BASE_URL` 时，自动用于生成和 Agent 会话。配置了自定义端点或未安装 `claude-agent-sdk` 时，使用 `anthropic` SDK 进行生成。
 
 ### 配置
 
-AI 功能**必须**配置 API Key：
+AI 功能**必须**配置 LLM API Key。通过环境变量配置：
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
+export ANTHROPIC_API_KEY="sk-ant-..."          # 必需
+export ANTHROPIC_BASE_URL=""                    # 可选：自定义端点
+export ANTHROPIC_MODEL="claude-sonnet-4-20250514"  # 可选：模型名称
 ```
 
 或编程式传入：
@@ -216,7 +237,22 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 ```python
 from agentbridge.agent import AIGenerator
 
+# 默认：Anthropic Claude
 ai = AIGenerator(api_key="sk-ant-...")
+
+# 自定义提供商（如 DeepSeek）
+ai = AIGenerator(
+    api_key="sk-d831ecabc21842fdae6f30c24dd3b052",
+    base_url="https://api.deepseek.com/anthropic",
+    model="deepseek-v4-flash",
+)
+
+# 自定义提供商（如 OpenRouter）
+ai = AIGenerator(
+    api_key="sk-or-...",
+    base_url="https://openrouter.ai/api/v1",
+    model="anthropic/claude-sonnet-4-20250514",
+)
 ```
 
 ### 编程式使用
