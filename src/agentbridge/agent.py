@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from agentbridge.models import Capability
+from agentbridge.policy import classify_risk, confirmation_required, risk_reason
 
 _DEFAULT_MODEL = "claude-sonnet-4-20250514"
 
@@ -24,7 +25,7 @@ class AIGenerator:
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if not self.api_key:
             raise ValueError(
-                "LLM API key is required for AI generation. "
+                "LLM API key is required. "
                 "Set ANTHROPIC_API_KEY environment variable or pass api_key parameter."
             )
         self.base_url = base_url or os.environ.get("ANTHROPIC_BASE_URL", "")
@@ -37,18 +38,15 @@ class AIGenerator:
         self._backend = self._detect_backend()
 
     def _detect_backend(self) -> str:
-        has_custom_endpoint = bool(self.base_url)
-        if has_custom_endpoint:
+        if self.base_url:
             return self._BACKEND_ANTHROPIC
         try:
             from claude_agent_sdk import query  # noqa: F401
-
             return self._BACKEND_AGENT_SDK
         except ImportError:
             pass
         try:
             import anthropic  # noqa: F401
-
             return self._BACKEND_ANTHROPIC
         except ImportError:
             raise ImportError(
@@ -57,20 +55,106 @@ class AIGenerator:
                 "or pip install agbr[ai]"
             )
 
-    def enhance_tools(self, capabilities: list[Capability]) -> dict[str, dict[str, Any]]:
-        return _run_async(self._enhance_tools_async(capabilities))
+    def generate_all(
+        self, capabilities: list[Capability], kit_name: str
+    ) -> dict[str, Any]:
+        rule_context = self._build_rule_context(capabilities)
+        return _run_async(self._generate_all_async(capabilities, kit_name, rule_context))
 
-    def generate_skills(self, capabilities: list[Capability], kit_name: str) -> dict[str, str]:
-        return _run_async(self._generate_skills_async(capabilities, kit_name))
+    def _build_rule_context(self, capabilities: list[Capability]) -> dict[str, Any]:
+        rule_risks: dict[str, dict[str, Any]] = {}
+        for cap in capabilities:
+            rule_risks[cap.name] = {
+                "rule_based_risk": cap.risk,
+                "rule_based_confirm_required": cap.confirm_required,
+                "risk_reason": risk_reason(cap.risk),
+                "action": cap.action,
+                "transport": cap.transport,
+            }
+        return {
+            "rule_based_risk_assessment": rule_risks,
+            "risk_policy": {
+                "read": {"confirm_required": False},
+                "write": {"confirm_required": False},
+                "destructive": {"confirm_required": True},
+                "external_side_effect": {"confirm_required": True},
+            },
+        }
 
-    def generate_system_prompt(self, capabilities: list[Capability], kit_name: str) -> str:
-        return _run_async(self._generate_system_prompt_async(capabilities, kit_name))
+    async def _generate_all_async(
+        self,
+        capabilities: list[Capability],
+        kit_name: str,
+        rule_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        caps_data = [cap.to_dict() for cap in capabilities]
+        domains = sorted({cap.domain for cap in capabilities})
 
-    def infer_additional_tools(self, capabilities: list[Capability]) -> list[dict[str, Any]]:
-        return _run_async(self._infer_additional_tools_async(capabilities))
+        result = await self._ask(
+            PROMPT_GENERATE_ALL_SYSTEM,
+            PROMPT_GENERATE_ALL_USER.format(
+                capabilities=json.dumps(caps_data, indent=2),
+                kit_name=kit_name,
+                domains=", ".join(domains),
+                rule_context=json.dumps(rule_context, indent=2),
+            ),
+        )
 
-    def enhance_risk_assessment(self, capabilities: list[Capability]) -> dict[str, dict[str, Any]]:
-        return _run_async(self._enhance_risk_assessment_async(capabilities))
+        parsed = _parse_json_object(result, {})
+        if not parsed:
+            raise RuntimeError("LLM failed to return valid JSON for generation. Please check your API key and model configuration.")
+
+        enhanced_caps = self._apply_enhanced_capabilities(capabilities, parsed)
+        system_prompt = parsed.get("system_prompt", "")
+        skills = parsed.get("skills", {})
+
+        return {
+            "enhanced_capabilities": enhanced_caps,
+            "system_prompt": system_prompt,
+            "skills": skills,
+        }
+
+    def _apply_enhanced_capabilities(
+        self, capabilities: list[Capability], parsed: dict[str, Any]
+    ) -> list[Capability]:
+        tool_enhancements = parsed.get("tool_enhancements", {})
+        risk_assessments = parsed.get("risk_assessments", {})
+        additional_tools = parsed.get("additional_tools", [])
+
+        for cap in capabilities:
+            enh = tool_enhancements.get(cap.name, {})
+            if enh.get("description"):
+                cap.description = enh["description"]
+            if enh.get("when_to_use"):
+                cap.description = f"{cap.description} Use when: {enh['when_to_use']}"
+            if enh.get("caveats"):
+                cap.description = f"{cap.description} Caveats: {enh['caveats']}"
+
+            risk_info = risk_assessments.get(cap.name, {})
+            if risk_info.get("risk") in ("read", "write", "destructive", "external_side_effect"):
+                cap.risk = risk_info["risk"]
+                cap.confirm_required = confirmation_required(risk_info["risk"])
+
+        for tool_def in additional_tools:
+            if isinstance(tool_def, dict) and tool_def.get("name"):
+                from agentbridge.models import SourceRef
+                risk = tool_def.get("risk", "read")
+                cap = Capability(
+                    name=tool_def["name"],
+                    domain=tool_def.get("domain", "inferred"),
+                    resource=tool_def.get("resource", "inferred"),
+                    action=tool_def.get("action", "run"),
+                    description=tool_def.get("description", tool_def["name"]),
+                    input_schema=tool_def.get("input_schema", {"type": "object", "properties": {}}),
+                    risk=risk,
+                    confirm_required=confirmation_required(risk),
+                    source=SourceRef("ai_inferred", "", tool_def.get("rationale", "")),
+                    transport={"type": "inferred"},
+                    dry_run_supported=True,
+                )
+                capabilities.append(cap)
+
+        return capabilities
 
     async def _ask_agent_sdk(self, system_prompt: str, user_prompt: str) -> str:
         from claude_agent_sdk import AssistantMessage, TextBlock
@@ -103,7 +187,7 @@ class AIGenerator:
         client = anthropic.Anthropic(**kwargs)
         response = client.messages.create(
             model=self.model,
-            max_tokens=4096,
+            max_tokens=8192,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )
@@ -111,53 +195,6 @@ class AIGenerator:
             if block.type == "text":
                 return block.text
         return ""
-
-    async def _enhance_tools_async(self, capabilities: list[Capability]) -> dict[str, dict[str, Any]]:
-        caps_data = [cap.to_dict() for cap in capabilities]
-        result = await self._ask(
-            PROMPT_TOOL_ENHANCEMENT_SYSTEM,
-            PROMPT_TOOL_ENHANCEMENT_USER.format(capabilities=json.dumps(caps_data, indent=2)),
-        )
-        return _parse_json_object(result, {})
-
-    async def _generate_skills_async(self, capabilities: list[Capability], kit_name: str) -> dict[str, str]:
-        caps_data = [cap.to_dict() for cap in capabilities]
-        domains = sorted({cap.domain for cap in capabilities})
-        result = await self._ask(
-            PROMPT_SKILL_SYSTEM,
-            PROMPT_SKILL_USER.format(
-                capabilities=json.dumps(caps_data, indent=2),
-                kit_name=kit_name,
-                domains=", ".join(domains),
-            ),
-        )
-        return _parse_json_object(result, {d: "" for d in domains})
-
-    async def _generate_system_prompt_async(self, capabilities: list[Capability], kit_name: str) -> str:
-        caps_data = [cap.to_dict() for cap in capabilities]
-        return await self._ask(
-            PROMPT_SYSTEM_PROMPT_SYSTEM,
-            PROMPT_SYSTEM_PROMPT_USER.format(
-                capabilities=json.dumps(caps_data, indent=2),
-                kit_name=kit_name,
-            ),
-        )
-
-    async def _infer_additional_tools_async(self, capabilities: list[Capability]) -> list[dict[str, Any]]:
-        caps_data = [cap.to_dict() for cap in capabilities]
-        result = await self._ask(
-            PROMPT_INFER_TOOLS_SYSTEM,
-            PROMPT_INFER_TOOLS_USER.format(capabilities=json.dumps(caps_data, indent=2)),
-        )
-        return _parse_json_array(result, [])
-
-    async def _enhance_risk_assessment_async(self, capabilities: list[Capability]) -> dict[str, dict[str, Any]]:
-        caps_data = [cap.to_dict() for cap in capabilities]
-        result = await self._ask(
-            PROMPT_RISK_SYSTEM,
-            PROMPT_RISK_USER.format(capabilities=json.dumps(caps_data, indent=2)),
-        )
-        return _parse_json_object(result, {})
 
 
 class AgentRunner:
@@ -253,109 +290,47 @@ class AgentRunner:
         return tools
 
 
-PROMPT_TOOL_ENHANCEMENT_SYSTEM = (
-    "You are an expert at designing AI agent tool interfaces. "
-    "You receive discovered capabilities from an existing system and generate "
-    "enhanced tool descriptions that capture business semantics. "
+PROMPT_GENERATE_ALL_SYSTEM = (
+    "You are an expert at designing AI agent integration kits for existing systems. "
+    "You receive discovered capabilities from a system and rule-based analysis as context. "
+    "Your job is to generate a COMPLETE agent integration kit in a single response. "
+    "You must enhance tool descriptions, assess risks, infer additional tools, "
+    "generate a system prompt, and create domain-specific skill documents. "
+    "Use the rule-based context as a starting point but apply your own judgment — "
+    "you may override rule-based risk levels when you have good reason. "
     "Always respond with valid JSON only, no markdown fences."
 )
 
-PROMPT_TOOL_ENHANCEMENT_USER = (
-    "Given the following discovered capabilities, generate enhanced tool descriptions.\n\n"
-    "For each tool, provide:\n"
-    '1. "description": A clear, user-friendly description that explains what the tool does in business terms\n'
-    '2. "when_to_use": When an AI agent should use this tool\n'
-    '3. "caveats": Important caveats or edge cases the agent should know about\n\n'
-    "Input capabilities:\n{capabilities}\n\n"
-    "Respond with a JSON object where keys are tool names and values are objects with "
-    '"description", "when_to_use", and "caveats" fields.'
-)
-
-PROMPT_SKILL_SYSTEM = (
-    "You are an expert at designing AI agent skills for domain-specific workflows. "
-    "You receive discovered capabilities and generate domain-specific skill documents in Markdown. "
-    "Always respond with valid JSON only, no markdown fences."
-)
-
-PROMPT_SKILL_USER = (
+PROMPT_GENERATE_ALL_USER = (
     "Kit name: {kit_name}\n"
     "Domains: {domains}\n\n"
-    "Input capabilities:\n{capabilities}\n\n"
-    "For each domain, generate a skill document in Markdown that includes:\n"
-    "1. When to activate this skill\n"
-    "2. Step-by-step workflow for common operations\n"
-    "3. Error handling and edge cases\n"
-    "4. Best practices for this domain\n\n"
-    'Respond with a JSON object where keys are domain names and values are the Markdown skill content (strings).'
-)
-
-PROMPT_SYSTEM_PROMPT_SYSTEM = (
-    "You are an expert at designing AI agent system prompts. "
-    "You receive discovered capabilities from an existing system and generate "
-    "a comprehensive system prompt in Markdown. "
-    "Respond with the system prompt as plain Markdown text."
-)
-
-PROMPT_SYSTEM_PROMPT_USER = (
-    "Kit name: {kit_name}\n\n"
-    "Input capabilities:\n{capabilities}\n\n"
-    "Generate a system prompt that:\n"
-    "1. Defines the agent's role and personality\n"
-    "2. Explains the available capabilities in user-friendly terms\n"
-    "3. Defines safety rules and operation procedures\n"
-    "4. Guides the agent on when to ask for clarification vs. proceed\n"
-    "5. Includes error handling guidance"
-)
-
-PROMPT_INFER_TOOLS_SYSTEM = (
-    "You are an expert at analyzing API schemas and inferring additional tools "
-    "that would be useful for an AI agent. "
-    "Always respond with valid JSON only, no markdown fences."
-)
-
-PROMPT_INFER_TOOLS_USER = (
-    "Given the following discovered capabilities, suggest additional tools that are "
-    "implied by the schema but not explicitly present.\n\n"
-    "Input capabilities:\n{capabilities}\n\n"
-    "Consider:\n"
-    "1. Search/filter operations that might be needed\n"
-    "2. Batch operations for efficiency\n"
-    "3. Validation/preview operations\n"
-    "4. Status/check operations\n"
-    "5. Relationship traversal tools\n\n"
-    "For each suggested tool, provide:\n"
-    '- "name": tool name in snake_case\n'
-    '- "description": what it does\n'
-    '- "input_schema": JSON Schema for parameters\n'
-    '- "risk": one of "read", "write", "destructive", "external_side_effect"\n'
-    '- "domain": logical domain grouping\n'
-    '- "resource": target resource\n'
-    '- "action": action verb\n'
-    '- "rationale": why this tool is needed\n\n'
-    "Respond with a JSON array of suggested tools."
-)
-
-PROMPT_RISK_SYSTEM = (
-    "You are an expert at assessing the risk level of API operations. "
-    "You receive discovered capabilities and provide enhanced risk assessments "
-    "that go beyond simple keyword matching. "
-    "Always respond with valid JSON only, no markdown fences."
-)
-
-PROMPT_RISK_USER = (
-    "Given the following discovered capabilities, provide enhanced risk assessments.\n\n"
-    "Input capabilities:\n{capabilities}\n\n"
-    "For each tool, consider:\n"
-    "1. The actual business impact of the operation\n"
-    "2. Whether the operation is reversible\n"
-    "3. Whether it affects multiple resources\n"
-    "4. Whether it has external side effects\n"
-    "5. Whether it involves sensitive data\n\n"
-    "Respond with a JSON object where keys are tool names and values are objects with:\n"
-    '- "risk": one of "read", "write", "destructive", "external_side_effect"\n'
-    '- "reason": detailed reasoning for the risk level\n'
-    '- "reversible": whether the operation can be undone (boolean)\n'
-    '- "blast_radius": "single" or "multiple" resources affected'
+    "Discovered capabilities:\n{capabilities}\n\n"
+    "Rule-based analysis context (use as reference, not absolute truth):\n{rule_context}\n\n"
+    "Generate a complete agent integration kit. Respond with a JSON object containing:\n\n"
+    '"tool_enhancements": A JSON object where keys are tool names and values are objects with:\n'
+    '  - "description": Enhanced description explaining what the tool does in business terms, '
+    "when to use it, and important caveats. Be specific and actionable.\n"
+    '  - "when_to_use": Brief guidance on when an agent should invoke this tool\n'
+    '  - "caveats": Important edge cases, prerequisites, or warnings\n\n'
+    '"risk_assessments": A JSON object where keys are tool names and values are objects with:\n'
+    '  - "risk": One of "read", "write", "destructive", "external_side_effect"\n'
+    '  - "reason": Detailed reasoning for the risk level\n'
+    '  - "reversible": Whether the operation can be undone (boolean)\n'
+    '  - "blast_radius": "single" or "multiple"\n\n'
+    '"additional_tools": A JSON array of inferred tools not in the schema but implied. Each item:\n'
+    '  - "name", "description", "input_schema", "risk", "domain", "resource", "action", "rationale"\n\n'
+    '"system_prompt": A string containing the agent system prompt in Markdown. It should:\n'
+    "  1. Define the agent's role and personality for THIS specific system\n"
+    "  2. Explain available capabilities in user-friendly terms\n"
+    "  3. Define safety rules based on the risk assessments\n"
+    "  4. Guide the agent on when to ask for clarification vs. proceed\n"
+    "  5. Include error handling guidance\n\n"
+    '"skills": A JSON object where keys are domain names and values are Markdown skill documents. Each should:\n'
+    "  1. Describe when to activate this skill\n"
+    "  2. Provide step-by-step workflows for common operations IN THIS DOMAIN\n"
+    "  3. Include error handling and edge cases specific to this domain\n"
+    "  4. List best practices for this domain\n"
+    "  5. Reference the relevant tools by name\n"
 )
 
 
@@ -366,7 +341,6 @@ def _run_async(coro: Any) -> Any:
         loop = None
     if loop and loop.is_running():
         import concurrent.futures
-
         with concurrent.futures.ThreadPoolExecutor() as pool:
             future = pool.submit(asyncio.run, coro)
             return future.result()

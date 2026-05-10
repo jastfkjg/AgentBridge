@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 
+from agentbridge.agent import AIGenerator
 from agentbridge.discovery import CapabilityDiscoverer
 from agentbridge.generator import AgentKitGenerator
 from agentbridge.runtime import DryRunError, dry_run
@@ -22,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "generate":
             paths = [Path(p) for p in args.paths]
-            ai_gen = _resolve_ai_generator(args)
+            ai_gen = _create_ai_generator(args)
             kit = AgentKitGenerator(ai_generator=ai_gen).generate(paths, Path(args.output), args.name)
             print(json.dumps(kit.to_manifest(), indent=2, sort_keys=True))
             return 0
@@ -32,30 +33,23 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if result["allowed"] or result["requires_confirmation"] else 2
         if args.command == "chat":
             return asyncio.run(_run_chat(args))
-    except (OSError, json.JSONDecodeError, DryRunError, ValueError) as exc:
+    except (OSError, json.JSONDecodeError, DryRunError, ValueError, TypeError, RuntimeError) as exc:
         print(f"agentbridge: {exc}", file=sys.stderr)
         return 1
     parser.print_help()
     return 1
 
 
-def _resolve_ai_generator(args: argparse.Namespace):
-    if not getattr(args, "ai", False):
-        return None
+def _create_ai_generator(args: argparse.Namespace) -> AIGenerator:
     try:
-        from agentbridge.agent import AIGenerator
-    except ImportError as exc:
-        print(
-            "agentbridge: AI generation requires either 'claude-agent-sdk' or 'anthropic' package.\n"
-            "Install with: pip install agbr[agent] (recommended) or pip install agbr[ai]",
-            file=sys.stderr,
+        return AIGenerator(
+            api_key=getattr(args, "api_key", None),
+            base_url=getattr(args, "base_url", None),
+            model=getattr(args, "model", None),
         )
+    except (ValueError, ImportError) as exc:
+        print(f"agentbridge: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
-    return AIGenerator(
-        api_key=getattr(args, "api_key", None),
-        base_url=getattr(args, "base_url", None),
-        model=getattr(args, "model", None),
-    )
 
 
 async def _run_chat(args: argparse.Namespace) -> int:
@@ -115,17 +109,16 @@ def _add_llm_options(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="agentbridge", description="Generate Agent Integration Kits for existing systems.")
+    parser = argparse.ArgumentParser(prog="agentbridge", description="Generate Agent Integration Kits for existing systems. Requires LLM API key.")
     subparsers = parser.add_subparsers(dest="command")
 
-    discover = subparsers.add_parser("discover", help="Discover system capabilities.")
+    discover = subparsers.add_parser("discover", help="Discover system capabilities (no API key needed).")
     discover.add_argument("paths", nargs="+", help="Files or directories to inspect.")
 
-    generate = subparsers.add_parser("generate", help="Generate an Agent Integration Kit.")
+    generate = subparsers.add_parser("generate", help="Generate an Agent Integration Kit. Requires API key.")
     generate.add_argument("paths", nargs="+", help="Files or directories to inspect.")
     generate.add_argument("--output", "-o", required=True, help="Output directory for the generated kit.")
     generate.add_argument("--name", help="Kit name. Defaults to the input directory name.")
-    generate.add_argument("--ai", action="store_true", help="Use AI to generate enhanced tools, skills, and prompts. Requires API key.")
     _add_llm_options(generate)
 
     dry = subparsers.add_parser("dry-run", help="Dry-run a generated tool invocation.")

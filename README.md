@@ -78,8 +78,8 @@ Supports DeepSeek, OpenRouter, and any Anthropic-compatible endpoint
 
 </td><td>
 
-🪶 **Dependency-light Core**
-Deterministic generator runs on Python standard library only; AI features are opt-in
+🪶 **Rules + LLM Combined**
+Rule-based analysis (risk keywords, HTTP verbs) feeds into LLM as context for smarter generation
 
 </td></tr>
 </table>
@@ -108,7 +108,7 @@ pip install "agbr[ai]"
 pip install "agbr[all]"
 
 # Install from source (for development)
-git clone https://github.com/your-username/AgentBridge.git
+git clone git@github.com:jastfkjg/AgentBridge.git
 cd AgentBridge
 pip install -e ".[all]"
 ```
@@ -117,7 +117,7 @@ pip install -e ".[all]"
 
 ### Configure LLM Provider
 
-AgentBridge requires an LLM API key for AI features. By default it uses Anthropic's Claude, but you can configure any Anthropic-compatible provider:
+AgentBridge requires an LLM API key for all generation. By default it uses Anthropic's Claude, but you can configure any Anthropic-compatible provider:
 
 ```bash
 # Required
@@ -135,7 +135,7 @@ export ANTHROPIC_MODEL="deepseek-v4-flash"
 <summary>🔑 Or pass via CLI flags</summary>
 
 ```bash
-agentbridge generate examples/writing_system --output build/kit --ai \
+agentbridge generate examples/writing_system --output build/kit \
   --api-key "sk-..." \
   --base-url "https://api.deepseek.com/anthropic" \
   --model "deepseek-v4-flash"
@@ -148,11 +148,8 @@ agentbridge generate examples/writing_system --output build/kit --ai \
 ### Generate an Agent Integration Kit
 
 ```bash
-# Deterministic generation (no API key needed)
+# Requires ANTHROPIC_API_KEY (set via env var or --api-key flag)
 agentbridge generate examples/writing_system --output .agentbridge/writing-kit
-
-# AI-powered generation (requires API key)
-agentbridge generate examples/writing_system --output .agentbridge/writing-kit --ai
 ```
 
 ### Run as an Agent
@@ -190,17 +187,13 @@ agentbridge discover examples/writing_system
 ### `generate`
 
 ```bash
-# Deterministic
 agentbridge generate examples/writing_system --output build/agent-kit
-
-# AI-powered
-agentbridge generate examples/writing_system --output build/agent-kit --ai
 
 # With custom name
 agentbridge generate examples/writing_system --output build/agent-kit --name my-kit
 
 # With custom LLM provider
-agentbridge generate examples/writing_system --output build/agent-kit --ai \
+agentbridge generate examples/writing_system --output build/agent-kit \
   --api-key "sk-..." --base-url "https://api.deepseek.com/anthropic" --model "deepseek-v4-flash"
 ```
 
@@ -279,7 +272,7 @@ agent-kit/
 
 ## 🤖 AI-Powered Generation
 
-When you use `--ai`, AgentBridge uses Claude to dynamically generate:
+AgentBridge uses LLM to generate all content — tool descriptions, skills, system prompts, risk assessments, and inferred tools. Rule-based analysis (keyword matching, HTTP verb classification) is fed into the LLM as context, not used directly.
 
 | What | Description |
 |---|---|
@@ -287,7 +280,7 @@ When you use `--ai`, AgentBridge uses Claude to dynamically generate:
 | 🎯 **Domain-specific skills** | Workflow prompts tailored to your domain with best practices |
 | 🧠 **Intelligent system prompts** | Prompts that understand resource relationships and suggest safe sequences |
 | 🔍 **Inferred additional tools** | Tools implied by your schema but not explicitly present |
-| ⚠️ **Improved risk assessments** | Context-aware risk classification beyond keyword matching |
+| ⚠️ **Improved risk assessments** | LLM evaluates risk with rule-based hints as context |
 
 ### AI Backend
 
@@ -305,13 +298,7 @@ from pathlib import Path
 from agentbridge.generator import AgentKitGenerator
 from agentbridge.agent import AIGenerator, AgentRunner
 
-# Deterministic generation (no API key needed)
-kit = AgentKitGenerator().generate(
-    [Path("examples/writing_system")],
-    Path("build/agent-kit"),
-)
-
-# AI-powered generation (API key required)
+# Generate with default provider (Anthropic Claude)
 ai = AIGenerator(api_key="sk-ant-...")
 kit = AgentKitGenerator(ai_generator=ai).generate(
     [Path("examples/writing_system")],
@@ -345,7 +332,7 @@ asyncio.run(main())
 | 🔴 `destructive` | **Required** | DELETE, remove, destroy, drop, cancel |
 | 🟠 `external_side_effect` | **Required** | publish, send, email, pay, deploy, export |
 
-The safety model is applied consistently across both deterministic and AI-generated outputs. AI-generated tools are always validated against the same guardrails.
+The safety model is applied consistently. Rule-based risk classification provides initial context, and the LLM may override when justified.
 
 ---
 
@@ -354,9 +341,9 @@ The safety model is applied consistently across both deterministic and AI-genera
 ```text
 ┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
 │  Discovery   │────▶│  Generator   │────▶│  Agent Kit      │
-│  (schemas,   │     │  (determin-  │     │  (tools, skills,│
-│   routes,    │     │   istic + AI)│     │   prompts,      │
-│   SQL)       │     │              │     │   guardrails)   │
+│  (schemas,   │     │  (LLM-driven │     │  (tools, skills,│
+│   routes,    │     │   + rules as │     │   prompts,      │
+│   SQL)       │     │   context)   │     │   guardrails)   │
 └─────────────┘     └──────┬───────┘     └────────┬────────┘
                            │                      │
                     ┌──────▼───────┐       ┌──────▼────────┐
@@ -453,7 +440,7 @@ Until the package is published on PyPI, users can install it in these ways:
 pip install -e .
 
 # Install from GitHub repository
-pip install git+https://github.com/your-username/AgentBridge.git
+pip install git+ssh://git@github.com/jastfkjg/AgentBridge.git
 
 # Install from a local wheel
 pip install dist/agentbridge-0.2.0-py3-none-any.whl
