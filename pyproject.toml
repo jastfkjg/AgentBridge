@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "agentbridge"
+name = "agbr"
 version = "0.2.0"
 description = "Generate Agent Integration Kits for existing systems with AI-powered dynamic generation via Claude Agent SDK."
 readme = "README.md"

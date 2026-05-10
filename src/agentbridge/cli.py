@@ -47,7 +47,7 @@ def _resolve_ai_generator(args: argparse.Namespace):
     except ImportError as exc:
         print(
             "agentbridge: AI generation requires either 'claude-agent-sdk' or 'anthropic' package.\n"
-            "Install with: pip install agentbridge[agent] (recommended) or pip install agentbridge[ai]",
+            "Install with: pip install agbr[agent] (recommended) or pip install agbr[ai]",
             file=sys.stderr,
         )
         raise SystemExit(1) from exc
@@ -64,7 +64,7 @@ async def _run_chat(args: argparse.Namespace) -> int:
     except ImportError as exc:
         print(
             "agentbridge: Agent chat requires the 'claude-agent-sdk' package.\n"
-            "Install with: pip install agentbridge[agent]",
+            "Install with: pip install agbr[agent]",
             file=sys.stderr,
         )
         raise SystemExit(1) from exc

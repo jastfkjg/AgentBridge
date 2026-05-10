@@ -53,8 +53,8 @@ class AIGenerator:
         except ImportError:
             raise ImportError(
                 "AI generation requires either 'claude-agent-sdk' or 'anthropic' package. "
-                "Install with: pip install agentbridge[agent] (recommended) "
-                "or pip install agentbridge[ai]"
+                "Install with: pip install agbr[agent] (recommended) "
+                "or pip install agbr[ai]"
             )
 
     def enhance_tools(self, capabilities: list[Capability]) -> dict[str, dict[str, Any]]:

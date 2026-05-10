@@ -91,7 +91,7 @@ Deterministic generator runs on Python standard library only; AI features are op
 ### Installation
 
 ```bash
-pip install agentbridge
+pip install agbr
 ```
 
 <details>
@@ -99,13 +99,13 @@ pip install agentbridge
 
 ```bash
 # AI-powered generation + agent sessions (recommended)
-pip install agentbridge[agent]
+pip install "agbr[agent]"
 
 # Lightweight AI generation (no Claude Agent SDK)
-pip install agentbridge[ai]
+pip install "agbr[ai]"
 
 # Everything
-pip install agentbridge[all]
+pip install "agbr[all]"
 
 # Install from source (for development)
 git clone https://github.com/your-username/AgentBridge.git
@@ -384,7 +384,7 @@ The safety model is applied consistently across both deterministic and AI-genera
 ## 📦 Publishing & Installation
 
 <details>
-<summary>🔧 How does `pip install agentbridge` work?</summary>
+<summary>🔧 How does `pip install "agbr"` work?</summary>
 
 AgentBridge is packaged as a standard Python package using **`pyproject.toml`** + **setuptools**. Here's the mechanism:
 
@@ -407,10 +407,10 @@ AgentBridge/
 
 ```toml
 [project]
-name = "agentbridge"                    # pip install agentbridge
+name = "agbr"                    # pip install agbr
 version = "0.2.0"
 
-[project.optional-dependencies]         # pip install agentbridge[agent]
+[project.optional-dependencies]         # pip install "agbr[agent]"
 agent = ["claude-agent-sdk>=0.1.0"]
 ai = ["anthropic>=0.30.0"]
 
@@ -442,7 +442,7 @@ twine upload --repository testpypi dist/*
 twine upload dist/*
 ```
 
-After publishing, anyone can run `pip install agentbridge`.
+After publishing, anyone can run `pip install "agbr"`.
 
 ### 5. Installing Without PyPI
 
