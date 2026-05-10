@@ -33,7 +33,7 @@ class AgentKitGenerator:
         capabilities = self.discoverer.discover(input_paths)
         kit_name = name or infer_kit_name(input_paths)
 
-        ai_result = self.ai_generator.generate_all(capabilities, kit_name)
+        ai_result = self.ai_generator.generate_all(capabilities, kit_name, input_paths=input_paths)
         capabilities = ai_result["enhanced_capabilities"]
 
         kit = IntegrationKit(name=kit_name, capabilities=capabilities, output_dir=str(output_dir))
