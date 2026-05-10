@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Generate Agent Integration Kits for existing systems with AI-powered dynamic generation via Claude Agent SDK."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "AgentBridge contributors" }]
 keywords = ["agents", "mcp", "tools", "ai-assistant", "openapi", "graphql", "claude", "anthropic", "claude-agent-sdk"]
 classifiers = [
