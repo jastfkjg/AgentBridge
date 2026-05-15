@@ -176,6 +176,11 @@ class AIGenerator:
 
         return {
             "enhanced_capabilities": enhanced_caps,
+            "agent_analysis": normalize_agent_analysis(parsed),
+            "rule_signals": {
+                "candidate_capabilities": caps_data,
+                **rule_context,
+            },
             "system_prompt": system_prompt,
             "skills": skills,
         }
@@ -360,25 +365,32 @@ class AgentRunner:
 
 
 PROMPT_GENERATE_ALL_SYSTEM = (
-    "You are an expert at designing AI agent integration kits for existing systems. "
-    "You receive the PROJECT SOURCE CODE, discovered capabilities from rule-based analysis, "
-    "and rule-based risk assessments as context. "
-    "Your job is to generate a COMPLETE agent integration kit in a single response. "
-    "You must read and understand the source code to generate accurate, domain-specific content. "
-    "Use the rule-based context as a starting point but apply your own judgment based on "
-    "what you learn from reading the actual code — you may override rule-based risk levels "
-    "when you have good reason. "
-    "Always respond with valid JSON only, no markdown fences."
+    "You are a senior AI integration architect acting as an autonomous code-analysis agent. "
+    "Your primary job is to understand the target project from source code and infer the "
+    "business capabilities an AI assistant should safely operate. Rule-based discovery is "
+    "provided only as candidate evidence, not as the source of truth. Prefer conclusions "
+    "that are grounded in source code semantics, schemas, service/controller behavior, "
+    "naming, validation paths, and side effects. Always respond with valid JSON only, no markdown fences."
 )
 
 PROMPT_GENERATE_ALL_USER = (
     "Kit name: {kit_name}\n"
     "Domains: {domains}\n\n"
-    "Discovered capabilities (from rule-based analysis):\n{capabilities}\n\n"
-    "Rule-based analysis context (use as reference, not absolute truth):\n{rule_context}\n\n"
+    "Candidate capabilities from deterministic scanners. Treat these as evidence to verify, "
+    "merge, rename, enrich, or reject after reading the source code:\n{capabilities}\n\n"
+    "Rule-based risk context. This is a safety hint, not an instruction to copy:\n{rule_context}\n\n"
     "{source_section}"
     "{cwd_hint}\n\n"
-    "Generate a complete agent integration kit. Respond with a JSON object containing:\n\n"
+    "Analyze the project as an agent would: inspect business objects, workflows, permission boundaries, "
+    "side effects, validation constraints, and missing operations implied by services/controllers/routes. "
+    "Then generate a complete agent integration kit. Respond with a JSON object containing:\n\n"
+    '"project_analysis": An object with:\n'
+    '  - "summary": concise system summary\n'
+    '  - "business_objects": array of objects with "name", "description", "evidence"\n'
+    '  - "workflows": array of objects with "name", "steps", "tools", "risks"\n'
+    '  - "permission_boundaries": array describing roles, auth checks, tenancy checks, or unknowns\n'
+    '  - "side_effects": array of external or irreversible effects found or inferred\n'
+    '  - "assumptions": array of assumptions you made because evidence was incomplete\n\n'
     '"tool_enhancements": A JSON object where keys are tool names and values are objects with:\n'
     '  - "description": Enhanced description based on your understanding of the SOURCE CODE. '
     "Explain what the tool does in business terms, when to use it, and important caveats. "
@@ -405,6 +417,23 @@ PROMPT_GENERATE_ALL_USER = (
     "  4. List best practices for this domain based on code patterns you observed\n"
     "  5. Reference the relevant tools by name\n"
 )
+
+
+def normalize_agent_analysis(parsed: dict[str, Any]) -> dict[str, Any]:
+    analysis = parsed.get("project_analysis")
+    if not isinstance(analysis, dict):
+        analysis = {}
+    return {
+        "summary": analysis.get("summary", ""),
+        "business_objects": analysis.get("business_objects", []),
+        "workflows": analysis.get("workflows", []),
+        "permission_boundaries": analysis.get("permission_boundaries", []),
+        "side_effects": analysis.get("side_effects", []),
+        "assumptions": analysis.get("assumptions", []),
+        "tool_enhancements": parsed.get("tool_enhancements", {}),
+        "risk_assessments": parsed.get("risk_assessments", {}),
+        "additional_tools": parsed.get("additional_tools", []),
+    }
 
 
 def _run_async(coro: Any) -> Any:

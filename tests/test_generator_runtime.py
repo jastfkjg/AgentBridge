@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
+import json
 
 from agentbridge.agent import AIGenerator
 from agentbridge.discovery import CapabilityDiscoverer
@@ -46,6 +47,18 @@ def _make_mock_generator() -> AIGenerator:
 
     gen.generate_all.return_value = {
         "enhanced_capabilities": raw_caps,
+        "rule_signals": {
+            "candidate_capabilities": [cap.to_dict() for cap in raw_caps],
+            "risk_policy": {},
+        },
+        "agent_analysis": {
+            "summary": "Mock writing system analysis.",
+            "business_objects": [{"name": "chapter", "description": "Story chapter", "evidence": ["openapi"]}],
+            "workflows": [{"name": "write chapter", "steps": ["create", "rewrite"], "tools": ["create_chapter"], "risks": []}],
+            "permission_boundaries": [],
+            "side_effects": [],
+            "assumptions": [],
+        },
         "system_prompt": "# Mock System Prompt\n\nFor testing only.",
         "skills": skills,
     }
@@ -63,9 +76,15 @@ class GeneratorRuntimeTests(unittest.TestCase):
             self.assertGreaterEqual(len(kit.capabilities), 8)
             self.assertTrue((output / "manifest.json").exists())
             self.assertTrue((output / "tools" / "mcp_tools.json").exists())
+            self.assertTrue((output / "analysis" / "rule_signals.json").exists())
+            self.assertTrue((output / "analysis" / "agent_analysis.json").exists())
+            self.assertTrue((output / "spec" / "kit-protocol.md").exists())
             self.assertTrue((output / "prompts" / "system.md").exists())
             self.assertTrue((output / "guardrails" / "permissions.json").exists())
             self.assertTrue((output / "tests" / "test_generated_tools.py").exists())
+            manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["protocol"], "agentbridge-kit/v1")
+            self.assertEqual(manifest["outputs"]["ai_analysis"], "analysis/agent_analysis.json")
 
     def test_dry_run_blocks_unconfirmed_destructive_action(self):
         with tempfile.TemporaryDirectory() as tmp:

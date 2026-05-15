@@ -8,7 +8,7 @@ from typing import Any
 from agentbridge.agent import AIGenerator
 from agentbridge.discovery import CapabilityDiscoverer
 from agentbridge.io import write_json, write_text
-from agentbridge.models import Capability, IntegrationKit
+from agentbridge.models import Capability, IntegrationKit, KIT_PROTOCOL_VERSION
 from agentbridge.naming import humanize
 from agentbridge.policy import risk_reason
 
@@ -30,10 +30,10 @@ class AgentKitGenerator:
         self.discoverer = discoverer or CapabilityDiscoverer()
 
     def generate(self, input_paths: list[Path], output_dir: Path, name: str | None = None) -> IntegrationKit:
-        capabilities = self.discoverer.discover(input_paths)
+        rule_capabilities = self.discoverer.discover(input_paths)
         kit_name = name or infer_kit_name(input_paths)
 
-        ai_result = self.ai_generator.generate_all(capabilities, kit_name, input_paths=input_paths)
+        ai_result = self.ai_generator.generate_all(rule_capabilities, kit_name, input_paths=input_paths)
         capabilities = ai_result["enhanced_capabilities"]
 
         kit = IntegrationKit(name=kit_name, capabilities=capabilities, output_dir=str(output_dir))
@@ -41,6 +41,11 @@ class AgentKitGenerator:
 
         write_json(output_dir / "manifest.json", kit.to_manifest())
         write_json(output_dir / "capabilities.json", [cap.to_dict() for cap in capabilities])
+        write_json(output_dir / "analysis" / "rule_signals.json", ai_result.get("rule_signals", {
+            "candidate_capabilities": [cap.to_dict() for cap in rule_capabilities],
+        }))
+        write_json(output_dir / "analysis" / "agent_analysis.json", ai_result.get("agent_analysis", {}))
+        write_text(output_dir / "spec" / "kit-protocol.md", build_kit_protocol_doc())
         write_json(output_dir / "tools" / "mcp_tools.json", build_mcp_tools(capabilities))
         write_json(output_dir / "tools" / "openai_tools.json", build_openai_tools(capabilities))
         write_json(output_dir / "tools" / "claude_tools.json", build_claude_tools(capabilities))
@@ -61,6 +66,41 @@ class AgentKitGenerator:
                 write_text(output_dir / "skills" / f"{domain}.md", content)
 
         return kit
+
+
+def build_kit_protocol_doc() -> str:
+    return f"""# AgentBridge Kit Protocol
+
+Protocol: `{KIT_PROTOCOL_VERSION}`
+
+An AgentBridge kit is a stable, versioned directory that can be consumed by MCP servers, Claude Agent SDK, OpenAI tool callers, Vercel AI SDK applications, CI checks, and local dry-run tools.
+
+## Required Files
+
+- `manifest.json`: protocol version, kit metadata, risk summary, and output paths.
+- `capabilities.json`: normalized business capabilities after AI agent analysis and enhancement.
+- `analysis/rule_signals.json`: deterministic scanner output used as candidate evidence.
+- `analysis/agent_analysis.json`: AI agent project analysis, assumptions, workflows, side effects, and risk reasoning.
+- `tools/mcp_tools.json`: MCP tool definitions.
+- `tools/openai_tools.json`: OpenAI function/tool definitions.
+- `tools/claude_tools.json`: Claude tool definitions.
+- `tools/vercel_ai_tools.ts`: Vercel AI SDK tool stubs.
+- `skills/*.md`: domain workflows for agent behavior.
+- `prompts/system.md`: system prompt for the integrated assistant.
+- `resources/schema.json`: normalized resource/action schema.
+- `guardrails/permissions.json`: risk policy and confirmation rules.
+- `tests/tool_invocation_tests.json`: generated invocation contracts.
+- `tests/test_generated_tools.py`: executable kit contract tests.
+- `dry_run_plan.json`: no-side-effect execution plan for each tool.
+
+## Compatibility
+
+Consumers should read `manifest.json` first, verify `protocol`, then resolve files through `outputs`. New optional files may be added without breaking this version. Required file names are stable for `agentbridge-kit/v1`.
+
+## Safety Contract
+
+Generated tools must not execute destructive or external-side-effect operations unless `guardrails/permissions.json` marks the call as confirmed by a human. Dry-run consumers must return planned calls only.
+"""
 
 
 def build_mcp_tools(capabilities: list[Capability]) -> dict[str, Any]:

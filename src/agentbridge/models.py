@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 RiskLevel = Literal["read", "write", "destructive", "external_side_effect"]
+KIT_PROTOCOL_VERSION = "agentbridge-kit/v1"
 
 
 @dataclass(frozen=True)
@@ -79,13 +80,18 @@ class IntegrationKit:
         for cap in self.capabilities:
             risks[cap.risk] = risks.get(cap.risk, 0) + 1
         return {
+            "protocol": KIT_PROTOCOL_VERSION,
             "name": self.name,
             "version": "0.1.0",
             "capability_count": len(self.capabilities),
             "domains": domains,
             "risk_summary": risks,
             "outputs": {
+                "kit_root": ".",
                 "capabilities": "capabilities.json",
+                "rule_signals": "analysis/rule_signals.json",
+                "ai_analysis": "analysis/agent_analysis.json",
+                "kit_protocol": "spec/kit-protocol.md",
                 "mcp_tools": "tools/mcp_tools.json",
                 "openai_tools": "tools/openai_tools.json",
                 "claude_tools": "tools/claude_tools.json",
@@ -98,4 +104,3 @@ class IntegrationKit:
                 "dry_run_plan": "dry_run_plan.json",
             },
         }
-

@@ -14,20 +14,22 @@
 
 ---
 
-AgentBridge discovers capabilities from your API schemas, database schemas, and source routes, then generates a complete **Agent Integration Kit** that works with MCP, Claude, OpenAI, and Vercel AI SDK out of the box.
+AgentBridge uses an AI analysis agent to understand your project code, then generates a complete **Agent Integration Kit** that works with MCP, Claude, OpenAI, and Vercel AI SDK out of the box.
 
-With built-in **Claude Agent SDK** support and **AI-powered dynamic generation**, AgentBridge goes beyond static templates — it uses AI to craft richer tool definitions, domain-specific skills, and intelligent prompts tailored to your system.
+Deterministic scanners still collect candidate evidence from OpenAPI, GraphQL, SQL, and source routes, but they are not the source of truth. The AI agent reads the project context, reasons about business objects and side effects, then creates tools, skills, prompts, guardrails, tests, and protocol metadata.
 
 ## 📑 Table of Contents
 
 - [✨ Features](#-features)
 - [🚀 Quick Start](#-quick-start)
 - [📖 CLI Reference](#-cli-reference)
-- [🔍 What AgentBridge Discovers](#-what-agentbridge-discovers)
-- [📁 Generated Kit Layout](#-generated-kit-layout)
-- [🤖 AI-Powered Generation](#-ai-powered-generation)
+- [🔍 How AgentBridge Analyzes Projects](#-how-agentbridge-analyzes-projects)
+- [🔍 Candidate Evidence Sources](#-candidate-evidence-sources)
+- [📁 Stable Kit Protocol](#-stable-kit-protocol)
+- [🤖 AI Agent Generation](#-ai-agent-generation)
 - [🛡️ Safety Model](#-safety-model)
 - [🏗️ Architecture](#-architecture)
+- [📚 Documentation](#-documentation)
 - [🧩 Extending AgentBridge](#-extending-agentbridge)
 - [📦 Publishing & Installation](#-publishing--installation)
 - [🤝 Contributing](#-contributing)
@@ -40,8 +42,8 @@ With built-in **Claude Agent SDK** support and **AI-powered dynamic generation**
 <table>
 <tr><td width="50%">
 
-🔍 **Auto-discovery**
-Extracts capabilities from OpenAPI, GraphQL, SQL, and source code routes (Python/Flask/FastAPI, JS/Express, Java/Spring)
+🔍 **AI-first code analysis**
+Uses an AI agent to interpret business objects, workflows, permissions, and side effects from project code
 
 </td><td width="50%">
 
@@ -78,8 +80,8 @@ Supports DeepSeek, OpenRouter, and any Anthropic-compatible endpoint
 
 </td><td>
 
-🪶 **Rules + LLM Combined**
-Rule-based analysis (risk keywords, HTTP verbs) feeds into LLM as context for smarter generation
+🪶 **Rules as evidence**
+OpenAPI, GraphQL, SQL, and route scanners provide candidate signals for the AI agent to verify or override
 
 </td></tr>
 </table>
@@ -171,7 +173,7 @@ PYTHONPATH=src python -m unittest discover -s tests
 | Command | Description |
 |---|---|
 | `agentbridge discover <paths>` | Discover and print capabilities as JSON |
-| `agentbridge generate <paths> -o <dir>` | Generate an Agent Integration Kit |
+| `agentbridge generate <paths> -o <dir>` | Analyze code with AI and generate an Agent Integration Kit |
 | `agentbridge dry-run <kit> <tool>` | Dry-run a tool invocation |
 | `agentbridge chat <kit>` | Start an interactive AI agent session |
 
@@ -220,7 +222,23 @@ agentbridge chat build/agent-kit --api-key "sk-..." --base-url "https://api.deep
 
 ---
 
-## 🔍 What AgentBridge Discovers
+## 🔍 How AgentBridge Analyzes Projects
+
+AgentBridge is designed so the AI agent performs the main project understanding step. Rule-based discovery is intentionally conservative and acts as evidence collection.
+
+| Stage | Role |
+|---|---|
+| Candidate scanning | Extract OpenAPI operations, GraphQL fields, SQL tables, and route handlers |
+| AI project analysis | Infer business objects, workflows, permission boundaries, side effects, missing operations, and assumptions |
+| Capability normalization | Convert the AI-enhanced analysis into stable tool-ready capabilities |
+| Kit generation | Emit tools, skills, prompts, resource schemas, guardrails, dry-run plans, and tests |
+
+The generated kit preserves both layers:
+
+- `analysis/rule_signals.json`: deterministic candidate evidence
+- `analysis/agent_analysis.json`: AI agent project analysis and reasoning
+
+## 🔍 Candidate Evidence Sources
 
 | Source Type | Formats |
 |---|---|
@@ -243,12 +261,19 @@ All sources are normalized into a common capability model with:
 
 ---
 
-## 📁 Generated Kit Layout
+## 📁 Stable Kit Protocol
+
+Current protocol: `agentbridge-kit/v1`. See [docs/kit-protocol.md](docs/kit-protocol.md).
 
 ```text
 agent-kit/
 ├── manifest.json                  # Kit metadata and summary
-├── capabilities.json              # All discovered capabilities
+├── capabilities.json              # AI-enhanced normalized capabilities
+├── analysis/
+│   ├── rule_signals.json          # Scanner evidence used as AI context
+│   └── agent_analysis.json        # AI project analysis and risk reasoning
+├── spec/
+│   └── kit-protocol.md            # Protocol contract copied into the kit
 ├── tools/
 │   ├── mcp_tools.json             # MCP tool definitions
 │   ├── openai_tools.json          # OpenAI function calling format
@@ -270,12 +295,13 @@ agent-kit/
 
 ---
 
-## 🤖 AI-Powered Generation
+## 🤖 AI Agent Generation
 
-AgentBridge uses LLM to generate all content — tool descriptions, skills, system prompts, risk assessments, and inferred tools. Rule-based analysis (keyword matching, HTTP verb classification) is fed into the LLM as context, not used directly.
+AgentBridge uses an AI analysis agent to generate the semantic parts of the kit: project analysis, tool descriptions, skills, system prompts, risk assessments, and inferred tools. Rule-based analysis is passed to the agent as candidate evidence and safety hints, not copied directly as final output.
 
 | What | Description |
 |---|---|
+| 🧭 **Project analysis** | Business objects, workflows, permission boundaries, side effects, and assumptions |
 | 📝 **Enhanced tool descriptions** | Context-aware descriptions that capture business semantics |
 | 🎯 **Domain-specific skills** | Workflow prompts tailored to your domain with best practices |
 | 🧠 **Intelligent system prompts** | Prompts that understand resource relationships and suggest safe sequences |
@@ -340,19 +366,27 @@ The safety model is applied consistently. Rule-based risk classification provide
 
 ```text
 ┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  Discovery   │────▶│  Generator   │────▶│  Agent Kit      │
-│  (schemas,   │     │  (LLM-driven │     │  (tools, skills,│
-│   routes,    │     │   + rules as │     │   prompts,      │
-│   SQL)       │     │   context)   │     │   guardrails)   │
-└─────────────┘     └──────┬───────┘     └────────┬────────┘
-                           │                      │
-                    ┌──────▼───────┐       ┌──────▼────────┐
-                    │  AI Generator│       │  Agent Runner │
-                    │  (Claude SDK │       │  (Claude SDK  │
-                    │   / Anthropic│       │   Client +    │
-                    │   API)       │       │   MCP Tools)  │
-                    └──────────────┘       └───────────────┘
+│ Rule Signals │────▶│ AI Analysis │────▶│ Kit Generator   │
+│ (schemas,    │     │ Agent       │     │ (protocol v1)   │
+│  routes, SQL)│     │             │     │                 │
+└─────────────┘     └──────┬──────┘     └────────┬────────┘
+                           │                     │
+                    ┌──────▼──────┐       ┌──────▼────────┐
+                    │ Capabilities│       │ Agent Runtime │
+                    │ Skills      │       │ Dry-run +     │
+                    │ Guardrails  │       │ Guardrails    │
+                    └─────────────┘       └───────────────┘
 ```
+
+---
+
+## 📚 Documentation
+
+- [Architecture](docs/architecture.md)
+- [Kit protocol](docs/kit-protocol.md)
+- [中文 README](README.zh-CN.md)
+- [中文架构说明](docs/architecture.zh-CN.md)
+- [中文套件协议](docs/kit-protocol.zh-CN.md)
 
 ---
 
