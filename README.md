@@ -150,8 +150,23 @@ agentbridge generate examples/writing_system --output build/kit \
 ### Generate an Agent Integration Kit
 
 ```bash
-# Requires ANTHROPIC_API_KEY (set via env var or --api-key flag)
+# Uses AI enhancement when an API key is configured; otherwise deterministic generation
 agentbridge generate examples/writing_system --output .agentbridge/writing-kit
+```
+
+### Run an MCP Server from OpenAPI
+
+```bash
+agentbridge generate openapi.json --output .agentbridge/openapi-kit --no-ai
+
+# Dry-run by default, with no target-system side effects
+agentbridge serve .agentbridge/openapi-kit
+
+# Execute real HTTP calls against the target system
+agentbridge serve .agentbridge/openapi-kit \
+  --base-url http://localhost:8080 \
+  --bearer-token "$API_TOKEN" \
+  --execute
 ```
 
 ### Run as an Agent
@@ -173,7 +188,8 @@ PYTHONPATH=src python -m unittest discover -s tests
 | Command | Description |
 |---|---|
 | `agentbridge discover <paths>` | Discover and print capabilities as JSON |
-| `agentbridge generate <paths> -o <dir>` | Analyze code with AI and generate an Agent Integration Kit |
+| `agentbridge generate <paths> -o <dir>` | Generate an Agent Integration Kit; uses AI enhancement when configured |
+| `agentbridge serve <kit>` | Run a generated kit as a stdio MCP Server |
 | `agentbridge dry-run <kit> <tool>` | Dry-run a tool invocation |
 | `agentbridge chat <kit>` | Start an interactive AI agent session |
 
@@ -190,6 +206,9 @@ agentbridge discover examples/writing_system
 
 ```bash
 agentbridge generate examples/writing_system --output build/agent-kit
+
+# No LLM, useful for the OpenAPI-to-MCP Server MVP
+agentbridge generate examples/writing_system/openapi.json --output build/openapi-kit --no-ai
 
 # With custom name
 agentbridge generate examples/writing_system --output build/agent-kit --name my-kit
@@ -208,6 +227,20 @@ agentbridge dry-run build/agent-kit create_chapter --args '{"project_id":"p1","t
 # High-risk operation (requires confirmation)
 agentbridge dry-run build/agent-kit delete_character \
   --args '{"project_id":"p1","character_id":"c1"}' --confirmed
+```
+
+### `serve`
+
+```bash
+# stdio MCP Server, dry-run by default
+agentbridge serve build/openapi-kit
+
+# Execute real HTTP calls against the target system
+agentbridge serve build/openapi-kit \
+  --base-url http://localhost:8080 \
+  --header "X-Tenant=demo" \
+  --bearer-token "$API_TOKEN" \
+  --execute
 ```
 
 ### `chat`
@@ -384,9 +417,12 @@ The safety model is applied consistently. Rule-based risk classification provide
 
 - [Architecture](docs/architecture.md)
 - [Kit protocol](docs/kit-protocol.md)
+- [OpenAPI to MCP Server](docs/mcp-server.md)
+- [TODO / Roadmap](TODO.md)
 - [中文 README](README.zh-CN.md)
 - [中文架构说明](docs/architecture.zh-CN.md)
 - [中文套件协议](docs/kit-protocol.zh-CN.md)
+- [中文 OpenAPI 到 MCP Server](docs/mcp-server.zh-CN.md)
 
 ---
 

@@ -150,8 +150,23 @@ agentbridge generate examples/writing_system --output build/kit \
 ### 生成 Agent 集成套件
 
 ```bash
-# 需要 ANTHROPIC_API_KEY（通过环境变量或 --api-key 参数设置）
+# 有 API Key 时自动使用 AI 增强；无 API Key 时使用确定性生成
 agentbridge generate examples/writing_system --output .agentbridge/writing-kit
+```
+
+### OpenAPI 一键运行 MCP Server
+
+```bash
+agentbridge generate openapi.json --output .agentbridge/openapi-kit --no-ai
+
+# 默认 dry-run，不触发目标系统副作用
+agentbridge serve .agentbridge/openapi-kit
+
+# 真实调用目标 HTTP 系统
+agentbridge serve .agentbridge/openapi-kit \
+  --base-url http://localhost:8080 \
+  --bearer-token "$API_TOKEN" \
+  --execute
 ```
 
 ### 作为 Agent 运行
@@ -173,7 +188,8 @@ PYTHONPATH=src python -m unittest discover -s tests
 | 命令 | 说明 |
 |---|---|
 | `agentbridge discover <paths>` | 发现并打印能力为 JSON |
-| `agentbridge generate <paths> -o <dir>` | 用 AI 分析代码并生成 Agent 集成套件 |
+| `agentbridge generate <paths> -o <dir>` | 生成 Agent 集成套件；有 API Key 时使用 AI 增强 |
+| `agentbridge serve <kit>` | 将生成套件作为 stdio MCP Server 运行 |
 | `agentbridge dry-run <kit> <tool>` | Dry-run 工具调用 |
 | `agentbridge chat <kit>` | 启动交互式 AI Agent 会话 |
 
@@ -190,6 +206,9 @@ agentbridge discover examples/writing_system
 
 ```bash
 agentbridge generate examples/writing_system --output build/agent-kit
+
+# 不使用 LLM，适合 OpenAPI 到 MCP Server 的快速 MVP
+agentbridge generate examples/writing_system/openapi.json --output build/openapi-kit --no-ai
 
 # 自定义名称
 agentbridge generate examples/writing_system --output build/agent-kit --name my-kit
@@ -208,6 +227,20 @@ agentbridge dry-run build/agent-kit create_chapter --args '{"project_id":"p1","t
 # 高风险操作（需要确认）
 agentbridge dry-run build/agent-kit delete_character \
   --args '{"project_id":"p1","character_id":"c1"}' --confirmed
+```
+
+### `serve`
+
+```bash
+# stdio MCP Server，默认只 dry-run
+agentbridge serve build/openapi-kit
+
+# 真实调用目标 HTTP 系统
+agentbridge serve build/openapi-kit \
+  --base-url http://localhost:8080 \
+  --header "X-Tenant=demo" \
+  --bearer-token "$API_TOKEN" \
+  --execute
 ```
 
 ### `chat`
@@ -384,9 +417,12 @@ asyncio.run(main())
 
 - [Architecture](docs/architecture.md)
 - [Kit protocol](docs/kit-protocol.md)
+- [OpenAPI to MCP Server](docs/mcp-server.md)
+- [TODO / Roadmap](TODO.md)
 - [English README](README.md)
 - [中文架构说明](docs/architecture.zh-CN.md)
 - [中文套件协议](docs/kit-protocol.zh-CN.md)
+- [中文 OpenAPI 到 MCP Server](docs/mcp-server.zh-CN.md)
 
 ---
 
