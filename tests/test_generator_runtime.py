@@ -1,12 +1,15 @@
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import json
 
+from agentbridge import cli
 from agentbridge.agent import AIGenerator
 from agentbridge.discovery import CapabilityDiscoverer
-from agentbridge.generator import AgentKitGenerator
+from agentbridge.generator import AgentKitGenerator, GenerationBoundaryError, validate_output_boundary
 from agentbridge.runtime import dry_run
 
 
@@ -128,6 +131,22 @@ class GeneratorRuntimeTests(unittest.TestCase):
             output = Path(tmp) / "kit"
             AgentKitGenerator(ai_generator=gen).generate([EXAMPLE], output, name="writing-kit")
             gen.generate_all.assert_called_once()
+
+    def test_output_boundary_blocks_regular_project_subdirectory(self):
+        with self.assertRaises(GenerationBoundaryError):
+            validate_output_boundary([EXAMPLE], EXAMPLE / "generated-kit")
+
+    def test_output_boundary_allows_agentbridge_directory(self):
+        validate_output_boundary([EXAMPLE], EXAMPLE / ".agentbridge" / "writing-kit")
+
+    def test_cli_requires_ai_for_project_directory_without_no_ai(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stderr = StringIO()
+            with patch.dict("os.environ", {}, clear=True), redirect_stderr(stderr):
+                code = cli.main(["generate", str(EXAMPLE), "--output", str(Path(tmp) / "kit")])
+
+            self.assertEqual(code, 1)
+            self.assertIn("Project directory analysis requires an AI backend", stderr.getvalue())
 
 
 if __name__ == "__main__":

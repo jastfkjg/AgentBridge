@@ -56,6 +56,10 @@ agent-kit/
 
 `agentbridge chat <kit>` 和 `agentbridge web <kit>` 消费同一套 kit 文件和运行时 guardrails。聊天记忆保存最近对话和待确认操作，不属于稳定协议必需文件，默认位于 `<kit>/.agentbridge-chat-memory.json`。
 
+## 目标项目边界
+
+kit 是唯一生成产物。AgentBridge 的生成器和消费者在发现或生成阶段不得写入目标项目。输入项目只作为只读证据，输出产物只位于用户选择的 kit 目录。
+
 ## 兼容性
 
 消费者必须校验 `manifest.json` 中的 `protocol` 字段。小版本可以增加可选文件，但 `agentbridge-kit/v1` 的必需路径应保持稳定。

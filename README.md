@@ -119,10 +119,10 @@ pip install -e ".[all]"
 
 ### Configure LLM Provider
 
-AgentBridge requires an LLM API key for all generation. By default it uses Anthropic's Claude, but you can configure any Anthropic-compatible provider:
+AgentBridge relies on an AI backend for existing-project understanding. Deterministic scanners and regex/rule signals are used as evidence for the AI agent, not as the final project model. The schema-only OpenAPI-to-MCP path can run with `--no-ai`; directory-level project analysis should use Claude Agent SDK or another Anthropic-compatible provider.
 
 ```bash
-# Required
+# Required for project directory analysis
 export ANTHROPIC_API_KEY="sk-ant-..."
 
 # Optional: Custom API endpoint
@@ -150,7 +150,7 @@ agentbridge generate examples/writing_system --output build/kit \
 ### Generate an Agent Integration Kit
 
 ```bash
-# Uses AI enhancement when an API key is configured; otherwise deterministic generation
+# Project directory analysis uses AI. Generated files are written only to --output.
 agentbridge generate examples/writing_system --output .agentbridge/writing-kit
 ```
 
@@ -211,7 +211,7 @@ agentbridge discover examples/writing_system
 ```bash
 agentbridge generate examples/writing_system --output build/agent-kit
 
-# No LLM, useful for the OpenAPI-to-MCP Server MVP
+# No LLM, useful for schema-only OpenAPI-to-MCP Server kits
 agentbridge generate examples/writing_system/openapi.json --output build/openapi-kit --no-ai
 
 # With custom name
@@ -289,6 +289,8 @@ AgentBridge is designed so the AI agent performs the main project understanding 
 | AI project analysis | Infer business objects, workflows, permission boundaries, side effects, missing operations, and assumptions |
 | Capability normalization | Convert the AI-enhanced analysis into stable tool-ready capabilities |
 | Kit generation | Emit tools, skills, prompts, resource schemas, guardrails, dry-run plans, and tests |
+
+AgentBridge does not modify the target project during discovery or generation. All generated artifacts are written under the caller-provided output directory, preferably outside the project or under a dedicated ignored directory such as `.agentbridge/`.
 
 The generated kit preserves both layers:
 

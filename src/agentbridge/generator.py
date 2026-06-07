@@ -15,6 +15,10 @@ from agentbridge.policy import risk_reason
 logger = logging.getLogger(__name__)
 
 
+class GenerationBoundaryError(ValueError):
+    pass
+
+
 class AgentKitGenerator:
     def __init__(
         self,
@@ -30,6 +34,7 @@ class AgentKitGenerator:
         self.discoverer = discoverer or CapabilityDiscoverer()
 
     def generate(self, input_paths: list[Path], output_dir: Path, name: str | None = None) -> IntegrationKit:
+        validate_output_boundary(input_paths, output_dir)
         rule_capabilities = self.discoverer.discover(input_paths)
         kit_name = name or infer_kit_name(input_paths)
 
@@ -100,7 +105,43 @@ Consumers should read `manifest.json` first, verify `protocol`, then resolve fil
 ## Safety Contract
 
 Generated tools must not execute destructive or external-side-effect operations unless `guardrails/permissions.json` marks the call as confirmed by a human. Dry-run consumers must return planned calls only.
+
+## Project Boundary
+
+AgentBridge must not modify the target project during discovery or generation. All generated artifacts are written under the caller-provided output directory. The output directory should be outside the scanned project unless it is an ignored integration directory such as `.agentbridge`.
 """
+
+
+def validate_output_boundary(input_paths: list[Path], output_dir: Path) -> None:
+    output = output_dir.resolve()
+    for input_path in input_paths:
+        target = input_path.resolve()
+        root = target.parent if target.is_file() else target
+        if output == root:
+            raise GenerationBoundaryError("Output directory must not be the target project root.")
+        if is_relative_to(output, root) and not is_allowed_project_output(output, root):
+            raise GenerationBoundaryError(
+                "Output directory is inside the target project. "
+                "Use a dedicated ignored directory such as <project>/.agentbridge/<kit> "
+                "or choose a path outside the project."
+            )
+
+
+def is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def is_allowed_project_output(output: Path, project_root: Path) -> bool:
+    try:
+        relative = output.relative_to(project_root)
+    except ValueError:
+        return False
+    parts = relative.parts
+    return bool(parts) and parts[0] in {".agentbridge", "agentbridge-kit"}
 
 
 def build_mcp_tools(capabilities: list[Capability]) -> dict[str, Any]:

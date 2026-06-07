@@ -56,6 +56,10 @@ agent-kit/
 
 `agentbridge chat <kit>` and `agentbridge web <kit>` consume the same kit files and runtime guardrails. Chat memory stores recent transcript and pending confirmations outside the stable protocol files, by default at `<kit>/.agentbridge-chat-memory.json`.
 
+## Target Project Boundary
+
+The kit is the only generated artifact. AgentBridge consumers and generators must not write into the target project during discovery or generation. Inputs are read-only evidence; outputs live under the user-selected kit directory.
+
 ## Compatibility
 
 Consumers must validate the `protocol` field in `manifest.json`. Minor versions may add optional files, but required paths should remain stable for `agentbridge-kit/v1`.

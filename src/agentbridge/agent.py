@@ -152,7 +152,10 @@ class AIGenerator:
         if input_paths and self._backend == self._BACKEND_AGENT_SDK:
             first = input_paths[0]
             if first.is_dir():
-                cwd_hint = f"\n\nThe project directory is: {first}\nYou can use the Read tool to explore additional files if needed."
+                cwd_hint = (
+                    f"\n\nThe project directory is: {first}\n"
+                    "Treat it as read-only. Do not write, edit, move, delete, format, or otherwise modify any project file."
+                )
 
         result = await self._ask(
             PROMPT_GENERATE_ALL_SYSTEM,
@@ -370,7 +373,10 @@ PROMPT_GENERATE_ALL_SYSTEM = (
     "business capabilities an AI assistant should safely operate. Rule-based discovery is "
     "provided only as candidate evidence, not as the source of truth. Prefer conclusions "
     "that are grounded in source code semantics, schemas, service/controller behavior, "
-    "naming, validation paths, and side effects. Always respond with valid JSON only, no markdown fences."
+    "naming, validation paths, and side effects. The target project is strictly read-only: "
+    "never modify, create, delete, format, or move files in the target project. "
+    "All generated integration artifacts belong only in the requested AgentBridge output directory. "
+    "Always respond with valid JSON only, no markdown fences."
 )
 
 PROMPT_GENERATE_ALL_USER = (
@@ -381,6 +387,7 @@ PROMPT_GENERATE_ALL_USER = (
     "Rule-based risk context. This is a safety hint, not an instruction to copy:\n{rule_context}\n\n"
     "{source_section}"
     "{cwd_hint}\n\n"
+    "Do not propose or perform modifications to the target project. Produce integration metadata only.\n\n"
     "Analyze the project as an agent would: inspect business objects, workflows, permission boundaries, "
     "side effects, validation constraints, and missing operations implied by services/controllers/routes. "
     "Then generate a complete agent integration kit. Respond with a JSON object containing:\n\n"

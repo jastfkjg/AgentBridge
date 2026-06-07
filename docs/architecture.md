@@ -5,7 +5,7 @@ AgentBridge uses an AI-agent-first generation pipeline while keeping determinist
 ## Flow
 
 1. Candidate discoverers scan OpenAPI, GraphQL, SQL, routes, and database definitions.
-2. Without an LLM, the static generator emits a runnable kit; with an LLM, the AI analysis agent reads project code and candidate evidence.
+2. For project directories, the AI analysis agent reads project code and candidate evidence. For schema-only inputs, `--no-ai` can emit a runnable deterministic kit.
 3. The AI agent produces project analysis, risk reasoning, enhanced capabilities, skills, and prompts.
 4. The generator writes the `agentbridge-kit/v1` protocol directory.
 5. `agentbridge serve` exposes the kit as a stdio MCP Server for Claude, Codex, or other MCP clients.
@@ -21,11 +21,15 @@ agentbridge generate openapi.json --output .agentbridge/openapi-kit --no-ai
 agentbridge serve .agentbridge/openapi-kit --base-url http://localhost:8080 --execute
 ```
 
-This path does not require an LLM. OpenAPI operations are normalized into capabilities, and the kit contains MCP tool definitions, guardrails, dry-run plans, skills, and a system prompt. `serve` defaults to dry-run; only `--execute` enables the HTTP adapter to call the target system.
+This schema-only path does not require an LLM. OpenAPI operations are normalized into capabilities, and the kit contains MCP tool definitions, guardrails, dry-run plans, skills, and a system prompt. `serve` defaults to dry-run; only `--execute` enables the HTTP adapter to call the target system.
 
 ## Why Keep Rules
 
 Rules are cheap, deterministic evidence collectors, and they also support the no-LLM OpenAPI-to-MCP path. They should not be treated as the final business model. Understanding controller/service behavior, workflow intent, side effects, and implied operations belongs to the AI analysis layer.
+
+## Project Write Boundary
+
+AgentBridge must not modify the target project during discovery or generation. All generated artifacts are written only under the caller-provided output directory. If the output directory is inside the scanned project, it must be a dedicated integration directory such as `.agentbridge/` or `agentbridge-kit/`.
 
 ## Runtime Boundary
 

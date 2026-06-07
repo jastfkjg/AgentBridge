@@ -27,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "generate":
             paths = [Path(p) for p in args.paths]
-            ai_gen = _create_ai_generator(args)
+            ai_gen = _create_ai_generator(args, paths)
             kit = AgentKitGenerator(ai_generator=ai_gen).generate(paths, Path(args.output), args.name)
             print(json.dumps(kit.to_manifest(), indent=2, sort_keys=True))
             return 0
@@ -48,10 +48,16 @@ def main(argv: list[str] | None = None) -> int:
     return 1
 
 
-def _create_ai_generator(args: argparse.Namespace) -> AIGenerator:
+def _create_ai_generator(args: argparse.Namespace, paths: list[Path] | None = None) -> AIGenerator:
     if getattr(args, "no_ai", False):
         return StaticAIGenerator()
     if not (getattr(args, "api_key", None) or os.environ.get("ANTHROPIC_API_KEY")):
+        if any(path.is_dir() for path in paths or []):
+            raise ValueError(
+                "Project directory analysis requires an AI backend. "
+                "Set ANTHROPIC_API_KEY or pass --api-key. "
+                "Use --no-ai only for deterministic schema-only kit generation."
+            )
         return StaticAIGenerator()
     try:
         return AIGenerator(
@@ -158,7 +164,20 @@ def _add_llm_options(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="agentbridge", description="Generate Agent Integration Kits for existing systems. Requires LLM API key.")
+    parser = argparse.ArgumentParser(
+        prog="agentbridge",
+        description="Generate Agent Integration Kits and run MCP/chat entrypoints for existing systems.",
+        epilog=(
+            "Examples:\n"
+            "  agentbridge discover examples/writing_system\n"
+            "  agentbridge generate openapi.json -o .agentbridge/openapi-kit --no-ai\n"
+            "  agentbridge serve .agentbridge/openapi-kit --base-url http://localhost:8080 --execute\n"
+            "  agentbridge chat .agentbridge/openapi-kit\n"
+            "  agentbridge web .agentbridge/openapi-kit --port 8765\n\n"
+            "Use 'agentbridge <command> --help' for command-specific options."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     discover = subparsers.add_parser("discover", help="Discover system capabilities (no API key needed).")
@@ -168,7 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("paths", nargs="+", help="Files or directories to inspect.")
     generate.add_argument("--output", "-o", required=True, help="Output directory for the generated kit.")
     generate.add_argument("--name", help="Kit name. Defaults to the input directory name.")
-    generate.add_argument("--no-ai", action="store_true", help="Generate deterministically without LLM enrichment.")
+    generate.add_argument("--no-ai", action="store_true", help="Generate deterministically without LLM enrichment; intended for schema-only kits such as OpenAPI-to-MCP.")
     _add_llm_options(generate)
 
     dry = subparsers.add_parser("dry-run", help="Dry-run a generated tool invocation.")

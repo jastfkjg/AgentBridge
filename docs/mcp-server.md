@@ -4,7 +4,7 @@ AgentBridge's first MVP path turns an existing OpenAPI schema into an MCP enviro
 
 ## Quick Start
 
-Generate a kit without configuring an LLM:
+Generate a schema-only kit without configuring an LLM:
 
 ```bash
 agentbridge generate openapi.json --output .agentbridge/openapi-kit --no-ai
@@ -16,7 +16,7 @@ Run it as a stdio MCP Server:
 agentbridge serve .agentbridge/openapi-kit
 ```
 
-This defaults to dry-run mode and does not call the target system.
+This OpenAPI path defaults to dry-run mode and does not call the target system. For full project directory understanding, configure an AI backend so AgentBridge can reason over code semantics with scanner output as supporting evidence.
 
 Connect it to a real HTTP system:
 
