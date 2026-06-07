@@ -31,6 +31,9 @@ agent-kit/
   tests/
     tool_invocation_tests.json
     test_generated_tools.py
+  clients/
+    mcp-client-configs.json
+    README.md
   dry_run_plan.json
 ```
 
@@ -41,6 +44,7 @@ agent-kit/
 - `capabilities.json` is the normalized capability list used for tool generation and runtime execution.
 - `tools/mcp_tools.json` can be exposed as stdio MCP tools by `agentbridge serve`.
 - `guardrails/permissions.json` is the authority for runtime safety decisions.
+- `clients/mcp-client-configs.json` contains Claude/Codex/generic MCP setup snippets.
 - `dry_run_plan.json` describes planned calls without real side effects.
 
 ## MCP Server Runtime

@@ -19,8 +19,9 @@ agentbridge chat .agentbridge/openapi-kit
 ```bash
 agentbridge chat .agentbridge/openapi-kit \
   --base-url http://localhost:8080 \
-  --bearer-token "$API_TOKEN" \
+  --bearer-env API_TOKEN \
   --execute \
+  --audit-log .agentbridge/audit.jsonl \
   --user alice \
   --session demo
 ```
@@ -37,7 +38,7 @@ cancel
 /history
 ```
 
-高风险操作会先暂停并展示计划调用。输入 `confirm` 继续，输入 `cancel` 清除待确认操作。
+高风险操作会先暂停，并展示计划调用、风险理由、请求 URL、脱敏 headers、body 和参数。输入 `confirm` 继续，输入 `cancel` 清除待确认操作。
 
 ## Web Chat
 
@@ -58,8 +59,9 @@ agentbridge web .agentbridge/openapi-kit --port 8765
 ```bash
 agentbridge web .agentbridge/openapi-kit \
   --base-url http://localhost:8080 \
-  --bearer-token "$API_TOKEN" \
-  --execute
+  --bearer-env API_TOKEN \
+  --execute \
+  --read-only
 ```
 
 允许浏览器界面切换 kit 目录：
@@ -94,3 +96,13 @@ agentbridge chat .agentbridge/openapi-kit --no-memory
 4. CLI 或 Web UI 展示风险、method/path 和参数。
 5. `confirm` 使用 `confirmed: true` 继续执行；`cancel` 清除操作。
 
+## 运行时策略
+
+聊天入口支持和 `serve` 相同的运行时安全参数：
+
+```bash
+agentbridge chat .agentbridge/openapi-kit --read-only
+agentbridge chat .agentbridge/openapi-kit --deny-risk destructive --deny-risk external_side_effect
+agentbridge chat .agentbridge/openapi-kit --allow-tool list_chapter
+agentbridge chat .agentbridge/openapi-kit --audit-log .agentbridge/audit.jsonl
+```

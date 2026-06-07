@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentbridge.mcp_server import AgentBridgeMCPServer, MCPServerConfig
+from agentbridge.kit import validate_kit
 
 
 def _write_json(path: Path, data: object) -> None:
@@ -118,7 +119,13 @@ class MCPServerTests(unittest.TestCase):
     def test_call_tool_returns_dry_run_plan_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
-            server = AgentBridgeMCPServer(MCPServerConfig(kit_dir=kit))
+            server = AgentBridgeMCPServer(
+                MCPServerConfig(
+                    kit_dir=kit,
+                    base_url="http://example.test",
+                    headers={"Authorization": "Bearer secret", "X-Tenant": "demo"},
+                )
+            )
 
             response = server.handle(
                 {
@@ -132,6 +139,10 @@ class MCPServerTests(unittest.TestCase):
             payload = json.loads(response["result"]["content"][0]["text"])
             self.assertFalse(payload["would_execute"])
             self.assertEqual(payload["transport"]["method"], "POST")
+            self.assertEqual(payload["request_preview"]["method"], "POST")
+            self.assertEqual(payload["request_preview"]["url"], "http://example.test/projects/p1/chapters")
+            self.assertEqual(payload["request_preview"]["headers"]["Authorization"], "<redacted>")
+            self.assertEqual(payload["request_preview"]["headers"]["X-Tenant"], "demo")
 
     def test_execute_http_tool_calls_target_system(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -173,6 +184,47 @@ class MCPServerTests(unittest.TestCase):
             request = urlopen.call_args.args[0]
             self.assertEqual(request.get_method(), "GET")
             self.assertEqual(request.full_url, "http://example.test/projects/p1/chapters?page=2")
+
+    def test_read_only_policy_blocks_write_tool_and_audits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kit = _make_kit(root)
+            audit_log = root / "audit.jsonl"
+            server = AgentBridgeMCPServer(MCPServerConfig(kit_dir=kit, execute=True, read_only=True, audit_log=audit_log))
+
+            response = server.handle(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "tools/call",
+                    "params": {"name": "create_chapter", "arguments": {"project_id": "p1", "title": "Opening"}},
+                }
+            )
+
+            payload = json.loads(response["result"]["content"][0]["text"])
+            self.assertIn("Read-only mode blocks", payload["policy_error"])
+            event = json.loads(audit_log.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(event["outcome"], "blocked")
+            self.assertEqual(event["tool"], "create_chapter")
+
+    def test_validate_kit_reports_ok_for_valid_fixture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            _write_json(
+                kit / "manifest.json",
+                {
+                    "protocol": "agentbridge-kit/v1",
+                    "outputs": {
+                        "capabilities": "capabilities.json",
+                        "guardrails": "guardrails/permissions.json",
+                    },
+                },
+            )
+
+            report = validate_kit(kit)
+
+            self.assertTrue(report.ok)
+            self.assertEqual(report.summary["capability_count"], 3)
 
 
 if __name__ == "__main__":

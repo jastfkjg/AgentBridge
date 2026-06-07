@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from datetime import datetime, timezone
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -13,6 +14,7 @@ from typing import Any, TextIO
 from agentbridge.runtime import DryRunError, dry_run, load_capabilities, validate_args
 
 _PATH_PARAM_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}|:([A-Za-z_][A-Za-z0-9_]*)")
+_SENSITIVE_HEADER_NAMES = {"authorization", "cookie", "proxy-authorization", "x-api-key", "api-key"}
 
 
 @dataclass
@@ -22,6 +24,10 @@ class MCPServerConfig:
     headers: dict[str, str] = field(default_factory=dict)
     execute: bool = False
     timeout: float = 30.0
+    read_only: bool = False
+    deny_risks: set[str] = field(default_factory=set)
+    allow_tools: set[str] = field(default_factory=set)
+    audit_log: Path | None = None
 
 
 class MCPServerError(ValueError):
@@ -98,13 +104,23 @@ class AgentBridgeMCPServer:
         args = dict(raw_args)
         confirmed = bool(args.pop("confirmed", False))
         plan = dry_run(self.config.kit_dir, name, args, confirmed=confirmed)
-
-        if not self.config.execute:
-            return _tool_text(plan, is_error=False)
-        if not plan["allowed"]:
+        capability = self.capabilities[name]
+        self._attach_request_preview(plan, capability, args)
+        policy_error = self._policy_error(name, plan)
+        if policy_error:
+            plan = dict(plan)
+            plan["allowed"] = False
+            plan["policy_error"] = policy_error
+            self._audit(name, args, "blocked", plan)
             return _tool_text(plan, is_error=True)
 
-        capability = self.capabilities[name]
+        if not self.config.execute:
+            self._audit(name, args, "dry_run", plan)
+            return _tool_text(plan, is_error=False)
+        if not plan["allowed"]:
+            self._audit(name, args, "blocked", plan)
+            return _tool_text(plan, is_error=True)
+
         transport = plan.get("transport", {})
         if transport.get("type") != "http":
             raise MCPServerError(f"Execution is only implemented for HTTP tools, got: {transport.get('type', 'unknown')}")
@@ -115,7 +131,49 @@ class AgentBridgeMCPServer:
             headers=self.config.headers,
             timeout=self.config.timeout,
         )
+        self._audit(name, args, "executed" if not result.get("error") else "error", result)
         return _tool_text(result, is_error=bool(result.get("error")))
+
+    def _policy_error(self, name: str, plan: dict[str, Any]) -> str:
+        risk = str(plan.get("risk", "read"))
+        if self.config.allow_tools and name not in self.config.allow_tools:
+            return f"Tool {name} is not in the allowlist."
+        if risk in self.config.deny_risks:
+            return f"Risk level {risk} is disabled by runtime policy."
+        if self.config.read_only and risk != "read":
+            return f"Read-only mode blocks {risk} tool {name}."
+        return ""
+
+    def _audit(self, name: str, args: dict[str, Any], outcome: str, payload: dict[str, Any]) -> None:
+        if not self.config.audit_log:
+            return
+        event = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "tool": name,
+            "outcome": outcome,
+            "risk": payload.get("risk"),
+            "execute": self.config.execute,
+            "read_only": self.config.read_only,
+            "args": args,
+            "transport": payload.get("request_preview") or payload.get("transport") or payload.get("request"),
+            "error": payload.get("error") or payload.get("policy_error"),
+        }
+        self.config.audit_log.parent.mkdir(parents=True, exist_ok=True)
+        with self.config.audit_log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+    def _attach_request_preview(self, plan: dict[str, Any], capability: dict[str, Any], args: dict[str, Any]) -> None:
+        if plan.get("transport", {}).get("type") != "http":
+            return
+        try:
+            plan["request_preview"] = build_http_request_preview(
+                capability=capability,
+                args=args,
+                base_url=self.config.base_url,
+                headers=self.config.headers,
+            )
+        except MCPServerError as exc:
+            plan["request_preview"] = {"error": str(exc)}
 
     def _response(self, request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
@@ -174,6 +232,41 @@ def execute_http_tool(
         }
     except urllib.error.URLError as exc:
         raise MCPServerError(f"HTTP request failed: {exc.reason}") from exc
+
+
+def build_http_request_preview(
+    capability: dict[str, Any],
+    args: dict[str, Any],
+    base_url: str = "",
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    transport = capability.get("transport", {})
+    method = str(transport.get("method", "GET")).upper()
+    path = str(transport.get("path", ""))
+    if not path:
+        raise MCPServerError(f"HTTP tool {capability.get('name', '')} is missing transport.path")
+    url, remaining_args = build_http_url(base_url, path, args)
+    body: dict[str, Any] | None = None
+    if method in {"GET", "HEAD", "OPTIONS"}:
+        url = append_query(url, remaining_args)
+    elif remaining_args:
+        body = remaining_args
+    return {
+        "method": method,
+        "url": url,
+        "headers": redact_headers(headers or {}),
+        "body": body,
+    }
+
+
+def redact_headers(headers: dict[str, str]) -> dict[str, str]:
+    redacted: dict[str, str] = {}
+    for key, value in headers.items():
+        if key.lower() in _SENSITIVE_HEADER_NAMES:
+            redacted[key] = "<redacted>"
+        else:
+            redacted[key] = value
+    return redacted
 
 
 def build_http_url(base_url: str, path: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:

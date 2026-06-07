@@ -103,12 +103,23 @@ class ChatSessionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
             memory = Path(tmp) / "memory.json"
-            session = ChatSession(ChatConfig(kit_dir=kit, memory_file=memory, session_id="s1"))
+            session = ChatSession(
+                ChatConfig(
+                    kit_dir=kit,
+                    base_url="http://example.test",
+                    headers={"Authorization": "Bearer secret"},
+                    memory_file=memory,
+                    session_id="s1",
+                )
+            )
 
             response = session.process("/run delete_character project_id=p1 character_id=c1")
 
             self.assertEqual(response.status, "needs_confirmation")
             self.assertIsNotNone(response.pending)
+            self.assertIn("DELETE http://example.test/projects/p1/characters/c1", response.message)
+            self.assertIn("<redacted>", response.message)
+            self.assertIn("Reason:", response.message)
 
             restored = ChatSession(ChatConfig(kit_dir=kit, memory_file=memory, session_id="s1"))
             self.assertIsNotNone(restored.pending)
@@ -129,6 +140,17 @@ class ChatSessionTests(unittest.TestCase):
             request = urlopen.call_args.args[0]
             self.assertEqual(request.get_method(), "GET")
             self.assertEqual(request.full_url, "http://example.test/projects/p1/chapters")
+
+    def test_chat_reports_read_only_policy_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            session = ChatSession(ChatConfig(kit_dir=kit, read_only=True, memory_enabled=False))
+
+            response = session.process("/run delete_character project_id=p1 character_id=c1")
+
+            self.assertEqual(response.status, "needs_confirmation")
+            confirmed = session.process("confirm")
+            self.assertIn("blocked by runtime policy", confirmed.message)
 
 
 class WebChatTests(unittest.TestCase):

@@ -31,6 +31,9 @@ agent-kit/
   tests/
     tool_invocation_tests.json
     test_generated_tools.py
+  clients/
+    mcp-client-configs.json
+    README.md
   dry_run_plan.json
 ```
 
@@ -41,6 +44,7 @@ agent-kit/
 - `capabilities.json` 是标准能力列表，用于生成工具和运行时执行。
 - `tools/mcp_tools.json` 可被 `agentbridge serve` 暴露为 stdio MCP tools。
 - `guardrails/permissions.json` 是运行时安全判断的权威来源。
+- `clients/mcp-client-configs.json` 保存 Claude/Codex/通用 MCP 接入配置片段。
 - `dry_run_plan.json` 描述计划调用，不执行真实副作用。
 
 ## MCP Server 运行时

@@ -165,7 +165,16 @@ agentbridge serve .agentbridge/openapi-kit
 # 真实调用目标 HTTP 系统
 agentbridge serve .agentbridge/openapi-kit \
   --base-url http://localhost:8080 \
-  --bearer-token "$API_TOKEN" \
+  --bearer-env API_TOKEN \
+  --execute
+```
+
+生成 Claude Desktop、Claude Code、Codex CLI 或通用 stdio MCP 客户端配置片段：
+
+```bash
+agentbridge mcp-config .agentbridge/openapi-kit \
+  --base-url http://localhost:8080 \
+  --bearer-env API_TOKEN \
   --execute
 ```
 
@@ -191,7 +200,11 @@ PYTHONPATH=src python -m unittest discover -s tests
 | 命令 | 说明 |
 |---|---|
 | `agentbridge discover <paths>` | 发现并打印能力为 JSON |
+| `agentbridge init <paths> -o <dir>` | 生成、校验并打印新 kit 的下一步命令 |
 | `agentbridge generate <paths> -o <dir>` | 生成 Agent 集成套件；有 API Key 时使用 AI 增强 |
+| `agentbridge validate <kit>` | 校验 kit 协议、guardrails、transport 和潜在 secret |
+| `agentbridge doctor <kit>` | 诊断 kit 在 dry-run 或执行模式下的就绪状态 |
+| `agentbridge mcp-config <kit>` | 打印或写入 Claude/Codex/通用 MCP 客户端配置片段 |
 | `agentbridge serve <kit>` | 将生成套件作为 stdio MCP Server 运行 |
 | `agentbridge dry-run <kit> <tool>` | Dry-run 工具调用 |
 | `agentbridge chat <kit>` | 通过 kit runtime 启动交互式 CLI chat |
@@ -209,6 +222,7 @@ agentbridge discover examples/writing_system
 ### `generate`
 
 ```bash
+agentbridge init examples/writing_system/openapi.json --output build/openapi-kit --no-ai
 agentbridge generate examples/writing_system --output build/agent-kit
 
 # 不使用 LLM，适合 schema-only 的 OpenAPI 到 MCP Server 快速 kit
@@ -233,6 +247,13 @@ agentbridge dry-run build/agent-kit delete_character \
   --args '{"project_id":"p1","character_id":"c1"}' --confirmed
 ```
 
+### `validate` 和 `doctor`
+
+```bash
+agentbridge validate build/agent-kit
+agentbridge doctor build/agent-kit --execute --base-url http://localhost:8080
+```
+
 ### `serve`
 
 ```bash
@@ -243,8 +264,13 @@ agentbridge serve build/openapi-kit
 agentbridge serve build/openapi-kit \
   --base-url http://localhost:8080 \
   --header "X-Tenant=demo" \
-  --bearer-token "$API_TOKEN" \
-  --execute
+  --bearer-env API_TOKEN \
+  --execute \
+  --audit-log .agentbridge/audit.jsonl
+
+# 保守运行策略
+agentbridge serve build/openapi-kit --read-only
+agentbridge serve build/openapi-kit --deny-risk destructive --deny-risk external_side_effect
 ```
 
 ### `chat`
@@ -255,8 +281,9 @@ agentbridge chat build/agent-kit
 # 真实调用 HTTP 系统，并使用会话记忆
 agentbridge chat build/agent-kit \
   --base-url http://localhost:8080 \
-  --bearer-token "$API_TOKEN" \
+  --bearer-env API_TOKEN \
   --execute \
+  --audit-log .agentbridge/audit.jsonl \
   --user alice \
   --session demo
 ```
@@ -271,8 +298,21 @@ agentbridge web build/agent-kit --port 8765
 # 在 Web UI 中真实调用 HTTP 系统
 agentbridge web build/agent-kit \
   --base-url http://localhost:8080 \
-  --bearer-token "$API_TOKEN" \
+  --bearer-env API_TOKEN \
+  --execute \
+  --read-only
+```
+
+### `mcp-config`
+
+```bash
+agentbridge mcp-config build/openapi-kit \
+  --base-url http://localhost:8080 \
+  --bearer-env API_TOKEN \
   --execute
+
+# 将配置片段写回 kit
+agentbridge mcp-config build/openapi-kit --write
 ```
 
 </details>
@@ -349,6 +389,9 @@ agent-kit/
 ├── tests/
 │   ├── tool_invocation_tests.json # 自动生成的调用测试
 │   └── test_generated_tools.py    # Python 工具契约单元测试
+├── clients/
+│   ├── mcp-client-configs.json    # Claude/Codex/通用 MCP 配置片段
+│   └── README.md                  # 客户端接入说明
 └── dry_run_plan.json              # Dry-run 执行计划
 ```
 

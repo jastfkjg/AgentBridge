@@ -19,8 +19,9 @@ The default mode is dry-run. Tool calls return planned operations without target
 ```bash
 agentbridge chat .agentbridge/openapi-kit \
   --base-url http://localhost:8080 \
-  --bearer-token "$API_TOKEN" \
+  --bearer-env API_TOKEN \
   --execute \
+  --audit-log .agentbridge/audit.jsonl \
   --user alice \
   --session demo
 ```
@@ -37,7 +38,7 @@ cancel
 /history
 ```
 
-High-risk operations pause before execution and show the planned call. Type `confirm` to continue or `cancel` to clear the pending operation.
+High-risk operations pause before execution and show the planned call, risk reason, request URL, redacted headers, body, and arguments. Type `confirm` to continue or `cancel` to clear the pending operation.
 
 ## Web Chat
 
@@ -58,8 +59,9 @@ Run in execution mode:
 ```bash
 agentbridge web .agentbridge/openapi-kit \
   --base-url http://localhost:8080 \
-  --bearer-token "$API_TOKEN" \
-  --execute
+  --bearer-env API_TOKEN \
+  --execute \
+  --read-only
 ```
 
 Allow the browser UI to switch kit directories:
@@ -94,3 +96,13 @@ Memory stores the recent transcript and any pending high-risk operation for the 
 4. CLI or Web UI shows risk, method/path, and arguments.
 5. `confirm` repeats the call with `confirmed: true`; `cancel` clears it.
 
+## Runtime Policy
+
+The chat entrypoints accept the same runtime safety options as `serve`:
+
+```bash
+agentbridge chat .agentbridge/openapi-kit --read-only
+agentbridge chat .agentbridge/openapi-kit --deny-risk destructive --deny-risk external_side_effect
+agentbridge chat .agentbridge/openapi-kit --allow-tool list_chapter
+agentbridge chat .agentbridge/openapi-kit --audit-log .agentbridge/audit.jsonl
+```

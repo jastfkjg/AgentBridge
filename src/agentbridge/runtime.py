@@ -27,6 +27,7 @@ def dry_run(kit_dir: Path, tool_name: str, args: dict[str, Any], confirmed: bool
         "confirmed": confirmed,
         "requires_confirmation": rule["confirm_required"],
         "risk": rule["risk"],
+        "risk_reason": rule.get("reason", ""),
         "validation": validation,
         "transport": rule.get("transport", {}),
         "planned_call": {
@@ -80,4 +81,3 @@ def next_step(errors: list[str], confirm_required: bool, confirmed: bool) -> str
     if confirm_required and not confirmed:
         return "Ask a human to explicitly confirm this high-risk operation."
     return "Safe to execute through the host system adapter."
-

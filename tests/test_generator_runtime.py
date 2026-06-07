@@ -84,10 +84,13 @@ class GeneratorRuntimeTests(unittest.TestCase):
             self.assertTrue((output / "spec" / "kit-protocol.md").exists())
             self.assertTrue((output / "prompts" / "system.md").exists())
             self.assertTrue((output / "guardrails" / "permissions.json").exists())
+            self.assertTrue((output / "clients" / "mcp-client-configs.json").exists())
+            self.assertTrue((output / "clients" / "README.md").exists())
             self.assertTrue((output / "tests" / "test_generated_tools.py").exists())
             manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["protocol"], "agentbridge-kit/v1")
             self.assertEqual(manifest["outputs"]["ai_analysis"], "analysis/agent_analysis.json")
+            self.assertEqual(manifest["outputs"]["client_configs"], "clients/mcp-client-configs.json")
 
     def test_dry_run_blocks_unconfirmed_destructive_action(self):
         with tempfile.TemporaryDirectory() as tmp:

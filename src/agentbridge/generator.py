@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from agentbridge.agent import AIGenerator
+from agentbridge.client_config import MCPClientConfig, build_clients_readme, build_mcp_client_configs
 from agentbridge.discovery import CapabilityDiscoverer
 from agentbridge.io import write_json, write_text
 from agentbridge.models import Capability, IntegrationKit, KIT_PROTOCOL_VERSION
@@ -60,6 +61,9 @@ class AgentKitGenerator:
         write_json(output_dir / "tests" / "tool_invocation_tests.json", build_invocation_tests(capabilities))
         write_text(output_dir / "tests" / "test_generated_tools.py", build_generated_test_file())
         write_json(output_dir / "dry_run_plan.json", build_dry_run_plan(capabilities))
+        client_config = MCPClientConfig(kit_dir=output_dir, server_name=kit_name)
+        write_json(output_dir / "clients" / "mcp-client-configs.json", build_mcp_client_configs(client_config))
+        write_text(output_dir / "clients" / "README.md", build_clients_readme(kit_name, client_config))
 
         system_prompt = ai_result.get("system_prompt", "")
         if system_prompt:
@@ -97,6 +101,8 @@ An AgentBridge kit is a stable, versioned directory that can be consumed by MCP 
 - `tests/tool_invocation_tests.json`: generated invocation contracts.
 - `tests/test_generated_tools.py`: executable kit contract tests.
 - `dry_run_plan.json`: no-side-effect execution plan for each tool.
+- `clients/mcp-client-configs.json`: ready-to-use MCP client snippets.
+- `clients/README.md`: client setup and safe runtime guidance.
 
 ## Compatibility
 

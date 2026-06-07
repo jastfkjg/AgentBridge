@@ -165,7 +165,16 @@ agentbridge serve .agentbridge/openapi-kit
 # Execute real HTTP calls against the target system
 agentbridge serve .agentbridge/openapi-kit \
   --base-url http://localhost:8080 \
-  --bearer-token "$API_TOKEN" \
+  --bearer-env API_TOKEN \
+  --execute
+```
+
+Generate MCP client snippets for Claude Desktop, Claude Code, Codex CLI, or generic stdio clients:
+
+```bash
+agentbridge mcp-config .agentbridge/openapi-kit \
+  --base-url http://localhost:8080 \
+  --bearer-env API_TOKEN \
   --execute
 ```
 
@@ -191,7 +200,11 @@ PYTHONPATH=src python -m unittest discover -s tests
 | Command | Description |
 |---|---|
 | `agentbridge discover <paths>` | Discover and print capabilities as JSON |
+| `agentbridge init <paths> -o <dir>` | Generate, validate, and print next steps for a new kit |
 | `agentbridge generate <paths> -o <dir>` | Generate an Agent Integration Kit; uses AI enhancement when configured |
+| `agentbridge validate <kit>` | Validate kit protocol, guardrails, transports, and secret hygiene |
+| `agentbridge doctor <kit>` | Diagnose kit readiness for dry-run or execution mode |
+| `agentbridge mcp-config <kit>` | Print or write Claude/Codex/generic MCP client snippets |
 | `agentbridge serve <kit>` | Run a generated kit as a stdio MCP Server |
 | `agentbridge dry-run <kit> <tool>` | Dry-run a tool invocation |
 | `agentbridge chat <kit>` | Start an interactive CLI chat over the kit runtime |
@@ -209,6 +222,7 @@ agentbridge discover examples/writing_system
 ### `generate`
 
 ```bash
+agentbridge init examples/writing_system/openapi.json --output build/openapi-kit --no-ai
 agentbridge generate examples/writing_system --output build/agent-kit
 
 # No LLM, useful for schema-only OpenAPI-to-MCP Server kits
@@ -233,6 +247,13 @@ agentbridge dry-run build/agent-kit delete_character \
   --args '{"project_id":"p1","character_id":"c1"}' --confirmed
 ```
 
+### `validate` and `doctor`
+
+```bash
+agentbridge validate build/agent-kit
+agentbridge doctor build/agent-kit --execute --base-url http://localhost:8080
+```
+
 ### `serve`
 
 ```bash
@@ -243,8 +264,13 @@ agentbridge serve build/openapi-kit
 agentbridge serve build/openapi-kit \
   --base-url http://localhost:8080 \
   --header "X-Tenant=demo" \
-  --bearer-token "$API_TOKEN" \
-  --execute
+  --bearer-env API_TOKEN \
+  --execute \
+  --audit-log .agentbridge/audit.jsonl
+
+# Conservative runtime policy
+agentbridge serve build/openapi-kit --read-only
+agentbridge serve build/openapi-kit --deny-risk destructive --deny-risk external_side_effect
 ```
 
 ### `chat`
@@ -255,8 +281,9 @@ agentbridge chat build/agent-kit
 # Execute real HTTP calls, with session memory
 agentbridge chat build/agent-kit \
   --base-url http://localhost:8080 \
-  --bearer-token "$API_TOKEN" \
+  --bearer-env API_TOKEN \
   --execute \
+  --audit-log .agentbridge/audit.jsonl \
   --user alice \
   --session demo
 ```
@@ -271,8 +298,21 @@ agentbridge web build/agent-kit --port 8765
 # Execute real HTTP calls in the Web UI
 agentbridge web build/agent-kit \
   --base-url http://localhost:8080 \
-  --bearer-token "$API_TOKEN" \
+  --bearer-env API_TOKEN \
+  --execute \
+  --read-only
+```
+
+### `mcp-config`
+
+```bash
+agentbridge mcp-config build/openapi-kit \
+  --base-url http://localhost:8080 \
+  --bearer-env API_TOKEN \
   --execute
+
+# Write snippets back into the kit
+agentbridge mcp-config build/openapi-kit --write
 ```
 
 </details>
@@ -349,6 +389,9 @@ agent-kit/
 ├── tests/
 │   ├── tool_invocation_tests.json # Auto-generated invocation tests
 │   └── test_generated_tools.py    # Python unit tests for tool contracts
+├── clients/
+│   ├── mcp-client-configs.json    # Claude/Codex/generic MCP config snippets
+│   └── README.md                  # Client setup notes
 └── dry_run_plan.json              # Dry-run execution plan
 ```
 

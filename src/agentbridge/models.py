@@ -102,5 +102,7 @@ class IntegrationKit:
                 "guardrails": "guardrails/permissions.json",
                 "tests": "tests/",
                 "dry_run_plan": "dry_run_plan.json",
+                "client_configs": "clients/mcp-client-configs.json",
+                "client_setup": "clients/README.md",
             },
         }

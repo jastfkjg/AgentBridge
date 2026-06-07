@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from agentbridge.mcp_server import AgentBridgeMCPServer, MCPServerConfig
+from agentbridge.mcp_server import AgentBridgeMCPServer, MCPServerConfig, build_http_request_preview
 from agentbridge.runtime import dry_run, load_capabilities, validate_args
 
 
@@ -24,6 +24,10 @@ class ChatConfig:
     memory_file: Path | None = None
     memory_enabled: bool = True
     max_history: int = 80
+    read_only: bool = False
+    deny_risks: set[str] = field(default_factory=set)
+    allow_tools: set[str] = field(default_factory=set)
+    audit_log: Path | None = None
 
 
 @dataclass
@@ -102,6 +106,10 @@ class ChatSession:
                 headers=config.headers,
                 execute=config.execute,
                 timeout=config.timeout,
+                read_only=config.read_only,
+                deny_risks=config.deny_risks,
+                allow_tools=config.allow_tools,
+                audit_log=config.audit_log,
             )
         )
         memory_file = config.memory_file
@@ -153,6 +161,13 @@ class ChatSession:
             return self._reply("invalid_arguments", message)
 
         plan = dry_run(self.config.kit_dir, tool_name, args, confirmed=confirmed)
+        if plan.get("transport", {}).get("type") == "http":
+            plan["request_preview"] = build_http_request_preview(
+                capability=self.capabilities[tool_name],
+                args=args,
+                base_url=self.config.base_url,
+                headers=self.config.headers,
+            )
         if plan["requires_confirmation"] and not confirmed:
             self.pending = PendingCall(id=str(uuid.uuid4())[:8], tool=tool_name, args=args, plan=plan)
             self._save()
@@ -394,16 +409,25 @@ def format_tools(tools: list[dict[str, Any]]) -> str:
 def format_pending_confirmation(pending: PendingCall, execute: bool) -> str:
     plan = pending.plan
     transport = plan.get("transport", {})
+    preview = plan.get("request_preview", {})
     mode = "execute" if execute else "dry-run"
+    target = f"{preview.get('method', transport.get('method', transport.get('type', 'unknown')))} {preview.get('url', transport.get('path', ''))}"
+    body = preview.get("body")
+    headers = preview.get("headers")
     return (
         f"Confirmation required for `{pending.tool}` ({plan.get('risk')}, {mode}).\n"
-        f"Planned call: {transport.get('method', transport.get('type', 'unknown'))} {transport.get('path', '')}\n"
+        f"Reason: {plan.get('risk_reason') or 'Review this operation before continuing.'}\n"
+        f"Planned call: {target}\n"
+        f"Headers: {json.dumps(headers, sort_keys=True) if headers else '{}'}\n"
+        f"Body: {json.dumps(body, sort_keys=True) if body is not None else 'null'}\n"
         f"Arguments: {json.dumps(pending.args, sort_keys=True)}\n"
         "Type `confirm` to continue or `cancel` to stop."
     )
 
 
 def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
+    if result.get("policy_error"):
+        return f"{tool_name} blocked by runtime policy: {result['policy_error']}"
     if result.get("error"):
         return f"{tool_name} failed: {result['error']}"
     if result.get("status") == "executed":

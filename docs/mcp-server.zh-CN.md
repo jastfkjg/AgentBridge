@@ -23,7 +23,16 @@ OpenAPI 路径默认只返回 dry-run 计划，不会调用目标系统。完整
 ```bash
 agentbridge serve .agentbridge/openapi-kit \
   --base-url http://localhost:8080 \
-  --bearer-token "$API_TOKEN" \
+  --bearer-env API_TOKEN \
+  --execute
+```
+
+生成客户端配置片段：
+
+```bash
+agentbridge mcp-config .agentbridge/openapi-kit \
+  --base-url http://localhost:8080 \
+  --bearer-env API_TOKEN \
   --execute
 ```
 
@@ -49,7 +58,19 @@ agentbridge serve .agentbridge/openapi-kit \
 - `serve` 默认 dry-run，这是安全默认值。
 - 只有显式传入 `--execute` 才会发起 HTTP 请求。
 - `destructive` 和 `external_side_effect` 工具必须由 MCP caller 在参数中传入 `confirmed: true`。
-- Bearer token 和 header 只通过运行时参数传入，不写入生成的 kit。
+- Bearer token 和 header 只通过运行时参数传入。推荐使用 `--bearer-env API_TOKEN`，让配置文件只保存环境变量名。
+- `--read-only` 会阻断 write/destructive/external-side-effect 工具。
+- `--deny-risk` 可禁用一个或多个风险等级。
+- `--allow-tool` 可限制运行时只允许指定工具。
+- `--audit-log` 会写入 JSONL 工具调用审计日志。
+- HTTP transport 的 dry-run 响应会包含请求预览：method、URL、脱敏 headers、body 和风险理由。
+
+连接 agent 前建议先运行：
+
+```bash
+agentbridge validate .agentbridge/openapi-kit
+agentbridge doctor .agentbridge/openapi-kit --execute --base-url http://localhost:8080
+```
 
 ## HTTP 映射
 
@@ -58,7 +79,8 @@ OpenAPI 中的 HTTP transport 会被映射为真实请求：
 - path 参数：`/projects/{project_id}/chapters` + `{"project_id":"p1"}` -> `/projects/p1/chapters`
 - GET/HEAD/OPTIONS 的剩余参数进入 query string
 - POST/PUT/PATCH/DELETE 的剩余参数作为 JSON body
-- `--bearer-token` 会生成 `Authorization: Bearer ...`
+- `--bearer-token` 会直接生成 `Authorization: Bearer ...`
+- `--bearer-env API_TOKEN` 会在运行时从环境变量读取 token，生成客户端配置时更推荐。
 - `--header NAME=VALUE` 可以重复传入
 
 ## MCP 能力
@@ -76,4 +98,4 @@ OpenAPI 中的 HTTP transport 会被映射为真实请求：
 当前 MVP 重点覆盖 OpenAPI/HTTP：
 
 - 已支持：OpenAPI discovery、kit 生成、stdio MCP server、HTTP GET/POST/PUT/PATCH/DELETE 执行、dry-run、确认参数。
-- 后续扩展：GraphQL adapter、数据库 adapter、Claude/Codex 配置生成和更强的 agent planning。
+- 后续扩展：GraphQL adapter、数据库 adapter 和更强的 agent planning。
