@@ -173,6 +173,9 @@ agentbridge serve .agentbridge/openapi-kit \
 
 ```bash
 agentbridge chat .agentbridge/writing-kit
+
+# Browser chat UI
+agentbridge web .agentbridge/writing-kit --port 8765
 ```
 
 ### Run Tests
@@ -191,7 +194,8 @@ PYTHONPATH=src python -m unittest discover -s tests
 | `agentbridge generate <paths> -o <dir>` | Generate an Agent Integration Kit; uses AI enhancement when configured |
 | `agentbridge serve <kit>` | Run a generated kit as a stdio MCP Server |
 | `agentbridge dry-run <kit> <tool>` | Dry-run a tool invocation |
-| `agentbridge chat <kit>` | Start an interactive AI agent session |
+| `agentbridge chat <kit>` | Start an interactive CLI chat over the kit runtime |
+| `agentbridge web <kit>` | Start a browser chat UI over the kit runtime |
 
 <details>
 <summary>📝 Full command details</summary>
@@ -247,8 +251,28 @@ agentbridge serve build/openapi-kit \
 
 ```bash
 agentbridge chat build/agent-kit
-# Or with custom LLM provider:
-agentbridge chat build/agent-kit --api-key "sk-..." --base-url "https://api.deepseek.com/anthropic"
+
+# Execute real HTTP calls, with session memory
+agentbridge chat build/agent-kit \
+  --base-url http://localhost:8080 \
+  --bearer-token "$API_TOKEN" \
+  --execute \
+  --user alice \
+  --session demo
+```
+
+Inside chat, use `/tools`, `/run <tool> key=value`, `confirm`, `cancel`, and `/history`.
+
+### `web`
+
+```bash
+agentbridge web build/agent-kit --port 8765
+
+# Execute real HTTP calls in the Web UI
+agentbridge web build/agent-kit \
+  --base-url http://localhost:8080 \
+  --bearer-token "$API_TOKEN" \
+  --execute
 ```
 
 </details>
@@ -418,11 +442,13 @@ The safety model is applied consistently. Rule-based risk classification provide
 - [Architecture](docs/architecture.md)
 - [Kit protocol](docs/kit-protocol.md)
 - [OpenAPI to MCP Server](docs/mcp-server.md)
+- [Chat entrypoints](docs/chat.md)
 - [TODO / Roadmap](TODO.md)
 - [中文 README](README.zh-CN.md)
 - [中文架构说明](docs/architecture.zh-CN.md)
 - [中文套件协议](docs/kit-protocol.zh-CN.md)
 - [中文 OpenAPI 到 MCP Server](docs/mcp-server.zh-CN.md)
+- [中文聊天入口](docs/chat.zh-CN.md)
 
 ---
 

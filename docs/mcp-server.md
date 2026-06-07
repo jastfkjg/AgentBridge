@@ -76,5 +76,4 @@ OpenAPI HTTP transports are mapped into requests:
 Current focus:
 
 - Implemented: OpenAPI discovery, kit generation, stdio MCP server, HTTP execution, dry-run, confirmation parameter.
-- Planned: GraphQL adapter, database adapter, Claude/Codex config generation, CLI chat, Web chat.
-
+- Planned: GraphQL adapter, database adapter, Claude/Codex config generation, and richer agent planning.

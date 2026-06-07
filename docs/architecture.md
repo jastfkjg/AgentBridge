@@ -9,7 +9,8 @@ AgentBridge uses an AI-agent-first generation pipeline while keeping determinist
 3. The AI agent produces project analysis, risk reasoning, enhanced capabilities, skills, and prompts.
 4. The generator writes the `agentbridge-kit/v1` protocol directory.
 5. `agentbridge serve` exposes the kit as a stdio MCP Server for Claude, Codex, or other MCP clients.
-6. Runtime tools enforce guardrails and dry-run checks before calling host-system adapters.
+6. `agentbridge chat` and `agentbridge web` provide user-facing chat entrypoints over the same kit runtime.
+7. Runtime tools enforce guardrails and dry-run checks before calling host-system adapters.
 
 ## Phase 1 MVP
 
@@ -33,7 +34,8 @@ Execution has two layers:
 - Default mode: MCP tool calls return planned calls only, with no target-system side effects.
 - Execute mode: `--execute` enables real HTTP calls, but high-risk tools still require `confirmed: true`.
 
+Chat entrypoints add session memory and human-in-the-loop confirmation. High-risk operations are stored as pending calls until the user confirms or cancels them.
+
 ## Safety Boundary
 
 Generation may infer tools, but runtime execution must obey `guardrails/permissions.json`. Generated assistants must not execute destructive or external-side-effect operations without explicit human confirmation.
-

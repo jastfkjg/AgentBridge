@@ -173,6 +173,9 @@ agentbridge serve .agentbridge/openapi-kit \
 
 ```bash
 agentbridge chat .agentbridge/writing-kit
+
+# 浏览器聊天界面
+agentbridge web .agentbridge/writing-kit --port 8765
 ```
 
 ### 运行测试
@@ -191,7 +194,8 @@ PYTHONPATH=src python -m unittest discover -s tests
 | `agentbridge generate <paths> -o <dir>` | 生成 Agent 集成套件；有 API Key 时使用 AI 增强 |
 | `agentbridge serve <kit>` | 将生成套件作为 stdio MCP Server 运行 |
 | `agentbridge dry-run <kit> <tool>` | Dry-run 工具调用 |
-| `agentbridge chat <kit>` | 启动交互式 AI Agent 会话 |
+| `agentbridge chat <kit>` | 通过 kit runtime 启动交互式 CLI chat |
+| `agentbridge web <kit>` | 通过 kit runtime 启动浏览器聊天界面 |
 
 <details>
 <summary>📝 完整命令详情</summary>
@@ -247,8 +251,28 @@ agentbridge serve build/openapi-kit \
 
 ```bash
 agentbridge chat build/agent-kit
-# 或使用自定义 LLM 提供商：
-agentbridge chat build/agent-kit --api-key "sk-..." --base-url "https://api.deepseek.com/anthropic"
+
+# 真实调用 HTTP 系统，并使用会话记忆
+agentbridge chat build/agent-kit \
+  --base-url http://localhost:8080 \
+  --bearer-token "$API_TOKEN" \
+  --execute \
+  --user alice \
+  --session demo
+```
+
+聊天中可使用 `/tools`、`/run <tool> key=value`、`confirm`、`cancel` 和 `/history`。
+
+### `web`
+
+```bash
+agentbridge web build/agent-kit --port 8765
+
+# 在 Web UI 中真实调用 HTTP 系统
+agentbridge web build/agent-kit \
+  --base-url http://localhost:8080 \
+  --bearer-token "$API_TOKEN" \
+  --execute
 ```
 
 </details>
@@ -418,11 +442,13 @@ asyncio.run(main())
 - [Architecture](docs/architecture.md)
 - [Kit protocol](docs/kit-protocol.md)
 - [OpenAPI to MCP Server](docs/mcp-server.md)
+- [Chat entrypoints](docs/chat.md)
 - [TODO / Roadmap](TODO.md)
 - [English README](README.md)
 - [中文架构说明](docs/architecture.zh-CN.md)
 - [中文套件协议](docs/kit-protocol.zh-CN.md)
 - [中文 OpenAPI 到 MCP Server](docs/mcp-server.zh-CN.md)
+- [中文聊天入口](docs/chat.zh-CN.md)
 
 ---
 

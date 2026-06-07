@@ -52,7 +52,10 @@ agent-kit/
 - `destructive` and `external_side_effect` tools require callers to pass `confirmed: true`.
 - The current execution adapter focuses on OpenAPI/HTTP transports; GraphQL, database, and additional SDK adapters are planned.
 
+## Chat Runtime
+
+`agentbridge chat <kit>` and `agentbridge web <kit>` consume the same kit files and runtime guardrails. Chat memory stores recent transcript and pending confirmations outside the stable protocol files, by default at `<kit>/.agentbridge-chat-memory.json`.
+
 ## Compatibility
 
 Consumers must validate the `protocol` field in `manifest.json`. Minor versions may add optional files, but required paths should remain stable for `agentbridge-kit/v1`.
-

@@ -52,7 +52,10 @@ agent-kit/
 - `destructive` 和 `external_side_effect` 工具必须由调用方传入 `confirmed: true`。
 - 当前执行 adapter 以 OpenAPI/HTTP transport 为主；GraphQL、数据库和更多 SDK adapter 后续扩展。
 
+## Chat 运行时
+
+`agentbridge chat <kit>` 和 `agentbridge web <kit>` 消费同一套 kit 文件和运行时 guardrails。聊天记忆保存最近对话和待确认操作，不属于稳定协议必需文件，默认位于 `<kit>/.agentbridge-chat-memory.json`。
+
 ## 兼容性
 
 消费者必须校验 `manifest.json` 中的 `protocol` 字段。小版本可以增加可选文件，但 `agentbridge-kit/v1` 的必需路径应保持稳定。
-

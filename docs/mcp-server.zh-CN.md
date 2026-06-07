@@ -76,5 +76,4 @@ OpenAPI 中的 HTTP transport 会被映射为真实请求：
 当前 MVP 重点覆盖 OpenAPI/HTTP：
 
 - 已支持：OpenAPI discovery、kit 生成、stdio MCP server、HTTP GET/POST/PUT/PATCH/DELETE 执行、dry-run、确认参数。
-- 后续扩展：GraphQL adapter、数据库 adapter、Claude/Codex 配置生成、CLI chat、Web chat。
-
+- 后续扩展：GraphQL adapter、数据库 adapter、Claude/Codex 配置生成和更强的 agent planning。
