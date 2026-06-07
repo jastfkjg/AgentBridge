@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from agentbridge.agent import AIGenerator
 from agentbridge.client_config import MCPClientConfig, build_clients_readme, build_mcp_client_configs
@@ -25,6 +25,7 @@ class AgentKitGenerator:
         self,
         ai_generator: AIGenerator,
         discoverer: CapabilityDiscoverer | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> None:
         if not isinstance(ai_generator, AIGenerator):
             raise TypeError(
@@ -33,14 +34,25 @@ class AgentKitGenerator:
             )
         self.ai_generator = ai_generator
         self.discoverer = discoverer or CapabilityDiscoverer()
+        self.progress = progress
 
     def generate(self, input_paths: list[Path], output_dir: Path, name: str | None = None) -> IntegrationKit:
+        self._progress("Checking output boundary...")
         validate_output_boundary(input_paths, output_dir)
+        self._progress("Discovering candidate capabilities...")
         rule_capabilities = self.discoverer.discover(input_paths)
         kit_name = name or infer_kit_name(input_paths)
+        self._progress(f"Discovered {len(rule_capabilities)} candidate capabilities for kit {kit_name!r}.")
 
+        model = getattr(self.ai_generator, "model", "")
+        if model == "static":
+            self._progress("Generating deterministic kit metadata...")
+        else:
+            model_note = f" using {model}" if model else ""
+            self._progress(f"Running AI project analysis{model_note}; this can take a minute...")
         ai_result = self.ai_generator.generate_all(rule_capabilities, kit_name, input_paths=input_paths)
         capabilities = ai_result["enhanced_capabilities"]
+        self._progress(f"Analysis complete. Writing {len(capabilities)} capabilities to {output_dir}...")
 
         kit = IntegrationKit(name=kit_name, capabilities=capabilities, output_dir=str(output_dir))
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -74,7 +86,12 @@ class AgentKitGenerator:
             if content:
                 write_text(output_dir / "skills" / f"{domain}.md", content)
 
+        self._progress(f"Generated AgentBridge kit at {output_dir}.")
         return kit
+
+    def _progress(self, message: str) -> None:
+        if self.progress:
+            self.progress(message)
 
 
 def build_kit_protocol_doc() -> str:

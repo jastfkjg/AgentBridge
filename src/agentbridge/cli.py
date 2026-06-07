@@ -31,7 +31,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "generate":
             paths = [Path(p) for p in args.paths]
             ai_gen = _create_ai_generator(args, paths)
-            kit = AgentKitGenerator(ai_generator=ai_gen).generate(paths, Path(args.output), args.name)
+            kit = AgentKitGenerator(ai_generator=ai_gen, progress=_print_progress).generate(
+                paths,
+                Path(args.output),
+                args.name,
+            )
             print(json.dumps(kit.to_manifest(), indent=2, sort_keys=True))
             return 0
         if args.command == "init":
@@ -117,7 +121,11 @@ def _run_init(args: argparse.Namespace) -> int:
     paths = [Path(p) for p in args.paths]
     output = Path(args.output)
     ai_gen = _create_ai_generator(args, paths)
-    kit = AgentKitGenerator(ai_generator=ai_gen).generate(paths, output, args.name)
+    kit = AgentKitGenerator(ai_generator=ai_gen, progress=_print_progress).generate(
+        paths,
+        output,
+        args.name,
+    )
     report = validate_kit(output)
     print(format_report(report))
     if not report.ok:
@@ -256,6 +264,10 @@ def _print_report(report: Any, as_json: bool = False) -> None:
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
     else:
         print(format_report(report))
+
+
+def _print_progress(message: str) -> None:
+    print(f"agentbridge: {message}", file=sys.stderr)
 
 
 def _add_chat_options(parser: argparse.ArgumentParser) -> None:

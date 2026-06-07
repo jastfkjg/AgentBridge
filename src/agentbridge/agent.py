@@ -171,7 +171,7 @@ class AIGenerator:
 
         parsed = _parse_json_object(result, {})
         if not parsed:
-            raise RuntimeError("LLM failed to return valid JSON for generation. Please check your API key and model configuration.")
+            raise RuntimeError(_invalid_generation_json_message(result))
 
         enhanced_caps = self._apply_enhanced_capabilities(capabilities, parsed)
         system_prompt = parsed.get("system_prompt", "")
@@ -268,10 +268,11 @@ class AIGenerator:
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt}],
         )
+        collected: list[str] = []
         for block in response.content:
-            if block.type == "text":
-                return block.text
-        return ""
+            if getattr(block, "type", "") == "text":
+                collected.append(getattr(block, "text", ""))
+        return "".join(collected)
 
 
 class AgentRunner:
@@ -456,33 +457,40 @@ def _run_async(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _invalid_generation_json_message(text: str) -> str:
+    message = (
+        "LLM failed to return valid JSON for generation. "
+        "Please check your API key and model configuration."
+    )
+    if os.environ.get("AGENTBRIDGE_DEBUG_LLM"):
+        preview = text.strip().replace("\n", "\\n")[:1000] or "<empty response>"
+        return f"{message} Response preview: {preview}"
+    return f"{message} Set AGENTBRIDGE_DEBUG_LLM=1 to include a response preview."
+
+
 def _parse_json_object(text: str, fallback: dict[str, Any]) -> dict[str, Any]:
-    try:
-        start = text.index("{")
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    return json.loads(text[start : i + 1])
-    except (ValueError, json.JSONDecodeError):
-        pass
+    decoder = json.JSONDecoder()
+    for start, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, _end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
     return fallback
 
 
 def _parse_json_array(text: str, fallback: list[Any]) -> list[Any]:
-    try:
-        start = text.index("[")
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] == "[":
-                depth += 1
-            elif text[i] == "]":
-                depth -= 1
-                if depth == 0:
-                    return json.loads(text[start : i + 1])
-    except (ValueError, json.JSONDecodeError):
-        pass
+    decoder = json.JSONDecoder()
+    for start, char in enumerate(text):
+        if char != "[":
+            continue
+        try:
+            parsed, _end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list):
+            return parsed
     return fallback
