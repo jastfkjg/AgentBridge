@@ -14,6 +14,7 @@ from agentbridge.client_config import MCPClientConfig, build_mcp_client_configs,
 from agentbridge.discovery import CapabilityDiscoverer
 from agentbridge.generator import AgentKitGenerator
 from agentbridge.kit import doctor_kit, format_report, validate_kit
+from agentbridge.models import Capability
 from agentbridge.mcp_server import MCPServerConfig, run_stdio_server
 from agentbridge.runtime import DryRunError, dry_run
 from agentbridge.static import StaticAIGenerator
@@ -31,7 +32,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "generate":
             paths = [Path(p) for p in args.paths]
             ai_gen = _create_ai_generator(args, paths)
-            kit = AgentKitGenerator(ai_generator=ai_gen, progress=_print_progress).generate(
+            kit = AgentKitGenerator(
+                ai_generator=ai_gen,
+                progress=_print_progress,
+                confirm_ai_analysis=_build_ai_confirmation(args),
+            ).generate(
                 paths,
                 Path(args.output),
                 args.name,
@@ -83,6 +88,7 @@ def _create_ai_generator(args: argparse.Namespace, paths: list[Path] | None = No
             api_key=getattr(args, "api_key", None),
             base_url=getattr(args, "base_url", None),
             model=getattr(args, "model", None),
+            timeout=getattr(args, "llm_timeout", None),
         )
     except (ValueError, ImportError) as exc:
         print(f"agentbridge: {exc}", file=sys.stderr)
@@ -121,7 +127,11 @@ def _run_init(args: argparse.Namespace) -> int:
     paths = [Path(p) for p in args.paths]
     output = Path(args.output)
     ai_gen = _create_ai_generator(args, paths)
-    kit = AgentKitGenerator(ai_generator=ai_gen, progress=_print_progress).generate(
+    kit = AgentKitGenerator(
+        ai_generator=ai_gen,
+        progress=_print_progress,
+        confirm_ai_analysis=_build_ai_confirmation(args),
+    ).generate(
         paths,
         output,
         args.name,
@@ -270,6 +280,56 @@ def _print_progress(message: str) -> None:
     print(f"agentbridge: {message}", file=sys.stderr)
 
 
+def _build_ai_confirmation(args: argparse.Namespace) -> Any:
+    threshold = int(getattr(args, "review_threshold", 100) or 0)
+    if threshold <= 0 or getattr(args, "yes", False):
+        return None
+    if not sys.stdin.isatty():
+        return None
+
+    def _confirm(capabilities: list[Capability], kit_name: str, output_dir: Path) -> bool:
+        if len(capabilities) < threshold:
+            return True
+        print(_format_capability_review(capabilities, kit_name, output_dir), file=sys.stderr)
+        print("Continue with AI analysis? This may take several minutes. [Y/n] ", end="", file=sys.stderr)
+        answer = sys.stdin.readline().strip().lower()
+        return answer in {"", "y", "yes"}
+
+    return _confirm
+
+
+def _format_capability_review(capabilities: list[Capability], kit_name: str, output_dir: Path) -> str:
+    domain_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    risk_counts: dict[str, int] = {}
+    for cap in capabilities:
+        domain_counts[cap.domain] = domain_counts.get(cap.domain, 0) + 1
+        action_counts[cap.action] = action_counts.get(cap.action, 0) + 1
+        risk_counts[cap.risk] = risk_counts.get(cap.risk, 0) + 1
+
+    lines = [
+        "",
+        f"agentbridge: Large project review for kit {kit_name!r}",
+        f"agentbridge: Output directory already created: {output_dir}",
+        f"agentbridge: Candidate capabilities discovered: {len(capabilities)}",
+        "agentbridge: Top domains:",
+    ]
+    for domain, count in sorted(domain_counts.items(), key=lambda item: (-item[1], item[0]))[:8]:
+        lines.append(f"  - {domain}: {count}")
+    lines.append("agentbridge: Top actions:")
+    for action, count in sorted(action_counts.items(), key=lambda item: (-item[1], item[0]))[:8]:
+        lines.append(f"  - {action}: {count}")
+    lines.append("agentbridge: Risk summary:")
+    for risk in ("read", "write", "destructive", "external_side_effect"):
+        if risk in risk_counts:
+            lines.append(f"  - {risk}: {risk_counts[risk]}")
+    lines.append("agentbridge: Example capabilities:")
+    for cap in sorted(capabilities, key=lambda item: (item.domain, item.resource, item.action, item.name))[:20]:
+        lines.append(f"  - {cap.name} ({cap.domain}/{cap.action}, risk={cap.risk})")
+    lines.append("agentbridge: Enter 'n' to skip AI analysis and finish a deterministic kit now.")
+    return "\n".join(lines)
+
+
 def _add_chat_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--user", default="local", help="User id used for chat memory and audit context.")
     parser.add_argument("--session", default="default", help="Session id used to load and save chat memory.")
@@ -281,6 +341,9 @@ def _add_llm_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--api-key", help="LLM API key. Defaults to ANTHROPIC_API_KEY env var.")
     parser.add_argument("--base-url", help="Custom LLM API endpoint. Defaults to ANTHROPIC_BASE_URL env var. Examples: https://api.deepseek.com/anthropic, https://openrouter.ai/api/v1")
     parser.add_argument("--model", help="LLM model name. Defaults to ANTHROPIC_MODEL env var or claude-sonnet-4-20250514. Examples: deepseek-v4-flash, claude-sonnet-4-20250514")
+    parser.add_argument("--llm-timeout", type=float, help="LLM request timeout in seconds. Defaults to AGENTBRIDGE_LLM_TIMEOUT or 300.")
+    parser.add_argument("--review-threshold", type=int, default=100, help="Prompt before AI analysis when discovered capabilities reach this count. Use 0 to disable.")
+    parser.add_argument("--yes", action="store_true", help="Skip interactive review prompts and continue with AI analysis.")
 
 
 def build_parser() -> argparse.ArgumentParser:

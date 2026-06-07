@@ -26,6 +26,7 @@ class AgentKitGenerator:
         ai_generator: AIGenerator,
         discoverer: CapabilityDiscoverer | None = None,
         progress: Callable[[str], None] | None = None,
+        confirm_ai_analysis: Callable[[list[Capability], str, Path], bool] | None = None,
     ) -> None:
         if not isinstance(ai_generator, AIGenerator):
             raise TypeError(
@@ -35,27 +36,73 @@ class AgentKitGenerator:
         self.ai_generator = ai_generator
         self.discoverer = discoverer or CapabilityDiscoverer()
         self.progress = progress
+        self.confirm_ai_analysis = confirm_ai_analysis
 
     def generate(self, input_paths: list[Path], output_dir: Path, name: str | None = None) -> IntegrationKit:
         self._progress("Checking output boundary...")
         validate_output_boundary(input_paths, output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        self._write_status(output_dir, "discovering", "Discovering candidate capabilities.")
         self._progress("Discovering candidate capabilities...")
         rule_capabilities = self.discoverer.discover(input_paths)
         kit_name = name or infer_kit_name(input_paths)
         self._progress(f"Discovered {len(rule_capabilities)} candidate capabilities for kit {kit_name!r}.")
+        write_json(output_dir / "analysis" / "rule_signals.json", {
+            "candidate_capabilities": [cap.to_dict() for cap in rule_capabilities],
+            "status": "discovered",
+        })
+        self._write_status(
+            output_dir,
+            "analyzing",
+            "Candidate discovery complete. Waiting for LLM project analysis.",
+            kit_name=kit_name,
+            candidate_capability_count=len(rule_capabilities),
+        )
 
-        model = getattr(self.ai_generator, "model", "")
+        analysis_generator = self.ai_generator
+        if self._should_offer_ai_confirmation(analysis_generator):
+            if not self.confirm_ai_analysis(rule_capabilities, kit_name, output_dir):
+                from agentbridge.static import StaticAIGenerator
+
+                self._progress("Skipping AI analysis. Generating deterministic kit metadata...")
+                self._write_status(
+                    output_dir,
+                    "skipped_ai",
+                    "User skipped AI analysis after reviewing discovered capabilities.",
+                    kit_name=kit_name,
+                    candidate_capability_count=len(rule_capabilities),
+                )
+                analysis_generator = StaticAIGenerator()
+
+        model = getattr(analysis_generator, "model", "")
         if model == "static":
             self._progress("Generating deterministic kit metadata...")
         else:
             model_note = f" using {model}" if model else ""
             self._progress(f"Running AI project analysis{model_note}; this can take a minute...")
-        ai_result = self.ai_generator.generate_all(rule_capabilities, kit_name, input_paths=input_paths)
+        try:
+            ai_result = analysis_generator.generate_all(rule_capabilities, kit_name, input_paths=input_paths)
+        except Exception as exc:
+            self._write_status(
+                output_dir,
+                "failed",
+                str(exc),
+                kit_name=kit_name,
+                candidate_capability_count=len(rule_capabilities),
+            )
+            raise
         capabilities = ai_result["enhanced_capabilities"]
         self._progress(f"Analysis complete. Writing {len(capabilities)} capabilities to {output_dir}...")
 
         kit = IntegrationKit(name=kit_name, capabilities=capabilities, output_dir=str(output_dir))
-        output_dir.mkdir(parents=True, exist_ok=True)
+        self._write_status(
+            output_dir,
+            "writing",
+            "Analysis complete. Writing kit files.",
+            kit_name=kit_name,
+            candidate_capability_count=len(rule_capabilities),
+            capability_count=len(capabilities),
+        )
 
         write_json(output_dir / "manifest.json", kit.to_manifest())
         write_json(output_dir / "capabilities.json", [cap.to_dict() for cap in capabilities])
@@ -86,12 +133,30 @@ class AgentKitGenerator:
             if content:
                 write_text(output_dir / "skills" / f"{domain}.md", content)
 
+        self._write_status(
+            output_dir,
+            "complete",
+            "Generated AgentBridge kit.",
+            kit_name=kit_name,
+            candidate_capability_count=len(rule_capabilities),
+            capability_count=len(capabilities),
+        )
         self._progress(f"Generated AgentBridge kit at {output_dir}.")
         return kit
 
     def _progress(self, message: str) -> None:
         if self.progress:
             self.progress(message)
+
+    def _should_offer_ai_confirmation(self, ai_generator: AIGenerator) -> bool:
+        return bool(self.confirm_ai_analysis and getattr(ai_generator, "model", "") != "static")
+
+    def _write_status(self, output_dir: Path, status: str, message: str, **extra: Any) -> None:
+        write_json(output_dir / "generation_status.json", {
+            "status": status,
+            "message": message,
+            **extra,
+        })
 
 
 def build_kit_protocol_doc() -> str:

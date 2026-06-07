@@ -135,6 +135,36 @@ class GeneratorRuntimeTests(unittest.TestCase):
             AgentKitGenerator(ai_generator=gen).generate([EXAMPLE], output, name="writing-kit")
             gen.generate_all.assert_called_once()
 
+    def test_generate_leaves_status_when_ai_generation_fails(self):
+        gen = _make_mock_generator()
+        gen.generate_all.side_effect = RuntimeError("mock llm timeout")
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+
+            with self.assertRaises(RuntimeError):
+                AgentKitGenerator(ai_generator=gen).generate([EXAMPLE], output, name="writing-kit")
+
+            status = json.loads((output / "generation_status.json").read_text(encoding="utf-8"))
+            rule_signals = json.loads((output / "analysis" / "rule_signals.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "failed")
+            self.assertIn("mock llm timeout", status["message"])
+            self.assertGreater(len(rule_signals["candidate_capabilities"]), 0)
+
+    def test_generate_can_skip_ai_after_discovery_review(self):
+        gen = _make_mock_generator()
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            kit = AgentKitGenerator(
+                ai_generator=gen,
+                confirm_ai_analysis=lambda _caps, _name, _output: False,
+            ).generate([EXAMPLE], output, name="writing-kit")
+
+            gen.generate_all.assert_not_called()
+            self.assertGreaterEqual(len(kit.capabilities), 8)
+            self.assertTrue((output / "manifest.json").exists())
+            status = json.loads((output / "generation_status.json").read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "complete")
+
     def test_output_boundary_blocks_regular_project_subdirectory(self):
         with self.assertRaises(GenerationBoundaryError):
             validate_output_boundary([EXAMPLE], EXAMPLE / "generated-kit")

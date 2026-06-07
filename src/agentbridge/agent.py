@@ -22,6 +22,7 @@ class AIGenerator:
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        timeout: float | None = None,
     ) -> None:
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if not self.api_key:
@@ -31,6 +32,7 @@ class AIGenerator:
             )
         self.base_url = base_url or os.environ.get("ANTHROPIC_BASE_URL", "")
         self.model = model or os.environ.get("ANTHROPIC_MODEL", "") or _DEFAULT_MODEL
+        self.timeout = timeout if timeout is not None else _env_float("AGENTBRIDGE_LLM_TIMEOUT", 300.0)
 
         os.environ.setdefault("ANTHROPIC_API_KEY", self.api_key)
         if self.base_url:
@@ -262,12 +264,21 @@ class AIGenerator:
         if self.base_url:
             kwargs["base_url"] = self.base_url
         client = anthropic.Anthropic(**kwargs)
-        response = client.messages.create(
-            model=self.model,
-            max_tokens=8192,
-            system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
+        try:
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=8192,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+                timeout=self.timeout,
+            )
+        except Exception as exc:
+            if _is_timeout_error(exc):
+                raise RuntimeError(
+                    f"LLM request timed out after {self.timeout:g} seconds. "
+                    "Try a faster model, increase --llm-timeout, or run with --no-ai for deterministic generation."
+                ) from exc
+            raise
         collected: list[str] = []
         for block in response.content:
             if getattr(block, "type", "") == "text":
@@ -466,6 +477,25 @@ def _invalid_generation_json_message(text: str) -> str:
         preview = text.strip().replace("\n", "\\n")[:1000] or "<empty response>"
         return f"{message} Response preview: {preview}"
     return f"{message} Set AGENTBRIDGE_DEBUG_LLM=1 to include a response preview."
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name, "")
+    if not value:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    names = {exc.__class__.__name__}
+    cause = exc.__cause__
+    if cause is not None:
+        names.add(cause.__class__.__name__)
+    return bool(names & {"APITimeoutError", "ReadTimeout", "TimeoutException", "TimeoutError"})
 
 
 def _parse_json_object(text: str, fallback: dict[str, Any]) -> dict[str, Any]:
