@@ -1,4 +1,5 @@
 import json
+import builtins
 import os
 import sys
 import tempfile
@@ -39,7 +40,7 @@ class AgentProgressTests(unittest.TestCase):
         self.assertTrue(any("Sending AI analysis request" in message for message in messages))
         self.assertTrue(any("Received AI analysis response" in message for message in messages))
 
-    def test_generate_all_uses_agentic_sdk_and_reports_tool_progress(self):
+    def test_generate_all_uses_agentic_sdk_with_compatible_base_url(self):
         messages: list[str] = []
 
         class FakeTextBlock:
@@ -87,7 +88,8 @@ class AgentProgressTests(unittest.TestCase):
         fake_module.ClaudeAgentOptions = FakeClaudeAgentOptions
         fake_module.query = fake_query
 
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"claude_agent_sdk": fake_module}), patch.dict(os.environ, {"ANTHROPIC_BASE_URL": ""}, clear=False):
+        base_url = "https://api.deepseek.com/anthropic"
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"claude_agent_sdk": fake_module}), patch.dict(os.environ, {"ANTHROPIC_BASE_URL": base_url}, clear=False):
             root = Path(tmp)
             (root / "app.py").write_text("print('hello')\n", encoding="utf-8")
 
@@ -95,10 +97,25 @@ class AgentProgressTests(unittest.TestCase):
             result = gen.generate_all([], "kit", input_paths=[root])
 
         self.assertEqual(FakeClaudeAgentOptions.last_kwargs["cwd"], str(root.resolve()))
+        self.assertEqual(FakeClaudeAgentOptions.last_kwargs["base_url"], base_url)
         self.assertTrue(any("Using Claude Agent SDK agentic analysis" in message for message in messages))
-        self.assertTrue(any("Claude Agent SDK tool call: Read" in message for message in messages))
-        self.assertTrue(any("Claude Agent SDK assistant text received" in message for message in messages))
+        self.assertTrue(any(base_url in message for message in messages))
+        self.assertTrue(any("Claude Agent SDK reading file: app.py" in message for message in messages))
+        self.assertTrue(any("Claude Agent SDK generated batch analysis JSON" in message for message in messages))
         self.assertEqual(result["system_prompt"], "")
+
+    def test_agentic_backend_detection_does_not_import_claude_agent_sdk(self):
+        original_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name == "claude_agent_sdk":
+                raise AssertionError("claude_agent_sdk should not be imported during backend detection")
+            return original_import(name, *args, **kwargs)
+
+        with patch("importlib.util.find_spec", return_value=object()), patch("builtins.__import__", side_effect=guarded_import):
+            gen = AIGenerator(api_key="sk-test", analysis_mode="agentic")
+
+        self.assertEqual(gen._backend, "agent-sdk")
 
 
 if __name__ == "__main__":

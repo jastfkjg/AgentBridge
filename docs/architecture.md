@@ -5,8 +5,8 @@ AgentBridge uses an AI-agent-first generation pipeline while keeping determinist
 ## Flow
 
 1. Candidate discoverers scan OpenAPI, GraphQL, SQL, routes, and database definitions.
-2. For project directories, the AI analysis agent reads project code and candidate evidence. For schema-only inputs, `--no-ai` can emit a runnable deterministic kit.
-3. The AI agent produces project analysis, risk reasoning, enhanced capabilities, skills, and prompts.
+2. For project directories, the AI analysis agent prefers Claude Agent SDK agentic exploration, reads project code and candidate evidence, and can work in batches with resume checkpoints. For schema-only inputs, `--no-ai` can emit a runnable deterministic kit.
+3. The AI agent produces project analysis, risk reasoning, enhanced capabilities, skills, prompts, and optional batch checkpoints for large projects.
 4. The generator writes the `agentbridge-kit/v1` protocol directory.
 5. `agentbridge serve` exposes the kit as a stdio MCP Server for Claude, Codex, or other MCP clients.
 6. `agentbridge chat` and `agentbridge web` provide user-facing chat entrypoints over the same kit runtime.
@@ -26,6 +26,12 @@ This schema-only path does not require an LLM. OpenAPI operations are normalized
 ## Why Keep Rules
 
 Rules are cheap, deterministic evidence collectors, and they also support the no-LLM OpenAPI-to-MCP path. They should not be treated as the final business model. Understanding controller/service behavior, workflow intent, side effects, and implied operations belongs to the AI analysis layer.
+
+## Large-Project Analysis
+
+AgentBridge splits large project analysis into ranked batches. The first batch targets the main capabilities, then the CLI can ask whether to continue enhancing the remaining batches. Batch progress is recorded under `analysis/resume_state.json` and `analysis/batches/*.json`, and `--resume` skips batches that already completed.
+
+`--analysis-mode auto` prefers Claude Agent SDK when `claude-agent-sdk` is installed, including when `ANTHROPIC_BASE_URL` points to an Anthropic-compatible endpoint such as DeepSeek. `--analysis-mode agentic` requires the SDK route, while `--analysis-mode prompt` forces direct prompt-based generation.
 
 ## Project Write Boundary
 

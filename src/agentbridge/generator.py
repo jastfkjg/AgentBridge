@@ -32,6 +32,7 @@ class AgentKitGenerator:
         progress: Callable[[str], None] | None = None,
         confirm_ai_analysis: Callable[[list[Capability], str, Path], bool] | None = None,
         confirm_remaining_analysis: Callable[[dict[str, Any]], bool] | None = None,
+        answer_agentic_questions: Callable[[dict[str, Any]], dict[str, str]] | None = None,
         progress_interval: float | None = None,
         analysis_batch_size: int | None = None,
         resume: bool = False,
@@ -47,9 +48,11 @@ class AgentKitGenerator:
         self.progress = progress
         self.confirm_ai_analysis = confirm_ai_analysis
         self.confirm_remaining_analysis = confirm_remaining_analysis
+        self.answer_agentic_questions = answer_agentic_questions
         self.progress_interval = progress_interval if progress_interval is not None else 15.0
         configured_batch_size = analysis_batch_size if analysis_batch_size is not None else analysis_capability_limit
-        self.analysis_batch_size = configured_batch_size if configured_batch_size is not None else _env_int("AGENTBRIDGE_AI_BATCH_SIZE", 30)
+        default_batch_size = 10 if getattr(ai_generator, "analysis_mode", "") == "agentic" else 30
+        self.analysis_batch_size = configured_batch_size if configured_batch_size is not None else _env_int("AGENTBRIDGE_AI_BATCH_SIZE", default_batch_size)
         self.resume = resume
 
     def generate(self, input_paths: list[Path], output_dir: Path, name: str | None = None) -> IntegrationKit:
@@ -195,6 +198,20 @@ class AgentKitGenerator:
         if self.progress:
             self.progress(message)
 
+    def _status_progress(self, output_dir: Path, status: str, status_message: str, **extra: Any) -> Callable[[str], None]:
+        def _emit(message: str) -> None:
+            self._progress(message)
+            event_key = "last_sdk_event" if "Claude Agent SDK" in message else "last_ai_event"
+            self._write_status(
+                output_dir,
+                status,
+                status_message,
+                **extra,
+                **{event_key: message},
+            )
+
+        return _emit
+
     def _should_offer_ai_confirmation(self, ai_generator: AIGenerator) -> bool:
         return bool(self.confirm_ai_analysis and getattr(ai_generator, "model", "") != "static")
 
@@ -208,13 +225,28 @@ class AgentKitGenerator:
         status_lock: threading.Lock,
     ) -> tuple[dict[str, Any], list[list[Capability]]]:
         model = getattr(analysis_generator, "model", "")
-        batches = [rule_capabilities] if model == "static" else self._build_analysis_batches(rule_capabilities)
+        use_agentic = (
+            hasattr(analysis_generator, "uses_agentic_analysis")
+            and analysis_generator.uses_agentic_analysis(input_paths)
+        )
+        agentic_plan: dict[str, Any] = {}
+        if model != "static" and use_agentic:
+            agentic_plan = self._prepare_agentic_project_plan(
+                analysis_generator,
+                rule_capabilities,
+                kit_name,
+                input_paths,
+                output_dir,
+                status_lock,
+            )
+        preferred_order = _capability_order_from_plan(agentic_plan)
+        batches = [rule_capabilities] if model == "static" else self._build_analysis_batches(rule_capabilities, preferred_order)
         batch_count = len(batches)
         if model == "static":
             self._progress("Generating deterministic kit metadata...")
         else:
             mode_note = ""
-            if hasattr(analysis_generator, "uses_agentic_analysis") and analysis_generator.uses_agentic_analysis(input_paths):
+            if use_agentic:
                 mode_note = " with Claude Agent SDK agentic project exploration"
             model_note = f" using {model}" if model else ""
             self._progress(
@@ -304,6 +336,137 @@ class AgentKitGenerator:
                 break
 
         return self._merge_batch_results(rule_capabilities, batch_results), analyzed_batches
+
+    def _prepare_agentic_project_plan(
+        self,
+        analysis_generator: AIGenerator,
+        rule_capabilities: list[Capability],
+        kit_name: str,
+        input_paths: list[Path],
+        output_dir: Path,
+        status_lock: threading.Lock,
+    ) -> dict[str, Any]:
+        plan_path = output_dir / "analysis" / "agentic_plan.json"
+        if self.resume:
+            existing_plan = self._load_agentic_plan(plan_path)
+            if existing_plan is not None:
+                self._progress(f"Using existing Claude Agent SDK project understanding plan: {plan_path}")
+                self._apply_agentic_plan_guidance(analysis_generator, existing_plan)
+                return existing_plan
+
+        self._write_status(
+            output_dir,
+            "planning",
+            "Claude Agent SDK is inspecting the project and planning the main capability batches.",
+            kit_name=kit_name,
+            candidate_capability_count=len(rule_capabilities),
+            lock=status_lock,
+        )
+        heartbeat_stop = threading.Event()
+        heartbeat_thread = threading.Thread(
+            target=self._planning_heartbeat,
+            args=(heartbeat_stop, output_dir, kit_name, len(rule_capabilities), status_lock),
+            daemon=True,
+        )
+        heartbeat_thread.start()
+        try:
+            if hasattr(analysis_generator, "set_progress"):
+                analysis_generator.set_progress(
+                    self._status_progress(
+                        output_dir,
+                        "planning",
+                        "Claude Agent SDK is inspecting the project and planning the main capability batches.",
+                        kit_name=kit_name,
+                        candidate_capability_count=len(rule_capabilities),
+                        lock=status_lock,
+                    )
+                )
+            plan = analysis_generator.plan_agentic_analysis(rule_capabilities, kit_name, input_paths)
+            if not isinstance(plan, dict):
+                plan = {
+                    "status": "fallback",
+                    "reason": "Claude Agent SDK project planning returned a non-object result.",
+                    "main_capability_names": [],
+                    "questions": [],
+                    "notes_for_generation": "",
+                }
+        except Exception as exc:
+            self._progress(f"Claude Agent SDK project planning failed; falling back to scanner-ranked batches: {exc}")
+            plan = {
+                "status": "fallback",
+                "reason": str(exc),
+                "main_capability_names": [],
+                "questions": [],
+                "notes_for_generation": "",
+            }
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1.0)
+
+        questions = [str(item) for item in plan.get("questions", []) if str(item).strip()][:3]
+        summary = str(plan.get("project_summary", "") or "").strip()
+        main_names = _capability_order_from_plan(plan)
+        if summary:
+            self._progress(f"Claude Agent SDK project summary: {summary[:300]}")
+        if main_names:
+            preview = ", ".join(main_names[:8])
+            if len(main_names) > 8:
+                preview += ", ..."
+            self._progress(f"Claude Agent SDK prioritized {len(main_names)} main capabilities: {preview}")
+        if questions:
+            self._progress(f"Claude Agent SDK has {len(questions)} clarifying question(s) before generation.")
+            self._write_status(
+                output_dir,
+                "planning_questions",
+                "Claude Agent SDK has clarifying questions before generation.",
+                kit_name=kit_name,
+                candidate_capability_count=len(rule_capabilities),
+                agentic_project_summary=summary,
+                agentic_questions=questions,
+                lock=status_lock,
+            )
+        if questions and self.answer_agentic_questions:
+            answers = self.answer_agentic_questions({
+                "kit_name": kit_name,
+                "output_dir": output_dir,
+                "questions": questions,
+                "project_summary": plan.get("project_summary", ""),
+            })
+            plan["user_answers"] = answers
+        self._apply_agentic_plan_guidance(analysis_generator, plan)
+        self._write_json(plan_path, plan)
+        self._write_status(
+            output_dir,
+            "planning_complete",
+            "Claude Agent SDK project understanding plan is ready.",
+            kit_name=kit_name,
+            candidate_capability_count=len(rule_capabilities),
+            agentic_project_summary=summary,
+            agentic_main_capability_count=len(main_names),
+            agentic_questions=questions,
+            agentic_plan_status=plan.get("status", ""),
+            lock=status_lock,
+        )
+        return plan
+
+    def _load_agentic_plan(self, path: Path) -> dict[str, Any] | None:
+        try:
+            plan = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return plan if isinstance(plan, dict) else None
+
+    def _apply_agentic_plan_guidance(self, analysis_generator: AIGenerator, plan: dict[str, Any]) -> None:
+        if not hasattr(analysis_generator, "set_agentic_guidance"):
+            return
+        guidance = {
+            "project_summary": plan.get("project_summary", ""),
+            "main_capability_names": plan.get("main_capability_names", []),
+            "remaining_strategy": plan.get("remaining_strategy", ""),
+            "notes_for_generation": plan.get("notes_for_generation", ""),
+            "user_answers": plan.get("user_answers", {}),
+        }
+        analysis_generator.set_agentic_guidance(json.dumps(guidance, indent=2, sort_keys=True))
 
     def _should_continue_after_primary_batch(
         self,
@@ -427,7 +590,20 @@ class AgentKitGenerator:
                 )
         try:
             if hasattr(analysis_generator, "set_progress"):
-                analysis_generator.set_progress(self.progress)
+                analysis_generator.set_progress(
+                    self._status_progress(
+                        output_dir,
+                        "analyzing",
+                        f"Enhancing AI batch {batch_index}/{batch_count}.",
+                        kit_name=kit_name,
+                        candidate_capability_count=total_capability_count,
+                        analysis_batch_count=batch_count,
+                        current_batch_index=batch_index,
+                        current_batch_capability_count=len(batch),
+                        current_batch_capabilities=[cap.name for cap in batch],
+                        lock=status_lock,
+                    )
+                )
             ai_result = analysis_generator.generate_all(batch, kit_name, input_paths=batch_input_paths)
         except Exception as exc:
             self._write_status(
@@ -544,16 +720,28 @@ class AgentKitGenerator:
                     merged[key].update(value)
         return merged
 
-    def _build_analysis_batches(self, capabilities: list[Capability]) -> list[list[Capability]]:
-        ranked = self._rank_analysis_capabilities(capabilities)
+    def _build_analysis_batches(self, capabilities: list[Capability], preferred_order: list[str] | None = None) -> list[list[Capability]]:
+        ranked = self._rank_analysis_capabilities(capabilities, preferred_order)
         batch_size = self._batch_size_for(capabilities)
         if batch_size <= 0 or batch_size >= len(ranked):
             return [ranked]
         return [ranked[index : index + batch_size] for index in range(0, len(ranked), batch_size)]
 
-    def _rank_analysis_capabilities(self, capabilities: list[Capability]) -> list[Capability]:
+    def _rank_analysis_capabilities(self, capabilities: list[Capability], preferred_order: list[str] | None = None) -> list[Capability]:
         if len(capabilities) <= 1:
             return capabilities
+
+        if preferred_order:
+            by_name = {cap.name: cap for cap in capabilities}
+            ordered: list[Capability] = []
+            seen: set[str] = set()
+            for name in preferred_order:
+                cap = by_name.get(name)
+                if cap is not None and name not in seen:
+                    ordered.append(cap)
+                    seen.add(name)
+            remaining = [cap for cap in capabilities if cap.name not in seen]
+            return ordered + self._rank_analysis_capabilities(remaining)
 
         domain_counts = Counter(cap.domain for cap in capabilities)
         action_counts = Counter(cap.action for cap in capabilities)
@@ -736,6 +924,35 @@ class AgentKitGenerator:
                 lock=status_lock,
             )
 
+    def _planning_heartbeat(
+        self,
+        stop_event: threading.Event,
+        output_dir: Path,
+        kit_name: str,
+        total_capability_count: int,
+        status_lock: threading.Lock,
+    ) -> None:
+        started = time.monotonic()
+        interval = float(self.progress_interval or 0.0)
+        if interval <= 0:
+            return
+        while not stop_event.wait(interval):
+            elapsed = int(time.monotonic() - started)
+            message = (
+                f"Still waiting for Claude Agent SDK project understanding plan "
+                f"({elapsed}s elapsed, {total_capability_count} candidate capabilities)."
+            )
+            self._progress(message)
+            self._write_status(
+                output_dir,
+                "planning",
+                message,
+                kit_name=kit_name,
+                candidate_capability_count=total_capability_count,
+                elapsed_seconds=elapsed,
+                lock=status_lock,
+            )
+
 
 def _env_int(name: str, default: int) -> int:
     value = os.environ.get(name, "")
@@ -746,6 +963,20 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return parsed if parsed >= 0 else default
+
+
+def _capability_order_from_plan(plan: dict[str, Any]) -> list[str]:
+    names = plan.get("main_capability_names", [])
+    if not isinstance(names, list):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in names:
+        name = str(item).strip()
+        if name and name not in seen:
+            result.append(name)
+            seen.add(name)
+    return result
 
 
 def build_kit_protocol_doc() -> str:

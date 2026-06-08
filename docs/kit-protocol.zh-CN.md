@@ -47,6 +47,15 @@ agent-kit/
 - `clients/mcp-client-configs.json` 保存 Claude/Codex/通用 MCP 接入配置片段。
 - `dry_run_plan.json` 描述计划调用，不执行真实副作用。
 
+## 可选分析检查点
+
+大型项目生成时还可能写入：
+
+- `analysis/resume_state.json`：当前批次计划、已完成批次、剩余批次和 partial/complete 状态。
+- `analysis/batches/*.json`：已完成的 AI 增强批次输出，供 `--resume` 使用。
+
+这些文件是增量文件，不是 `agentbridge-kit/v1` 消费者的必需文件，但工具可以读取它们来展示进度或继续未完成的 AI 增强。
+
 ## MCP Server 运行时
 
 `agentbridge serve <kit>` 会读取 `manifest.json`、`capabilities.json` 和 `guardrails/permissions.json`，并通过 stdio JSON-RPC 暴露 MCP `tools/list` 与 `tools/call`。

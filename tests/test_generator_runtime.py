@@ -1,6 +1,9 @@
 import tempfile
+import sys
+import types
 import unittest
 import time
+import threading
 from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
@@ -131,6 +134,34 @@ class GeneratorRuntimeTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             AgentKitGenerator()
 
+    def test_agentic_default_batch_size_is_smaller(self):
+        agentic = _make_mock_generator()
+        agentic.analysis_mode = "agentic"
+        prompt = _make_mock_generator()
+        prompt.analysis_mode = "prompt"
+
+        self.assertEqual(AgentKitGenerator(ai_generator=agentic).analysis_batch_size, 10)
+        self.assertEqual(AgentKitGenerator(ai_generator=prompt).analysis_batch_size, 30)
+
+    def test_status_progress_writes_last_sdk_event(self):
+        gen = _make_mock_generator()
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            output.mkdir()
+            generator = AgentKitGenerator(ai_generator=gen, progress=lambda _message: None)
+            emit = generator._status_progress(
+                output,
+                "planning",
+                "Planning project understanding.",
+                kit_name="writing-kit",
+                candidate_capability_count=21,
+            )
+            emit("Claude Agent SDK reading file: app.py")
+            status = json.loads((output / "generation_status.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(status["status"], "planning")
+        self.assertEqual(status["last_sdk_event"], "Claude Agent SDK reading file: app.py")
+
     def test_generate_calls_ai_generator(self):
         gen = _make_mock_generator()
         with tempfile.TemporaryDirectory() as tmp:
@@ -170,23 +201,27 @@ class GeneratorRuntimeTests(unittest.TestCase):
 
     def test_generate_emits_waiting_heartbeat_during_ai_analysis(self):
         gen = _make_mock_generator()
-
-        def _slow_generate_all(*_args, **_kwargs):
-            time.sleep(0.05)
-            return gen.generate_all.return_value
-
-        gen.generate_all.side_effect = _slow_generate_all
         messages: list[str] = []
 
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "kit"
-            AgentKitGenerator(
+            output.mkdir()
+            generator = AgentKitGenerator(
                 ai_generator=gen,
                 progress=messages.append,
                 progress_interval=0.01,
-            ).generate([EXAMPLE], output, name="writing-kit")
+            )
+            stop_event = threading.Event()
+            status_lock = threading.Lock()
+            stopper = threading.Timer(0.05, stop_event.set)
+            stopper.start()
+            generator._analysis_heartbeat(stop_event, output, "writing-kit", 21, 1, 2, 5, status_lock)
+            stopper.cancel()
+
+            status = json.loads((output / "generation_status.json").read_text(encoding="utf-8"))
 
         self.assertTrue(any("Still waiting for AI batch" in message for message in messages))
+        self.assertEqual(status["status"], "analyzing")
 
     def test_generate_reports_written_files(self):
         gen = _make_mock_generator()
@@ -258,9 +293,19 @@ class GeneratorRuntimeTests(unittest.TestCase):
     def test_agentic_batches_receive_project_paths_instead_of_file_slices(self):
         gen = _make_mock_generator()
         gen.uses_agentic_analysis.return_value = True
+        raw_caps = CapabilityDiscoverer().discover([EXAMPLE])
+        preferred = raw_caps[-1].name
+        gen.plan_agentic_analysis.return_value = {
+            "project_summary": "SDK-led project plan.",
+            "main_capability_names": [preferred],
+            "questions": ["Which domain should be prioritized?"],
+            "notes_for_generation": "Prioritize the writing workflow.",
+        }
         captured_input_paths: list[list[Path]] = []
+        captured_batches: list[list[Any]] = []
 
         def _generate_all(caps, _kit_name, input_paths=None):
+            captured_batches.append(list(caps))
             captured_input_paths.append(list(input_paths or []))
             return {
                 "enhanced_capabilities": list(caps),
@@ -288,10 +333,15 @@ class GeneratorRuntimeTests(unittest.TestCase):
                 ai_generator=gen,
                 progress=lambda _message: None,
                 analysis_capability_limit=5,
+                answer_agentic_questions=lambda _context: {"q1": "writing"},
             ).generate([EXAMPLE], output, name="writing-kit")
+            plan = json.loads((output / "analysis" / "agentic_plan.json").read_text(encoding="utf-8"))
 
+        self.assertEqual(captured_batches[0][0].name, preferred)
+        self.assertEqual(plan["user_answers"], {"q1": "writing"})
         self.assertGreater(len(captured_input_paths), 1)
         self.assertTrue(all(paths == [EXAMPLE] for paths in captured_input_paths))
+        gen.set_agentic_guidance.assert_called()
 
     def test_generate_resume_skips_completed_batches(self):
         def _batch_response(caps):
@@ -414,6 +464,7 @@ class GeneratorRuntimeTests(unittest.TestCase):
                 code = cli.main(["generate", str(EXAMPLE), "--output", str(Path(tmp) / "kit")])
 
             self.assertEqual(code, 1)
+            self.assertIn("Starting generation", stderr.getvalue())
             self.assertIn("Project directory analysis requires an AI backend", stderr.getvalue())
 
     def test_cli_recommends_claude_agent_sdk_when_missing(self):
@@ -428,8 +479,9 @@ class GeneratorRuntimeTests(unittest.TestCase):
             "prompt",
         ])
         stderr = StringIO()
+        fake_anthropic = types.ModuleType("anthropic")
 
-        with patch("agentbridge.cli._claude_agent_sdk_installed", return_value=False), redirect_stderr(stderr):
+        with patch("agentbridge.cli._claude_agent_sdk_installed", return_value=False), patch.dict(sys.modules, {"anthropic": fake_anthropic}), redirect_stderr(stderr):
             gen = cli._create_ai_generator(args, [EXAMPLE])
 
         self.assertIsInstance(gen, AIGenerator)

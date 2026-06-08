@@ -96,6 +96,12 @@ OpenAPI, GraphQL, SQL, and route scanners provide candidate signals for the AI a
 pip install agbr
 ```
 
+For project-directory analysis, install the Agent SDK extra. This is the recommended path because it lets AgentBridge use the Claude Agent SDK to explore the project incrementally and stream tool/progress events:
+
+```bash
+pip install "agbr[agent]"
+```
+
 <details>
 <summary>📦 Install with optional features</summary>
 
@@ -119,7 +125,7 @@ pip install -e ".[all]"
 
 ### Configure LLM Provider
 
-AgentBridge relies on an AI backend for existing-project understanding. Deterministic scanners and regex/rule signals are used as evidence for the AI agent, not as the final project model. The schema-only OpenAPI-to-MCP path can run with `--no-ai`; directory-level project analysis should use Claude Agent SDK or another Anthropic-compatible provider.
+AgentBridge relies on an AI backend for existing-project understanding. Deterministic scanners and regex/rule signals are used as evidence for the AI agent, not as the final project model. The schema-only OpenAPI-to-MCP path can run with `--no-ai`; directory-level project analysis should use Claude Agent SDK. Anthropic-compatible endpoints such as DeepSeek and OpenRouter can be configured through `ANTHROPIC_BASE_URL`.
 
 ```bash
 # Required for project directory analysis
@@ -140,10 +146,11 @@ export ANTHROPIC_MODEL="deepseek-v4-flash"
 agentbridge generate examples/writing_system --output build/kit \
   --api-key "sk-..." \
   --base-url "https://api.deepseek.com/anthropic" \
-  --model "deepseek-v4-flash"
+  --model "deepseek-v4-flash" \
+  --analysis-mode agentic
 ```
 
-> **Note:** When `ANTHROPIC_BASE_URL` is set, AgentBridge automatically uses the `anthropic` SDK backend (not `claude-agent-sdk`) for generation, since custom endpoints are not supported by the agent SDK.
+> **Note:** `--analysis-mode auto` prefers Claude Agent SDK whenever `claude-agent-sdk` is installed, even when `ANTHROPIC_BASE_URL` points to a compatible endpoint. Use `--analysis-mode prompt` to force the direct Anthropic-compatible prompt route.
 
 </details>
 
@@ -151,8 +158,15 @@ agentbridge generate examples/writing_system --output build/kit \
 
 ```bash
 # Project directory analysis uses AI. Generated files are written only to --output.
-agentbridge generate examples/writing_system --output .agentbridge/writing-kit
+agentbridge generate examples/writing_system \
+  --output .agentbridge/writing-kit \
+  --analysis-mode agentic \
+  --batch-size 10 \
+  --resume \
+  --progress-interval 5
 ```
+
+For large projects, AgentBridge analyzes the primary capability batch first, then asks whether to continue enhancing the remaining capabilities. If you stop after the first batch, the kit is still generated with deterministic metadata for the rest; rerun with `--resume` to fill in remaining AI-enhanced batches.
 
 ### Run an MCP Server from OpenAPI
 
@@ -201,7 +215,7 @@ PYTHONPATH=src python -m unittest discover -s tests
 |---|---|
 | `agentbridge discover <paths>` | Discover and print capabilities as JSON |
 | `agentbridge init <paths> -o <dir>` | Generate, validate, and print next steps for a new kit |
-| `agentbridge generate <paths> -o <dir>` | Generate an Agent Integration Kit; uses AI enhancement when configured |
+| `agentbridge generate <paths> -o <dir>` | Generate an Agent Integration Kit; uses AI enhancement when configured, with `--analysis-mode`, `--resume`, and batch progress support |
 | `agentbridge validate <kit>` | Validate kit protocol, guardrails, transports, and secret hygiene |
 | `agentbridge doctor <kit>` | Diagnose kit readiness for dry-run or execution mode |
 | `agentbridge mcp-config <kit>` | Print or write Claude/Codex/generic MCP client snippets |
@@ -233,7 +247,19 @@ agentbridge generate examples/writing_system --output build/agent-kit --name my-
 
 # With custom LLM provider
 agentbridge generate examples/writing_system --output build/agent-kit \
-  --api-key "sk-..." --base-url "https://api.deepseek.com/anthropic" --model "deepseek-v4-flash"
+  --api-key "sk-..." \
+  --base-url "https://api.deepseek.com/anthropic" \
+  --model "deepseek-v4-flash" \
+  --analysis-mode agentic \
+  --batch-size 10 \
+  --resume \
+  --progress-interval 5
+
+# Force the direct prompt route instead of Claude Agent SDK
+agentbridge generate examples/writing_system --output build/agent-kit \
+  --analysis-mode prompt \
+  --batch-size 10 \
+  --resume
 ```
 
 ### `dry-run`
@@ -326,7 +352,7 @@ AgentBridge is designed so the AI agent performs the main project understanding 
 | Stage | Role |
 |---|---|
 | Candidate scanning | Extract OpenAPI operations, GraphQL fields, SQL tables, and route handlers |
-| AI project analysis | Infer business objects, workflows, permission boundaries, side effects, missing operations, and assumptions |
+| AI project analysis | Claude Agent SDK explores project files read-only, then infers business objects, workflows, permission boundaries, side effects, missing operations, and assumptions |
 | Capability normalization | Convert the AI-enhanced analysis into stable tool-ready capabilities |
 | Kit generation | Emit tools, skills, prompts, resource schemas, guardrails, dry-run plans, and tests |
 
@@ -336,6 +362,7 @@ The generated kit preserves both layers:
 
 - `analysis/rule_signals.json`: deterministic candidate evidence
 - `analysis/agent_analysis.json`: AI agent project analysis and reasoning
+- `analysis/resume_state.json` and `analysis/batches/*.json`: optional batch-enhancement checkpoints used by `--resume`
 
 ## 🔍 Candidate Evidence Sources
 
@@ -414,10 +441,12 @@ AgentBridge uses an AI analysis agent to generate the semantic parts of the kit:
 
 | Backend | Package | Use Case |
 |---|---|---|
-| **Claude Agent SDK** (primary) | `claude-agent-sdk` | Generation + interactive agent sessions |
-| **Anthropic API** (fallback) | `anthropic` | Generation only, supports custom endpoints |
+| **Claude Agent SDK** (primary) | `claude-agent-sdk` | Agentic project analysis, kit content generation, streamed tool/progress events, and interactive agent sessions |
+| **Anthropic API** (prompt route) | `anthropic` | Direct prompt-based generation, useful when SDK is unavailable or when forcing `--analysis-mode prompt` |
 
-When `claude-agent-sdk` is installed and no custom `ANTHROPIC_BASE_URL` is set, it is used automatically. When a custom endpoint is configured or `claude-agent-sdk` is not installed, the `anthropic` SDK is used.
+When `claude-agent-sdk` is installed, `--analysis-mode auto` uses it automatically for project directories. `ANTHROPIC_BASE_URL` is passed through for compatible endpoints such as DeepSeek. If the SDK is not installed, AgentBridge recommends installing `agbr[agent]` and falls back to the direct prompt route when possible. Use `--analysis-mode agentic` to require SDK analysis, or `--analysis-mode prompt` to force prompt-only analysis.
+
+Large projects are enhanced in batches. The first batch is ranked to cover the main capabilities; in an interactive terminal AgentBridge then asks whether to continue. Completed batch results are written under `analysis/batches/`, and `--resume` skips batches that already completed.
 
 ### Programmatic Usage
 
@@ -438,6 +467,7 @@ ai = AIGenerator(
     api_key="sk-d831ecabc21842fdae6f30c24dd3b052",
     base_url="https://api.deepseek.com/anthropic",
     model="deepseek-v4-flash",
+    analysis_mode="agentic",
 )
 
 # Agent session

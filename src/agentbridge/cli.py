@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import os
 import sys
@@ -31,12 +32,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "generate":
             paths = [Path(p) for p in args.paths]
+            _print_progress(
+                f"Starting generation for {len(paths)} input path(s); output={Path(args.output)}."
+            )
             ai_gen = _create_ai_generator(args, paths)
             kit = AgentKitGenerator(
                 ai_generator=ai_gen,
                 progress=_print_progress,
                 confirm_ai_analysis=_build_ai_confirmation(args),
                 confirm_remaining_analysis=_build_remaining_confirmation(args),
+                answer_agentic_questions=_build_agentic_question_answerer(args),
                 progress_interval=getattr(args, "progress_interval", None),
                 analysis_batch_size=getattr(args, "batch_size", None),
                 resume=bool(getattr(args, "resume", False)),
@@ -142,6 +147,7 @@ def _run_init(args: argparse.Namespace) -> int:
         progress=_print_progress,
         confirm_ai_analysis=_build_ai_confirmation(args),
         confirm_remaining_analysis=_build_remaining_confirmation(args),
+        answer_agentic_questions=_build_agentic_question_answerer(args),
         progress_interval=getattr(args, "progress_interval", None),
         analysis_batch_size=getattr(args, "batch_size", None),
         resume=bool(getattr(args, "resume", False)),
@@ -291,7 +297,7 @@ def _print_report(report: Any, as_json: bool = False) -> None:
 
 
 def _print_progress(message: str) -> None:
-    print(f"agentbridge: {message}", file=sys.stderr)
+    print(f"agentbridge: {message}", file=sys.stderr, flush=True)
 
 
 def _build_ai_confirmation(args: argparse.Namespace) -> Any:
@@ -325,6 +331,30 @@ def _build_remaining_confirmation(args: argparse.Namespace) -> Any:
         return answer in {"", "y", "yes"}
 
     return _confirm
+
+
+def _build_agentic_question_answerer(args: argparse.Namespace) -> Any:
+    if getattr(args, "yes", False):
+        return None
+    if not sys.stdin.isatty():
+        return None
+
+    def _answer(context: dict[str, Any]) -> dict[str, str]:
+        questions = context.get("questions") or []
+        if not questions:
+            return {}
+        print("", file=sys.stderr, flush=True)
+        print("agentbridge: Claude Agent SDK asked a few project questions before it continues.", file=sys.stderr, flush=True)
+        answers: dict[str, str] = {}
+        for index, question in enumerate(questions, start=1):
+            print(f"agentbridge: Q{index}: {question}", file=sys.stderr, flush=True)
+            print(f"agentbridge: A{index}: ", end="", file=sys.stderr, flush=True)
+            answer = sys.stdin.readline().strip()
+            if answer:
+                answers[f"q{index}"] = answer
+        return answers
+
+    return _answer
 
 
 def _format_remaining_review(context: dict[str, Any]) -> str:
@@ -397,17 +427,18 @@ def _add_llm_options(parser: argparse.ArgumentParser) -> None:
         help="Choose AI analysis mode. Auto prefers Claude Agent SDK when available, prompt mode uses a direct LLM prompt, and agentic mode forces SDK-based project exploration.",
     )
     parser.add_argument("--progress-interval", type=float, default=15.0, help="Seconds between AI wait heartbeat messages. Use 0 to disable.")
-    parser.add_argument("--batch-size", "--ai-capability-limit", dest="batch_size", type=int, default=30, help="Maximum capabilities per AI batch. Use 0 for all at once.")
+    parser.add_argument("--batch-size", "--ai-capability-limit", dest="batch_size", type=int, help="Maximum capabilities per AI batch. Defaults to 10 for agentic SDK analysis and 30 for prompt analysis. Use 0 for all at once.")
     parser.add_argument("--resume", action="store_true", help="Resume batch-enhanced generation from existing analysis state and batch files.")
     parser.add_argument("--review-threshold", type=int, default=100, help="Prompt before AI analysis when discovered capabilities reach this count. Use 0 to disable.")
     parser.add_argument("--yes", action="store_true", help="Skip interactive review prompts and continue with AI analysis.")
 
 
 def _claude_agent_sdk_installed() -> bool:
-    try:
-        from claude_agent_sdk import query  # noqa: F401
+    if "claude_agent_sdk" in sys.modules:
         return True
-    except ImportError:
+    try:
+        return importlib.util.find_spec("claude_agent_sdk") is not None
+    except (ImportError, ValueError):
         return False
 
 

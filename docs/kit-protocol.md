@@ -47,6 +47,15 @@ agent-kit/
 - `clients/mcp-client-configs.json` contains Claude/Codex/generic MCP setup snippets.
 - `dry_run_plan.json` describes planned calls without real side effects.
 
+## Optional Analysis Checkpoints
+
+Large-project generation may also write:
+
+- `analysis/resume_state.json`: current batch plan, completed batches, remaining batches, and partial/complete status.
+- `analysis/batches/*.json`: completed AI-enhancement batch outputs used by `--resume`.
+
+These files are additive and are not required for `agentbridge-kit/v1` consumers, but tools may read them to show progress or continue incomplete AI enhancement.
+
 ## MCP Server Runtime
 
 `agentbridge serve <kit>` reads `manifest.json`, `capabilities.json`, and `guardrails/permissions.json`, then exposes MCP `tools/list` and `tools/call` over stdio JSON-RPC.
