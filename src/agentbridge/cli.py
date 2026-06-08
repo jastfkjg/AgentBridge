@@ -36,6 +36,9 @@ def main(argv: list[str] | None = None) -> int:
                 ai_generator=ai_gen,
                 progress=_print_progress,
                 confirm_ai_analysis=_build_ai_confirmation(args),
+                progress_interval=getattr(args, "progress_interval", None),
+                analysis_batch_size=getattr(args, "batch_size", None),
+                resume=bool(getattr(args, "resume", False)),
             ).generate(
                 paths,
                 Path(args.output),
@@ -131,6 +134,9 @@ def _run_init(args: argparse.Namespace) -> int:
         ai_generator=ai_gen,
         progress=_print_progress,
         confirm_ai_analysis=_build_ai_confirmation(args),
+        progress_interval=getattr(args, "progress_interval", None),
+        analysis_batch_size=getattr(args, "batch_size", None),
+        resume=bool(getattr(args, "resume", False)),
     ).generate(
         paths,
         output,
@@ -342,6 +348,9 @@ def _add_llm_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-url", help="Custom LLM API endpoint. Defaults to ANTHROPIC_BASE_URL env var. Examples: https://api.deepseek.com/anthropic, https://openrouter.ai/api/v1")
     parser.add_argument("--model", help="LLM model name. Defaults to ANTHROPIC_MODEL env var or claude-sonnet-4-20250514. Examples: deepseek-v4-flash, claude-sonnet-4-20250514")
     parser.add_argument("--llm-timeout", type=float, help="LLM request timeout in seconds. Defaults to AGENTBRIDGE_LLM_TIMEOUT or 300.")
+    parser.add_argument("--progress-interval", type=float, default=15.0, help="Seconds between AI wait heartbeat messages. Use 0 to disable.")
+    parser.add_argument("--batch-size", "--ai-capability-limit", dest="batch_size", type=int, default=30, help="Maximum capabilities per AI batch. Use 0 for all at once.")
+    parser.add_argument("--resume", action="store_true", help="Resume batch-enhanced generation from existing analysis state and batch files.")
     parser.add_argument("--review-threshold", type=int, default=100, help="Prompt before AI analysis when discovered capabilities reach this count. Use 0 to disable.")
     parser.add_argument("--yes", action="store_true", help="Skip interactive review prompts and continue with AI analysis.")
 

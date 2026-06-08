@@ -1,8 +1,10 @@
 import tempfile
 import unittest
+import time
 from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 import json
 
@@ -164,6 +166,156 @@ class GeneratorRuntimeTests(unittest.TestCase):
             self.assertTrue((output / "manifest.json").exists())
             status = json.loads((output / "generation_status.json").read_text(encoding="utf-8"))
             self.assertEqual(status["status"], "complete")
+
+    def test_generate_emits_waiting_heartbeat_during_ai_analysis(self):
+        gen = _make_mock_generator()
+
+        def _slow_generate_all(*_args, **_kwargs):
+            time.sleep(0.05)
+            return gen.generate_all.return_value
+
+        gen.generate_all.side_effect = _slow_generate_all
+        messages: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            AgentKitGenerator(
+                ai_generator=gen,
+                progress=messages.append,
+                progress_interval=0.01,
+            ).generate([EXAMPLE], output, name="writing-kit")
+
+        self.assertTrue(any("Still waiting for AI batch" in message for message in messages))
+
+    def test_generate_reports_written_files(self):
+        gen = _make_mock_generator()
+        messages: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            AgentKitGenerator(
+                ai_generator=gen,
+                progress=messages.append,
+            ).generate([EXAMPLE], output, name="writing-kit")
+
+        self.assertTrue(any("Writing kit file:" in message for message in messages))
+        self.assertTrue(any(str(output / "manifest.json") in message for message in messages))
+
+    def test_generate_enhances_all_capabilities_in_batches(self):
+        gen = _make_mock_generator()
+        captured_batches: list[list[Any]] = []
+        captured_input_paths: list[list[Path]] = []
+
+        def _generate_all(caps, _kit_name, input_paths=None):
+            captured_batches.append(list(caps))
+            captured_input_paths.append(list(input_paths or []))
+            return {
+                "enhanced_capabilities": list(caps),
+                "rule_signals": {
+                    "candidate_capabilities": [cap.to_dict() for cap in caps],
+                    "risk_policy": {},
+                },
+                "agent_analysis": {
+                    "summary": "Focused mock analysis.",
+                    "business_objects": [],
+                    "workflows": [],
+                    "permission_boundaries": [],
+                    "side_effects": [],
+                    "assumptions": [],
+                },
+                "system_prompt": "# Focused Mock",
+                "skills": {},
+            }
+
+        gen.generate_all.side_effect = _generate_all
+        messages: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            AgentKitGenerator(
+                ai_generator=gen,
+                progress=messages.append,
+                analysis_capability_limit=5,
+            ).generate([EXAMPLE], output, name="writing-kit")
+
+            capabilities = json.loads((output / "capabilities.json").read_text(encoding="utf-8"))
+            rule_signals = json.loads((output / "analysis" / "rule_signals.json").read_text(encoding="utf-8"))
+            resume_state = json.loads((output / "analysis" / "resume_state.json").read_text(encoding="utf-8"))
+
+        self.assertGreater(len(captured_batches), 1)
+        self.assertTrue(all(len(batch) <= 5 for batch in captured_batches))
+        self.assertEqual(sum(len(batch) for batch in captured_batches), len(capabilities))
+        self.assertTrue(captured_input_paths)
+        self.assertTrue(all(path.is_file() for paths in captured_input_paths for path in paths))
+        self.assertGreater(len(capabilities), 5)
+        self.assertIn("batch_enhancement", rule_signals)
+        self.assertEqual(rule_signals["batch_enhancement"]["batch_size"], 5)
+        self.assertEqual(resume_state["status"], "complete")
+        self.assertEqual(resume_state["remaining_batch_count"], 0)
+        self.assertTrue(any("Enhancing AI batch" in message for message in messages))
+
+    def test_generate_resume_skips_completed_batches(self):
+        def _batch_response(caps):
+            return {
+                "enhanced_capabilities": list(caps),
+                "rule_signals": {
+                    "candidate_capabilities": [cap.to_dict() for cap in caps],
+                    "risk_policy": {},
+                },
+                "agent_analysis": {
+                    "summary": "Batch resume mock.",
+                    "business_objects": [],
+                    "workflows": [],
+                    "permission_boundaries": [],
+                    "side_effects": [],
+                    "assumptions": [],
+                },
+                "system_prompt": "# Batch Resume Mock",
+                "skills": {},
+            }
+
+        first_gen = _make_mock_generator()
+        first_calls: list[list[Any]] = []
+
+        def _first_run(caps, _kit_name, input_paths=None):
+            first_calls.append(list(caps))
+            if len(first_calls) == 1:
+                return _batch_response(caps)
+            raise RuntimeError("interrupt after first batch")
+
+        first_gen.generate_all.side_effect = _first_run
+
+        second_gen = _make_mock_generator()
+        second_calls: list[list[Any]] = []
+
+        def _second_run(caps, _kit_name, input_paths=None):
+            second_calls.append(list(caps))
+            return _batch_response(caps)
+
+        second_gen.generate_all.side_effect = _second_run
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            with self.assertRaises(RuntimeError):
+                AgentKitGenerator(
+                    ai_generator=first_gen,
+                    progress=lambda _message: None,
+                    analysis_capability_limit=5,
+                ).generate([EXAMPLE], output, name="writing-kit")
+
+            state = json.loads((output / "analysis" / "resume_state.json").read_text(encoding="utf-8"))
+            self.assertGreater(state["analysis_batch_count"], 1)
+            self.assertTrue((output / "analysis" / "batches" / "batch_0001.json").exists())
+
+            AgentKitGenerator(
+                ai_generator=second_gen,
+                progress=lambda _message: None,
+                analysis_capability_limit=5,
+                resume=True,
+            ).generate([EXAMPLE], output, name="writing-kit")
+
+        self.assertGreaterEqual(len(first_calls), 2)
+        self.assertEqual(len(second_calls), state["analysis_batch_count"] - 1)
 
     def test_output_boundary_blocks_regular_project_subdirectory(self):
         with self.assertRaises(GenerationBoundaryError):

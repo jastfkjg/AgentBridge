@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from agentbridge.models import Capability
 from agentbridge.policy import classify_risk, confirmation_required, risk_reason
@@ -23,6 +23,7 @@ class AIGenerator:
         base_url: str | None = None,
         model: str | None = None,
         timeout: float | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> None:
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if not self.api_key:
@@ -33,12 +34,20 @@ class AIGenerator:
         self.base_url = base_url or os.environ.get("ANTHROPIC_BASE_URL", "")
         self.model = model or os.environ.get("ANTHROPIC_MODEL", "") or _DEFAULT_MODEL
         self.timeout = timeout if timeout is not None else _env_float("AGENTBRIDGE_LLM_TIMEOUT", 300.0)
+        self.progress = progress
 
         os.environ.setdefault("ANTHROPIC_API_KEY", self.api_key)
         if self.base_url:
             os.environ.setdefault("ANTHROPIC_BASE_URL", self.base_url)
 
         self._backend = self._detect_backend()
+
+    def set_progress(self, progress: Callable[[str], None] | None) -> None:
+        self.progress = progress
+
+    def _progress(self, message: str) -> None:
+        if self.progress:
+            self.progress(message)
 
     def _detect_backend(self) -> str:
         if self.base_url:
@@ -64,8 +73,15 @@ class AIGenerator:
         kit_name: str,
         input_paths: list[Path] | None = None,
     ) -> dict[str, Any]:
+        self._progress("Preparing rule context for AI analysis...")
         rule_context = self._build_rule_context(capabilities)
+        self._progress("Collecting source files for AI context...")
         source_context = self._build_source_context(input_paths or [])
+        source_bytes = sum(len(content) for content in source_context.values())
+        self._progress(
+            f"Prepared AI context with {len(source_context)} source files "
+            f"and {source_bytes} characters."
+        )
         return _run_async(
             self._generate_all_async(capabilities, kit_name, rule_context, source_context, input_paths)
         )
@@ -108,6 +124,7 @@ class AIGenerator:
                         if total_bytes > _MAX_SOURCE_BYTES:
                             break
                         source_files[str(input_path)] = content
+                        self._progress(f"Added source file to AI context: {input_path}")
                     except OSError:
                         pass
             elif input_path.is_dir():
@@ -127,6 +144,7 @@ class AIGenerator:
                                     break
                                 rel = fpath.relative_to(input_path)
                                 source_files[str(rel)] = content
+                                self._progress(f"Added source file to AI context: {rel}")
                             except OSError:
                                 pass
                     if total_bytes > _MAX_SOURCE_BYTES:
@@ -159,6 +177,13 @@ class AIGenerator:
                     "Treat it as read-only. Do not write, edit, move, delete, format, or otherwise modify any project file."
                 )
 
+        self._progress(
+            f"Sending AI analysis request to backend={self._backend}, model={self.model}."
+        )
+        self._progress(
+            "AI generation is prompt-only for this step: source files are sent as context, "
+            "and no local AI tool calls are exposed to trace."
+        )
         result = await self._ask(
             PROMPT_GENERATE_ALL_SYSTEM,
             PROMPT_GENERATE_ALL_USER.format(
@@ -174,6 +199,7 @@ class AIGenerator:
         parsed = _parse_json_object(result, {})
         if not parsed:
             raise RuntimeError(_invalid_generation_json_message(result))
+        self._progress("Received AI analysis response; parsing generated kit metadata...")
 
         enhanced_caps = self._apply_enhanced_capabilities(capabilities, parsed)
         system_prompt = parsed.get("system_prompt", "")
@@ -245,8 +271,10 @@ class AIGenerator:
             options_kwargs["cwd"] = cwd
         options = ClaudeAgentOptions(**options_kwargs)
         collected: list[str] = []
+        self._progress("Calling Claude Agent SDK query...")
         async for message in query(prompt=user_prompt, options=options):
             if isinstance(message, AssistantMessage):
+                self._progress("Received assistant message from Claude Agent SDK.")
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         collected.append(block.text)
@@ -264,6 +292,8 @@ class AIGenerator:
         if self.base_url:
             kwargs["base_url"] = self.base_url
         client = anthropic.Anthropic(**kwargs)
+        endpoint = self.base_url or "Anthropic default endpoint"
+        self._progress(f"Calling Anthropic Messages API at {endpoint} with model {self.model}.")
         try:
             response = client.messages.create(
                 model=self.model,
