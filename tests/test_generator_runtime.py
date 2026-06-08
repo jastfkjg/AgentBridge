@@ -25,6 +25,7 @@ def _make_mock_generator() -> AIGenerator:
     gen.base_url = ""
     gen.model = "mock-model"
     gen._backend = "anthropic"
+    gen.uses_agentic_analysis.return_value = False
 
     discoverer = CapabilityDiscoverer()
     raw_caps = discoverer.discover([EXAMPLE])
@@ -254,6 +255,44 @@ class GeneratorRuntimeTests(unittest.TestCase):
         self.assertEqual(resume_state["remaining_batch_count"], 0)
         self.assertTrue(any("Enhancing AI batch" in message for message in messages))
 
+    def test_agentic_batches_receive_project_paths_instead_of_file_slices(self):
+        gen = _make_mock_generator()
+        gen.uses_agentic_analysis.return_value = True
+        captured_input_paths: list[list[Path]] = []
+
+        def _generate_all(caps, _kit_name, input_paths=None):
+            captured_input_paths.append(list(input_paths or []))
+            return {
+                "enhanced_capabilities": list(caps),
+                "rule_signals": {
+                    "candidate_capabilities": [cap.to_dict() for cap in caps],
+                    "risk_policy": {},
+                },
+                "agent_analysis": {
+                    "summary": "Agentic mock analysis.",
+                    "business_objects": [],
+                    "workflows": [],
+                    "permission_boundaries": [],
+                    "side_effects": [],
+                    "assumptions": [],
+                },
+                "system_prompt": "# Agentic Mock",
+                "skills": {},
+            }
+
+        gen.generate_all.side_effect = _generate_all
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            AgentKitGenerator(
+                ai_generator=gen,
+                progress=lambda _message: None,
+                analysis_capability_limit=5,
+            ).generate([EXAMPLE], output, name="writing-kit")
+
+        self.assertGreater(len(captured_input_paths), 1)
+        self.assertTrue(all(paths == [EXAMPLE] for paths in captured_input_paths))
+
     def test_generate_resume_skips_completed_batches(self):
         def _batch_response(caps):
             return {
@@ -317,6 +356,50 @@ class GeneratorRuntimeTests(unittest.TestCase):
         self.assertGreaterEqual(len(first_calls), 2)
         self.assertEqual(len(second_calls), state["analysis_batch_count"] - 1)
 
+    def test_generate_can_stop_after_primary_batch(self):
+        gen = _make_mock_generator()
+        calls: list[list[Any]] = []
+
+        def _generate_all(caps, _kit_name, input_paths=None):
+            calls.append(list(caps))
+            return {
+                "enhanced_capabilities": list(caps),
+                "rule_signals": {
+                    "candidate_capabilities": [cap.to_dict() for cap in caps],
+                    "risk_policy": {},
+                },
+                "agent_analysis": {
+                    "summary": "Primary batch only.",
+                    "business_objects": [],
+                    "workflows": [],
+                    "permission_boundaries": [],
+                    "side_effects": [],
+                    "assumptions": [],
+                },
+                "system_prompt": "# Primary Batch Only",
+                "skills": {},
+            }
+
+        gen.generate_all.side_effect = _generate_all
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            AgentKitGenerator(
+                ai_generator=gen,
+                progress=lambda _message: None,
+                analysis_capability_limit=5,
+                confirm_remaining_analysis=lambda _context: False,
+            ).generate([EXAMPLE], output, name="writing-kit")
+
+            state = json.loads((output / "analysis" / "resume_state.json").read_text(encoding="utf-8"))
+            status = json.loads((output / "generation_status.json").read_text(encoding="utf-8"))
+            self.assertTrue((output / "capabilities.json").exists())
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(state["status"], "partial")
+        self.assertEqual(status["status"], "partial_complete")
+        self.assertGreater(state["remaining_batch_count"], 0)
+
     def test_output_boundary_blocks_regular_project_subdirectory(self):
         with self.assertRaises(GenerationBoundaryError):
             validate_output_boundary([EXAMPLE], EXAMPLE / "generated-kit")
@@ -332,6 +415,25 @@ class GeneratorRuntimeTests(unittest.TestCase):
 
             self.assertEqual(code, 1)
             self.assertIn("Project directory analysis requires an AI backend", stderr.getvalue())
+
+    def test_cli_recommends_claude_agent_sdk_when_missing(self):
+        args = cli.build_parser().parse_args([
+            "generate",
+            str(EXAMPLE),
+            "--output",
+            "unused",
+            "--api-key",
+            "sk-test",
+            "--analysis-mode",
+            "prompt",
+        ])
+        stderr = StringIO()
+
+        with patch("agentbridge.cli._claude_agent_sdk_installed", return_value=False), redirect_stderr(stderr):
+            gen = cli._create_ai_generator(args, [EXAMPLE])
+
+        self.assertIsInstance(gen, AIGenerator)
+        self.assertIn("Claude Agent SDK is the recommended primary route", stderr.getvalue())
 
 
 if __name__ == "__main__":

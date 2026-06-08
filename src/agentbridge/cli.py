@@ -36,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
                 ai_generator=ai_gen,
                 progress=_print_progress,
                 confirm_ai_analysis=_build_ai_confirmation(args),
+                confirm_remaining_analysis=_build_remaining_confirmation(args),
                 progress_interval=getattr(args, "progress_interval", None),
                 analysis_batch_size=getattr(args, "batch_size", None),
                 resume=bool(getattr(args, "resume", False)),
@@ -78,6 +79,12 @@ def main(argv: list[str] | None = None) -> int:
 def _create_ai_generator(args: argparse.Namespace, paths: list[Path] | None = None) -> AIGenerator:
     if getattr(args, "no_ai", False):
         return StaticAIGenerator()
+    if not _claude_agent_sdk_installed():
+        print(
+            "agentbridge: Claude Agent SDK is the recommended primary route for project analysis "
+            "and kit content generation. Install it with: pip install agbr[agent]",
+            file=sys.stderr,
+        )
     if not (getattr(args, "api_key", None) or os.environ.get("ANTHROPIC_API_KEY")):
         if any(path.is_dir() for path in paths or []):
             raise ValueError(
@@ -92,10 +99,10 @@ def _create_ai_generator(args: argparse.Namespace, paths: list[Path] | None = No
             base_url=getattr(args, "base_url", None),
             model=getattr(args, "model", None),
             timeout=getattr(args, "llm_timeout", None),
+            analysis_mode=getattr(args, "analysis_mode", None),
         )
     except (ValueError, ImportError) as exc:
-        print(f"agentbridge: {exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
+        raise ValueError(str(exc)) from exc
 
 
 def _run_chat(args: argparse.Namespace) -> int:
@@ -134,6 +141,7 @@ def _run_init(args: argparse.Namespace) -> int:
         ai_generator=ai_gen,
         progress=_print_progress,
         confirm_ai_analysis=_build_ai_confirmation(args),
+        confirm_remaining_analysis=_build_remaining_confirmation(args),
         progress_interval=getattr(args, "progress_interval", None),
         analysis_batch_size=getattr(args, "batch_size", None),
         resume=bool(getattr(args, "resume", False)),
@@ -304,6 +312,40 @@ def _build_ai_confirmation(args: argparse.Namespace) -> Any:
     return _confirm
 
 
+def _build_remaining_confirmation(args: argparse.Namespace) -> Any:
+    if getattr(args, "yes", False):
+        return None
+    if not sys.stdin.isatty():
+        return None
+
+    def _confirm(context: dict[str, Any]) -> bool:
+        print(_format_remaining_review(context), file=sys.stderr)
+        print("Continue enhancing remaining capabilities? [Y/n] ", end="", file=sys.stderr)
+        answer = sys.stdin.readline().strip().lower()
+        return answer in {"", "y", "yes"}
+
+    return _confirm
+
+
+def _format_remaining_review(context: dict[str, Any]) -> str:
+    next_caps = context.get("next_batch_capabilities") or []
+    lines = [
+        "",
+        "agentbridge: Primary capability analysis complete.",
+        f"agentbridge: Enhanced primary capabilities: {context.get('completed_capability_count', 0)}",
+        f"agentbridge: Remaining capabilities: {context.get('remaining_capability_count', 0)}",
+        f"agentbridge: Remaining AI batches: {context.get('remaining_batch_count', 0)}",
+        f"agentbridge: Output directory: {context.get('output_dir')}",
+    ]
+    if next_caps:
+        lines.append("agentbridge: Next batch starts with:")
+        for name in next_caps:
+            lines.append(f"  - {name}")
+    lines.append("agentbridge: Enter 'n' to generate now with deterministic metadata for the remaining capabilities.")
+    lines.append("agentbridge: You can later rerun with --resume to fill in the remaining AI-enhanced batches.")
+    return "\n".join(lines)
+
+
 def _format_capability_review(capabilities: list[Capability], kit_name: str, output_dir: Path) -> str:
     domain_counts: dict[str, int] = {}
     action_counts: dict[str, int] = {}
@@ -348,11 +390,25 @@ def _add_llm_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-url", help="Custom LLM API endpoint. Defaults to ANTHROPIC_BASE_URL env var. Examples: https://api.deepseek.com/anthropic, https://openrouter.ai/api/v1")
     parser.add_argument("--model", help="LLM model name. Defaults to ANTHROPIC_MODEL env var or claude-sonnet-4-20250514. Examples: deepseek-v4-flash, claude-sonnet-4-20250514")
     parser.add_argument("--llm-timeout", type=float, help="LLM request timeout in seconds. Defaults to AGENTBRIDGE_LLM_TIMEOUT or 300.")
+    parser.add_argument(
+        "--analysis-mode",
+        choices=["auto", "agentic", "prompt"],
+        default="auto",
+        help="Choose AI analysis mode. Auto prefers Claude Agent SDK when available, prompt mode uses a direct LLM prompt, and agentic mode forces SDK-based project exploration.",
+    )
     parser.add_argument("--progress-interval", type=float, default=15.0, help="Seconds between AI wait heartbeat messages. Use 0 to disable.")
     parser.add_argument("--batch-size", "--ai-capability-limit", dest="batch_size", type=int, default=30, help="Maximum capabilities per AI batch. Use 0 for all at once.")
     parser.add_argument("--resume", action="store_true", help="Resume batch-enhanced generation from existing analysis state and batch files.")
     parser.add_argument("--review-threshold", type=int, default=100, help="Prompt before AI analysis when discovered capabilities reach this count. Use 0 to disable.")
     parser.add_argument("--yes", action="store_true", help="Skip interactive review prompts and continue with AI analysis.")
+
+
+def _claude_agent_sdk_installed() -> bool:
+    try:
+        from claude_agent_sdk import query  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def build_parser() -> argparse.ArgumentParser:

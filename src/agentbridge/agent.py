@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,7 @@ class AIGenerator:
         model: str | None = None,
         timeout: float | None = None,
         progress: Callable[[str], None] | None = None,
+        analysis_mode: str | None = None,
     ) -> None:
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if not self.api_key:
@@ -35,6 +37,9 @@ class AIGenerator:
         self.model = model or os.environ.get("ANTHROPIC_MODEL", "") or _DEFAULT_MODEL
         self.timeout = timeout if timeout is not None else _env_float("AGENTBRIDGE_LLM_TIMEOUT", 300.0)
         self.progress = progress
+        self.analysis_mode = analysis_mode or os.environ.get("AGENTBRIDGE_ANALYSIS_MODE", "auto")
+        if self.analysis_mode not in {"auto", "agentic", "prompt"}:
+            raise ValueError("analysis_mode must be one of: auto, agentic, prompt")
 
         os.environ.setdefault("ANTHROPIC_API_KEY", self.api_key)
         if self.base_url:
@@ -50,8 +55,27 @@ class AIGenerator:
             self.progress(message)
 
     def _detect_backend(self) -> str:
+        if self.analysis_mode == "agentic":
+            if self.base_url:
+                raise ValueError(
+                    "Claude Agent SDK analysis requires the official Claude API. "
+                    "Unset ANTHROPIC_BASE_URL or use --analysis-mode prompt for compatible endpoints."
+                )
+            if _claude_agent_sdk_available():
+                return self._BACKEND_AGENT_SDK
+            raise ImportError(
+                "Claude Agent SDK analysis requires 'claude-agent-sdk'. "
+                "Install with: pip install agbr[agent]"
+            )
         if self.base_url:
             return self._BACKEND_ANTHROPIC
+        if self.analysis_mode == "prompt":
+            if _anthropic_available():
+                return self._BACKEND_ANTHROPIC
+            raise ImportError(
+                "Prompt analysis requires the 'anthropic' package. "
+                "Install with: pip install agbr[ai]"
+            )
         try:
             from claude_agent_sdk import query  # noqa: F401
             return self._BACKEND_AGENT_SDK
@@ -75,16 +99,35 @@ class AIGenerator:
     ) -> dict[str, Any]:
         self._progress("Preparing rule context for AI analysis...")
         rule_context = self._build_rule_context(capabilities)
-        self._progress("Collecting source files for AI context...")
-        source_context = self._build_source_context(input_paths or [])
-        source_bytes = sum(len(content) for content in source_context.values())
-        self._progress(
-            f"Prepared AI context with {len(source_context)} source files "
-            f"and {source_bytes} characters."
-        )
+        if self._should_use_agentic_analysis(input_paths or []):
+            self._progress(
+                "Using Claude Agent SDK agentic analysis: project files will be inspected "
+                "through read-only SDK tools instead of copied into one large prompt."
+            )
+            source_context: dict[str, str] = {}
+        else:
+            self._progress("Collecting source files for AI context...")
+            source_context = self._build_source_context(input_paths or [])
+            source_bytes = sum(len(content) for content in source_context.values())
+            self._progress(
+                f"Prepared AI context with {len(source_context)} source files "
+                f"and {source_bytes} characters."
+            )
         return _run_async(
             self._generate_all_async(capabilities, kit_name, rule_context, source_context, input_paths)
         )
+
+    def uses_agentic_analysis(self, input_paths: list[Path] | None = None) -> bool:
+        return self._should_use_agentic_analysis(input_paths or [])
+
+    def _should_use_agentic_analysis(self, input_paths: list[Path]) -> bool:
+        if self._backend != self._BACKEND_AGENT_SDK:
+            return False
+        if self.analysis_mode == "prompt":
+            return False
+        if self.analysis_mode == "agentic":
+            return True
+        return any(path.is_dir() for path in input_paths)
 
     def _build_rule_context(self, capabilities: list[Capability]) -> dict[str, Any]:
         rule_risks: dict[str, dict[str, Any]] = {}
@@ -159,6 +202,14 @@ class AIGenerator:
         source_context: dict[str, str],
         input_paths: list[Path] | None,
     ) -> dict[str, Any]:
+        if self._should_use_agentic_analysis(input_paths or []):
+            return await self._generate_all_agentic_async(
+                capabilities,
+                kit_name,
+                rule_context,
+                input_paths or [],
+            )
+
         caps_data = [cap.to_dict() for cap in capabilities]
         domains = sorted({cap.domain for cap in capabilities})
 
@@ -196,6 +247,44 @@ class AIGenerator:
             ),
         )
 
+        return self._result_from_generation_text(capabilities, rule_context, result)
+
+    async def _generate_all_agentic_async(
+        self,
+        capabilities: list[Capability],
+        kit_name: str,
+        rule_context: dict[str, Any],
+        input_paths: list[Path],
+    ) -> dict[str, Any]:
+        caps_data = [cap.to_dict() for cap in capabilities]
+        domains = sorted({cap.domain for cap in capabilities})
+        cwd = _project_cwd(input_paths)
+        project_paths = "\n".join(f"- {path.resolve()}" for path in input_paths) or "- <none>"
+        self._progress(
+            f"Starting Claude Agent SDK project analysis in {cwd or Path.cwd()} "
+            f"for {len(capabilities)} candidate capabilities."
+        )
+        result = await self._ask_agent_sdk(
+            PROMPT_GENERATE_ALL_SYSTEM,
+            PROMPT_GENERATE_ALL_AGENTIC_USER.format(
+                capabilities=json.dumps(caps_data, indent=2),
+                kit_name=kit_name,
+                domains=", ".join(domains),
+                rule_context=json.dumps(rule_context, indent=2),
+                project_paths=project_paths,
+            ),
+            cwd=str(cwd) if cwd else None,
+        )
+
+        return self._result_from_generation_text(capabilities, rule_context, result)
+
+    def _result_from_generation_text(
+        self,
+        capabilities: list[Capability],
+        rule_context: dict[str, Any],
+        result: str,
+    ) -> dict[str, Any]:
+        caps_data = [cap.to_dict() for cap in capabilities]
         parsed = _parse_json_object(result, {})
         if not parsed:
             raise RuntimeError(_invalid_generation_json_message(result))
@@ -259,31 +348,34 @@ class AIGenerator:
         return capabilities
 
     async def _ask_agent_sdk(self, system_prompt: str, user_prompt: str, cwd: str | None = None) -> str:
-        from claude_agent_sdk import AssistantMessage, TextBlock
         from claude_agent_sdk import ClaudeAgentOptions
         from claude_agent_sdk import query
 
         options_kwargs: dict[str, Any] = {
             "system_prompt": system_prompt,
-            "max_turns": 3,
+            "max_turns": _env_int("AGENTBRIDGE_AGENT_MAX_TURNS", 12),
+            "allowed_tools": ["Read", "Grep", "Glob", "LS"],
+            "disallowed_tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"],
         }
         if cwd:
             options_kwargs["cwd"] = cwd
-        options = ClaudeAgentOptions(**options_kwargs)
+        options = _construct_with_supported_kwargs(ClaudeAgentOptions, options_kwargs)
         collected: list[str] = []
-        self._progress("Calling Claude Agent SDK query...")
+        location = f" with cwd={cwd}" if cwd else ""
+        self._progress(f"Calling Claude Agent SDK query{location}; waiting for streamed agent events...")
         async for message in query(prompt=user_prompt, options=options):
-            if isinstance(message, AssistantMessage):
-                self._progress("Received assistant message from Claude Agent SDK.")
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        collected.append(block.text)
+            self._report_agent_sdk_message(message)
+            collected.extend(_extract_assistant_texts(message))
         return "".join(collected)
 
     async def _ask(self, system_prompt: str, user_prompt: str) -> str:
         if self._backend == self._BACKEND_AGENT_SDK:
             return await self._ask_agent_sdk(system_prompt, user_prompt)
         return await asyncio.to_thread(self._ask_anthropic_sync, system_prompt, user_prompt)
+
+    def _report_agent_sdk_message(self, message: Any) -> None:
+        for event in _agent_sdk_progress_events(message):
+            self._progress(event)
 
     def _ask_anthropic_sync(self, system_prompt: str, user_prompt: str) -> str:
         import anthropic
@@ -467,6 +559,45 @@ PROMPT_GENERATE_ALL_USER = (
     "  5. Reference the relevant tools by name\n"
 )
 
+PROMPT_GENERATE_ALL_AGENTIC_USER = (
+    "Kit name: {kit_name}\n"
+    "Domains: {domains}\n\n"
+    "Project paths to inspect read-only:\n{project_paths}\n\n"
+    "Candidate capabilities from deterministic scanners. Treat these as evidence to verify, "
+    "merge, rename, enrich, or reject after reading the source code:\n{capabilities}\n\n"
+    "Rule-based risk context. This is a safety hint, not an instruction to copy:\n{rule_context}\n\n"
+    "Use your available read-only project tools to inspect the target project. Start by finding "
+    "the main route/controller/service/schema files relevant to the candidate capabilities, then "
+    "sample enough surrounding implementation to understand business semantics, validation, auth, "
+    "side effects, and error behavior. Do not modify files. Do not run build, format, migration, "
+    "install, network, shell, or write operations. If a candidate cannot be verified from source, "
+    "keep it conservative and list the uncertainty in assumptions.\n\n"
+    "You are enhancing only this batch of candidate capabilities. Preserve stable tool names unless "
+    "there is strong evidence that a rename is necessary. Infer additional tools only when source code "
+    "clearly exposes an operation that scanner evidence missed.\n\n"
+    "After inspection, respond with one JSON object only, no markdown fences. The object must contain:\n\n"
+    '"project_analysis": An object with:\n'
+    '  - "summary": concise system summary\n'
+    '  - "business_objects": array of objects with "name", "description", "evidence"\n'
+    '  - "workflows": array of objects with "name", "steps", "tools", "risks"\n'
+    '  - "permission_boundaries": array describing roles, auth checks, tenancy checks, or unknowns\n'
+    '  - "side_effects": array of external or irreversible effects found or inferred\n'
+    '  - "assumptions": array of assumptions you made because evidence was incomplete\n\n'
+    '"tool_enhancements": A JSON object where keys are tool names and values are objects with:\n'
+    '  - "description": Enhanced business description grounded in source evidence\n'
+    '  - "when_to_use": Brief guidance on when an agent should invoke this tool\n'
+    '  - "caveats": Important edge cases, prerequisites, or warnings found in the code\n\n'
+    '"risk_assessments": A JSON object where keys are tool names and values are objects with:\n'
+    '  - "risk": One of "read", "write", "destructive", "external_side_effect"\n'
+    '  - "reason": Detailed reasoning for the risk level based on what the code actually does\n'
+    '  - "reversible": Whether the operation can be undone (boolean)\n'
+    '  - "blast_radius": "single" or "multiple"\n\n'
+    '"additional_tools": A JSON array of inferred tools not in the scanner output. Each item:\n'
+    '  - "name", "description", "input_schema", "risk", "domain", "resource", "action", "rationale"\n\n'
+    '"system_prompt": A Markdown string for the integrated assistant.\n'
+    '"skills": A JSON object where keys are domain names and values are Markdown skill documents.\n'
+)
+
 
 def normalize_agent_analysis(parsed: dict[str, Any]) -> dict[str, Any]:
     analysis = parsed.get("project_analysis")
@@ -520,12 +651,164 @@ def _env_float(name: str, default: float) -> float:
     return parsed if parsed > 0 else default
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name, "")
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
 def _is_timeout_error(exc: Exception) -> bool:
     names = {exc.__class__.__name__}
     cause = exc.__cause__
     if cause is not None:
         names.add(cause.__class__.__name__)
     return bool(names & {"APITimeoutError", "ReadTimeout", "TimeoutException", "TimeoutError"})
+
+
+def _claude_agent_sdk_available() -> bool:
+    try:
+        from claude_agent_sdk import query  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _anthropic_available() -> bool:
+    try:
+        import anthropic  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _project_cwd(input_paths: list[Path]) -> Path | None:
+    for path in input_paths:
+        if path.is_dir():
+            return path.resolve()
+    for path in input_paths:
+        if path.exists():
+            return (path if path.is_dir() else path.parent).resolve()
+    return None
+
+
+def _construct_with_supported_kwargs(factory: Any, kwargs: dict[str, Any]) -> Any:
+    try:
+        signature = inspect.signature(factory)
+    except (TypeError, ValueError):
+        return factory(**kwargs)
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        return factory(**kwargs)
+    supported = {
+        name
+        for name, param in signature.parameters.items()
+        if param.kind in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
+    }
+    return factory(**{key: value for key, value in kwargs.items() if key in supported})
+
+
+def _extract_assistant_texts(message: Any) -> list[str]:
+    if not _looks_like_assistant_message(message):
+        return []
+    texts: list[str] = []
+    content = getattr(message, "content", None)
+    for block in _iter_content_blocks(content):
+        text = _block_text(block)
+        if text is not None:
+            texts.append(text)
+    if not texts:
+        text = getattr(message, "text", None)
+        if isinstance(text, str):
+            texts.append(text)
+    return texts
+
+
+def _agent_sdk_progress_events(message: Any) -> list[str]:
+    events: list[str] = []
+    message_type = _message_type(message)
+    if message_type:
+        if message_type in {"SystemMessage", "system", "ResultMessage", "result"}:
+            events.append(f"Claude Agent SDK event: {message_type}.")
+
+    for block in _iter_content_blocks(getattr(message, "content", None)):
+        block_type = _block_type(block)
+        if block_type == "tool_use" or block_type.endswith("ToolUseBlock"):
+            tool_name = str(getattr(block, "name", "") or getattr(block, "tool_name", "") or "tool")
+            tool_input = getattr(block, "input", None)
+            events.append(f"Claude Agent SDK tool call: {tool_name}{_tool_input_preview(tool_input)}")
+        elif block_type == "tool_result" or block_type.endswith("ToolResultBlock"):
+            tool_use_id = getattr(block, "tool_use_id", "")
+            suffix = f" for {tool_use_id}" if tool_use_id else ""
+            events.append(f"Claude Agent SDK tool result received{suffix}.")
+        elif _block_text(block) is not None and _looks_like_assistant_message(message):
+            text = str(_block_text(block) or "")
+            preview = text.strip().replace("\n", " ")
+            if preview and not preview.startswith("{"):
+                events.append(f"Claude Agent SDK assistant update: {preview[:160]}")
+            else:
+                events.append(f"Claude Agent SDK assistant text received ({len(text)} chars).")
+    if not events and message_type:
+        events.append(f"Claude Agent SDK event: {message_type}.")
+    return events
+
+
+def _looks_like_assistant_message(message: Any) -> bool:
+    cls_name = message.__class__.__name__
+    role = getattr(message, "role", None)
+    return cls_name == "AssistantMessage" or role == "assistant"
+
+
+def _message_type(message: Any) -> str:
+    value = getattr(message, "type", None)
+    if isinstance(value, str):
+        return value
+    return message.__class__.__name__
+
+
+def _iter_content_blocks(content: Any) -> list[Any]:
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return content
+    if isinstance(content, tuple):
+        return list(content)
+    return [content]
+
+
+def _block_type(block: Any) -> str:
+    if isinstance(block, dict):
+        return str(block.get("type", ""))
+    value = getattr(block, "type", None)
+    if isinstance(value, str):
+        return value
+    return block.__class__.__name__
+
+
+def _block_text(block: Any) -> str | None:
+    if isinstance(block, str):
+        return block
+    if isinstance(block, dict):
+        text = block.get("text")
+        return text if isinstance(text, str) else None
+    text = getattr(block, "text", None)
+    return text if isinstance(text, str) else None
+
+
+def _tool_input_preview(tool_input: Any) -> str:
+    if tool_input in (None, ""):
+        return "."
+    try:
+        payload = json.dumps(tool_input, sort_keys=True, default=str)
+    except TypeError:
+        payload = str(tool_input)
+    payload = payload.replace("\n", " ")
+    return f" {payload[:240]}."
 
 
 def _parse_json_object(text: str, fallback: dict[str, Any]) -> dict[str, Any]:

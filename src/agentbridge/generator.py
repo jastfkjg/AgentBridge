@@ -31,6 +31,7 @@ class AgentKitGenerator:
         discoverer: CapabilityDiscoverer | None = None,
         progress: Callable[[str], None] | None = None,
         confirm_ai_analysis: Callable[[list[Capability], str, Path], bool] | None = None,
+        confirm_remaining_analysis: Callable[[dict[str, Any]], bool] | None = None,
         progress_interval: float | None = None,
         analysis_batch_size: int | None = None,
         resume: bool = False,
@@ -45,6 +46,7 @@ class AgentKitGenerator:
         self.discoverer = discoverer or CapabilityDiscoverer()
         self.progress = progress
         self.confirm_ai_analysis = confirm_ai_analysis
+        self.confirm_remaining_analysis = confirm_remaining_analysis
         self.progress_interval = progress_interval if progress_interval is not None else 15.0
         configured_batch_size = analysis_batch_size if analysis_batch_size is not None else analysis_capability_limit
         self.analysis_batch_size = configured_batch_size if configured_batch_size is not None else _env_int("AGENTBRIDGE_AI_BATCH_SIZE", 30)
@@ -102,17 +104,26 @@ class AgentKitGenerator:
         extra_capabilities = [cap for cap in analyzed_capabilities if cap.name not in existing_names]
         capabilities = list(rule_capabilities) + extra_capabilities
         analysis_capability_count = sum(len(batch) for batch in analysis_batches)
+        analysis_partial = (
+            getattr(analysis_generator, "model", "") != "static"
+            and analysis_capability_count < len(rule_capabilities)
+        )
         self._progress(f"Analysis complete. Writing {len(capabilities)} capabilities to {output_dir}...")
 
         kit = IntegrationKit(name=kit_name, capabilities=capabilities, output_dir=str(output_dir))
         self._write_status(
             output_dir,
             "writing",
-            "Analysis complete. Writing kit files.",
+            (
+                "Primary analysis complete. Writing kit files; remaining capabilities can be completed with --resume."
+                if analysis_partial
+                else "Analysis complete. Writing kit files."
+            ),
             kit_name=kit_name,
             candidate_capability_count=len(rule_capabilities),
             analysis_capability_count=analysis_capability_count,
             analysis_batch_count=len(analysis_batches),
+            partial_analysis=analysis_partial,
             capability_count=len(capabilities),
             lock=status_lock,
         )
@@ -126,6 +137,7 @@ class AgentKitGenerator:
         rule_signals["batch_enhancement"] = {
             "batch_count": len(analysis_batches),
             "batch_size": self._batch_size_for(rule_capabilities),
+            "partial": analysis_partial,
             "batches": [
                 {
                     "index": index,
@@ -162,12 +174,17 @@ class AgentKitGenerator:
 
         self._write_status(
             output_dir,
-            "complete",
-            "Generated AgentBridge kit.",
+            "partial_complete" if analysis_partial else "complete",
+            (
+                "Generated AgentBridge kit after primary AI analysis. Run again with --resume to complete remaining capabilities."
+                if analysis_partial
+                else "Generated AgentBridge kit."
+            ),
             kit_name=kit_name,
             candidate_capability_count=len(rule_capabilities),
             analysis_capability_count=analysis_capability_count,
             analysis_batch_count=len(analysis_batches),
+            partial_analysis=analysis_partial,
             capability_count=len(capabilities),
             lock=status_lock,
         )
@@ -196,14 +213,18 @@ class AgentKitGenerator:
         if model == "static":
             self._progress("Generating deterministic kit metadata...")
         else:
+            mode_note = ""
+            if hasattr(analysis_generator, "uses_agentic_analysis") and analysis_generator.uses_agentic_analysis(input_paths):
+                mode_note = " with Claude Agent SDK agentic project exploration"
             model_note = f" using {model}" if model else ""
             self._progress(
-                f"Running AI project analysis{model_note} in {batch_count} batch(es); "
+                f"Running AI project analysis{model_note}{mode_note} in {batch_count} batch(es); "
                 "completed batches can be resumed."
             )
 
         completed_indices: set[int] = set()
         batch_results: list[dict[str, Any]] = []
+        analyzed_batches: list[list[Capability]] = []
         self._write_resume_state(output_dir, kit_name, input_paths, rule_capabilities, batches, completed_indices, "running")
 
         for batch_index, batch in enumerate(batches, start=1):
@@ -259,6 +280,7 @@ class AgentKitGenerator:
 
             batch_results.append(batch_result)
             completed_indices.add(batch_index)
+            analyzed_batches.append(batch)
             self._write_resume_state(
                 output_dir,
                 kit_name,
@@ -268,8 +290,93 @@ class AgentKitGenerator:
                 completed_indices,
                 "running" if len(completed_indices) < batch_count else "complete",
             )
+            if not self._should_continue_after_primary_batch(
+                output_dir,
+                kit_name,
+                input_paths,
+                rule_capabilities,
+                batches,
+                completed_indices,
+                batch_index,
+                batch_count,
+                status_lock,
+            ):
+                break
 
-        return self._merge_batch_results(rule_capabilities, batch_results), batches
+        return self._merge_batch_results(rule_capabilities, batch_results), analyzed_batches
+
+    def _should_continue_after_primary_batch(
+        self,
+        output_dir: Path,
+        kit_name: str,
+        input_paths: list[Path],
+        rule_capabilities: list[Capability],
+        batches: list[list[Capability]],
+        completed_indices: set[int],
+        batch_index: int,
+        batch_count: int,
+        status_lock: threading.Lock,
+    ) -> bool:
+        if batch_count <= 1 or batch_index != 1:
+            return True
+        if not self.confirm_remaining_analysis:
+            return True
+        remaining_batches = batches[1:]
+        remaining_capability_count = sum(len(batch) for batch in remaining_batches)
+        context = {
+            "kit_name": kit_name,
+            "output_dir": output_dir,
+            "completed_batch_count": len(completed_indices),
+            "completed_capability_count": len(batches[0]),
+            "remaining_batch_count": len(remaining_batches),
+            "remaining_capability_count": remaining_capability_count,
+            "candidate_capability_count": len(rule_capabilities),
+            "next_batch_capabilities": [cap.name for cap in remaining_batches[0][:10]] if remaining_batches else [],
+        }
+        self._write_status(
+            output_dir,
+            "main_analysis_complete",
+            "Primary capability analysis complete. Waiting for user decision on remaining capabilities.",
+            kit_name=kit_name,
+            candidate_capability_count=len(rule_capabilities),
+            analysis_batch_count=batch_count,
+            completed_batch_count=len(completed_indices),
+            remaining_batch_count=len(remaining_batches),
+            remaining_capability_count=remaining_capability_count,
+            lock=status_lock,
+        )
+        if self.confirm_remaining_analysis(context):
+            self._progress(
+                f"Continuing AI enhancement for {remaining_capability_count} remaining capabilities "
+                f"across {len(remaining_batches)} batch(es)."
+            )
+            return True
+        self._progress(
+            f"Stopping after primary AI analysis. Remaining {remaining_capability_count} capabilities "
+            "will stay deterministic; rerun with --resume to complete them."
+        )
+        self._write_resume_state(
+            output_dir,
+            kit_name,
+            input_paths,
+            rule_capabilities,
+            batches,
+            completed_indices,
+            "partial",
+        )
+        self._write_status(
+            output_dir,
+            "partial_analysis",
+            "Generated kit after primary capability analysis; remaining capabilities can be completed with --resume.",
+            kit_name=kit_name,
+            candidate_capability_count=len(rule_capabilities),
+            analysis_batch_count=batch_count,
+            completed_batch_count=len(completed_indices),
+            remaining_batch_count=len(remaining_batches),
+            remaining_capability_count=remaining_capability_count,
+            lock=status_lock,
+        )
+        return False
 
     def _run_single_analysis_batch(
         self,
@@ -302,12 +409,22 @@ class AgentKitGenerator:
                 daemon=True,
             )
             heartbeat_thread.start()
-        batch_input_paths = self._batch_source_paths(batch, input_paths)
+        use_agentic = (
+            hasattr(analysis_generator, "uses_agentic_analysis")
+            and analysis_generator.uses_agentic_analysis(input_paths)
+        )
+        batch_input_paths = input_paths if use_agentic else self._batch_source_paths(batch, input_paths)
         if model != "static":
-            self._progress(
-                f"AI batch {batch_index}/{batch_count} source context: "
-                f"{len(batch_input_paths)} file(s), not the full project tree."
-            )
+            if use_agentic:
+                self._progress(
+                    f"AI batch {batch_index}/{batch_count} will use Claude Agent SDK "
+                    f"read-only project exploration over {len(batch_input_paths)} input path(s)."
+                )
+            else:
+                self._progress(
+                    f"AI batch {batch_index}/{batch_count} source context: "
+                    f"{len(batch_input_paths)} file(s), not the full project tree."
+                )
         try:
             if hasattr(analysis_generator, "set_progress"):
                 analysis_generator.set_progress(self.progress)
