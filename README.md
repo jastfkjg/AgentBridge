@@ -168,6 +168,8 @@ agentbridge generate examples/writing_system \
 
 For large projects, AgentBridge analyzes the primary capability batch first, then asks whether to continue enhancing the remaining capabilities. If you stop after the first batch, the kit is still generated with deterministic metadata for the rest; rerun with `--resume` to fill in remaining AI-enhanced batches.
 
+The initial Claude Agent SDK project-understanding plan uses a compact scanner summary and has a shorter timeout than full batch generation. Override it with `AGENTBRIDGE_AGENT_PLAN_TIMEOUT=120` if your provider needs more time; on timeout AgentBridge falls back to scanner-ranked batches and continues.
+
 ### Run an MCP Server from OpenAPI
 
 ```bash

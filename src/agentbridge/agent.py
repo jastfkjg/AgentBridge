@@ -5,6 +5,7 @@ import importlib.util
 import inspect
 import json
 import os
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
@@ -295,29 +296,21 @@ class AIGenerator:
     ) -> dict[str, Any]:
         cwd = _project_cwd(input_paths)
         project_paths = "\n".join(f"- {path.resolve()}" for path in input_paths) or "- <none>"
-        inventory = [
-            {
-                "name": cap.name,
-                "domain": cap.domain,
-                "resource": cap.resource,
-                "action": cap.action,
-                "risk": cap.risk,
-                "source": cap.source.to_dict(),
-            }
-            for cap in capabilities
-        ]
+        inventory = _build_agentic_plan_inventory(capabilities)
         self._progress(
-            f"Asking Claude Agent SDK to form a project understanding plan for {len(capabilities)} candidate capabilities..."
+            f"Asking Claude Agent SDK to form a project understanding plan from project files "
+            f"and a compact summary of {len(capabilities)} candidate capabilities..."
         )
         result = await self._ask_agent_sdk(
             PROMPT_AGENTIC_ANALYSIS_PLAN_SYSTEM,
             PROMPT_AGENTIC_ANALYSIS_PLAN_USER.format(
                 kit_name=kit_name,
                 project_paths=project_paths,
-                capabilities=json.dumps(inventory, indent=2),
-                rule_context=json.dumps(rule_context, indent=2),
+                capability_summary=json.dumps(inventory, indent=2),
+                risk_policy=json.dumps(rule_context.get("risk_policy", {}), indent=2),
             ),
             cwd=str(cwd) if cwd else None,
+            timeout=_agent_plan_timeout(self.timeout),
         )
         parsed = _parse_json_object(result, {})
         if not parsed:
@@ -394,15 +387,22 @@ class AIGenerator:
 
         return capabilities
 
-    async def _ask_agent_sdk(self, system_prompt: str, user_prompt: str, cwd: str | None = None) -> str:
+    async def _ask_agent_sdk(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        cwd: str | None = None,
+        timeout: float | None = None,
+    ) -> str:
+        effective_timeout = timeout if timeout is not None else self.timeout
         try:
             return await asyncio.wait_for(
                 self._collect_agent_sdk_response(system_prompt, user_prompt, cwd),
-                timeout=self.timeout,
+                timeout=effective_timeout,
             )
         except asyncio.TimeoutError as exc:
             raise RuntimeError(
-                f"Claude Agent SDK request timed out after {self.timeout:g} seconds. "
+                f"Claude Agent SDK request timed out after {effective_timeout:g} seconds. "
                 "Try --batch-size 3, increase --llm-timeout, or use --analysis-mode prompt."
             ) from exc
 
@@ -671,11 +671,14 @@ PROMPT_AGENTIC_ANALYSIS_PLAN_SYSTEM = (
 PROMPT_AGENTIC_ANALYSIS_PLAN_USER = (
     "Kit name: {kit_name}\n\n"
     "Project paths to inspect read-only:\n{project_paths}\n\n"
-    "Candidate capability inventory from deterministic scanners:\n{capabilities}\n\n"
-    "Rule-based risk context:\n{rule_context}\n\n"
+    "Compact candidate capability summary from deterministic scanners. This is intentionally summarized; "
+    "do not wait for a full candidate list. Treat it only as hints while you inspect the project:\n"
+    "{capability_summary}\n\n"
+    "Risk policy:\n{risk_policy}\n\n"
     "Use your read-only tools to understand the project at the path above. Focus on the system's "
     "main business objects, routing/service structure, permissions, side effects, and the operations "
-    "an AI assistant should expose first. You are planning the analysis; do not generate the final kit yet.\n\n"
+    "an AI assistant should expose first. Prefer quick, high-signal inspection over exhaustive analysis. "
+    "You are planning the analysis; do not generate the final kit yet.\n\n"
     "Respond with one JSON object containing:\n"
     '"project_summary": short summary of what the project appears to do,\n'
     '"main_capability_names": array of candidate capability names that should be enhanced first, ordered by business importance,\n'
@@ -715,6 +718,32 @@ def _run_async(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _build_agentic_plan_inventory(capabilities: list[Capability], sample_limit: int = 24) -> dict[str, Any]:
+    domain_counts = Counter(cap.domain for cap in capabilities)
+    action_counts = Counter(cap.action for cap in capabilities)
+    risk_counts = Counter(cap.risk for cap in capabilities)
+    samples = [
+        {
+            "name": cap.name,
+            "domain": cap.domain,
+            "resource": cap.resource,
+            "action": cap.action,
+            "risk": cap.risk,
+            "source": cap.source.to_dict(),
+        }
+        for cap in capabilities[:sample_limit]
+    ]
+    return {
+        "candidate_count": len(capabilities),
+        "top_domains": dict(domain_counts.most_common(10)),
+        "top_actions": dict(action_counts.most_common(10)),
+        "risk_summary": dict(risk_counts.most_common()),
+        "sample_capabilities": samples,
+        "sample_limit": sample_limit,
+        "note": "This is a compact hint set. Use project files as the source of truth.",
+    }
+
+
 def _invalid_generation_json_message(text: str) -> str:
     message = (
         "LLM failed to return valid JSON for generation. "
@@ -735,6 +764,11 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def _agent_plan_timeout(llm_timeout: float) -> float:
+    configured = _env_float("AGENTBRIDGE_AGENT_PLAN_TIMEOUT", 90.0)
+    return min(configured, llm_timeout) if llm_timeout > 0 else configured
 
 
 def _env_int(name: str, default: int) -> int:
@@ -830,9 +864,9 @@ def _agent_sdk_progress_events(message: Any) -> list[str]:
             tool_input = getattr(block, "input", None)
             events.append(_format_tool_progress(tool_name, tool_input))
         elif block_type == "tool_result" or block_type.endswith("ToolResultBlock"):
-            tool_use_id = getattr(block, "tool_use_id", "")
-            suffix = f" for {tool_use_id}" if tool_use_id else ""
-            events.append(f"Claude Agent SDK tool result received{suffix}.")
+            events.append(_format_tool_result_progress(block))
+        elif "thinking" in block_type.lower() or "reasoning" in block_type.lower():
+            events.append("Claude Agent SDK internal reasoning step completed; details hidden.")
         elif _block_text(block) is not None and _looks_like_assistant_message(message):
             text = str(_block_text(block) or "")
             preview = text.strip().replace("\n", " ")
@@ -934,6 +968,43 @@ def _tool_input_value(tool_input: Any, *keys: str) -> str:
             if value not in (None, ""):
                 return str(value)
     return ""
+
+
+def _format_tool_result_progress(block: Any) -> str:
+    tool_use_id = getattr(block, "tool_use_id", "")
+    suffix = f" for {tool_use_id}" if tool_use_id else ""
+    summary = _block_summary(getattr(block, "content", None) or getattr(block, "result", None) or getattr(block, "text", None))
+    if summary:
+        return f"Claude Agent SDK tool result received{suffix}: {summary}"
+    return f"Claude Agent SDK tool result received{suffix}."
+
+
+def _block_summary(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip().replace("\n", " ")
+        if not text:
+            return ""
+        return text[:160]
+    if isinstance(value, dict):
+        if "path" in value and value.get("path"):
+            return f"path={value.get('path')}"
+        if "content" in value and value.get("content"):
+            return _block_summary(value.get("content"))
+        try:
+            payload = json.dumps(value, sort_keys=True, default=str)
+        except TypeError:
+            payload = str(value)
+        return payload.replace("\n", " ")[:160]
+    if isinstance(value, list):
+        if not value:
+            return "empty result"
+        if len(value) == 1:
+            return _block_summary(value[0])
+        return f"{len(value)} item(s)"
+    text = str(value).strip().replace("\n", " ")
+    return text[:160]
 
 
 def _json_progress_event(text: str) -> str:

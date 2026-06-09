@@ -365,7 +365,14 @@ class AgentKitGenerator:
         heartbeat_stop = threading.Event()
         heartbeat_thread = threading.Thread(
             target=self._planning_heartbeat,
-            args=(heartbeat_stop, output_dir, kit_name, len(rule_capabilities), status_lock),
+            args=(
+                heartbeat_stop,
+                output_dir,
+                kit_name,
+                len(rule_capabilities),
+                getattr(analysis_generator, "timeout", 300.0),
+                status_lock,
+            ),
             daemon=True,
         )
         heartbeat_thread.start()
@@ -399,6 +406,15 @@ class AgentKitGenerator:
                 "questions": [],
                 "notes_for_generation": "",
             }
+            self._write_status(
+                output_dir,
+                "planning_fallback",
+                "Claude Agent SDK project planning did not finish in time; continuing with scanner-ranked batches.",
+                kit_name=kit_name,
+                candidate_capability_count=len(rule_capabilities),
+                planning_fallback_reason=str(exc),
+                lock=status_lock,
+            )
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=1.0)
@@ -930,17 +946,20 @@ class AgentKitGenerator:
         output_dir: Path,
         kit_name: str,
         total_capability_count: int,
+        llm_timeout: float,
         status_lock: threading.Lock,
     ) -> None:
         started = time.monotonic()
         interval = float(self.progress_interval or 0.0)
         if interval <= 0:
             return
+        plan_timeout = min(_env_float("AGENTBRIDGE_AGENT_PLAN_TIMEOUT", 90.0), float(llm_timeout or 90.0))
         while not stop_event.wait(interval):
             elapsed = int(time.monotonic() - started)
             message = (
                 f"Still waiting for Claude Agent SDK project understanding plan "
-                f"({elapsed}s elapsed, {total_capability_count} candidate capabilities)."
+                f"({elapsed}s elapsed, {total_capability_count} candidate capabilities; "
+                f"will fall back after about {int(plan_timeout)}s)."
             )
             self._progress(message)
             self._write_status(
@@ -963,6 +982,17 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return parsed if parsed >= 0 else default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name, "")
+    if not value:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
 
 
 def _capability_order_from_plan(plan: dict[str, Any]) -> list[str]:

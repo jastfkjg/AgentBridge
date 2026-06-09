@@ -117,6 +117,31 @@ class AgentProgressTests(unittest.TestCase):
 
         self.assertEqual(gen._backend, "agent-sdk")
 
+    def test_agentic_progress_includes_tool_results_and_hidden_thinking(self):
+        class FakeToolResultBlock:
+            def __init__(self) -> None:
+                self.type = "tool_result"
+                self.tool_use_id = "call-1"
+                self.content = {"path": "app.py", "content": "print('hello')\n"}
+
+        class FakeThinkingBlock:
+            def __init__(self) -> None:
+                self.type = "thinking"
+                self.text = "private reasoning"
+
+        class FakeAssistantMessage:
+            def __init__(self) -> None:
+                self.role = "assistant"
+                self.content = [FakeThinkingBlock(), FakeToolResultBlock()]
+
+        messages: list[str] = []
+        with patch("importlib.util.find_spec", return_value=object()):
+            gen = AIGenerator(api_key="sk-test", progress=messages.append, analysis_mode="agentic")
+        gen._report_agent_sdk_message(FakeAssistantMessage())
+
+        self.assertTrue(any("internal reasoning step completed" in message for message in messages))
+        self.assertTrue(any("tool result received" in message and "path=app.py" in message for message in messages))
+
 
 if __name__ == "__main__":
     unittest.main()

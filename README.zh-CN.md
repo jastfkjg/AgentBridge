@@ -168,6 +168,8 @@ agentbridge generate examples/writing_system \
 
 大型项目会先分析主能力批次，然后询问是否继续补齐剩余能力。如果选择停止，仍会生成可用 kit，剩余能力保留确定性元数据；之后可用 `--resume` 继续补齐 AI 增强批次。
 
+初始 Claude Agent SDK 项目理解计划只发送扫描器摘要，并使用比完整批次生成更短的超时时间。如果提供商需要更久，可用 `AGENTBRIDGE_AGENT_PLAN_TIMEOUT=120` 调整；超时后 AgentBridge 会回退到扫描器排序批次并继续生成。
+
 ### OpenAPI 一键运行 MCP Server
 
 ```bash
