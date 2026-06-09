@@ -163,12 +163,16 @@ agentbridge generate examples/writing_system \
   --analysis-mode agentic \
   --batch-size 10 \
   --resume \
-  --progress-interval 5
+  --progress-interval 5 \
+  --agent-plan-timeout 90 \
+  --agent-batch-timeout 90
 ```
 
 For large projects, AgentBridge analyzes the primary capability batch first, then asks whether to continue enhancing the remaining capabilities. If you stop after the first batch, the kit is still generated with deterministic metadata for the rest; rerun with `--resume` to fill in remaining AI-enhanced batches.
 
-The initial Claude Agent SDK project-understanding plan uses a compact scanner summary and has a shorter timeout than full batch generation. Override it with `AGENTBRIDGE_AGENT_PLAN_TIMEOUT=120` if your provider needs more time; on timeout AgentBridge falls back to scanner-ranked batches and continues.
+The initial Claude Agent SDK project-understanding plan uses a compact scanner summary and has a shorter timeout than full batch generation. Override it with `--agent-plan-timeout` or `AGENTBRIDGE_AGENT_PLAN_TIMEOUT=120` if your provider needs more time; on timeout AgentBridge falls back to scanner-ranked batches and continues.
+
+Each Claude Agent SDK generation batch has its own timeout as well. Override it with `--agent-batch-timeout` or `AGENTBRIDGE_AGENT_BATCH_TIMEOUT=120`. If SDK initialization or a provider call hangs, AgentBridge writes a deterministic fallback batch, marks it in `analysis/resume_state.json`, generates the kit, and retries that batch on the next `--resume` run.
 
 ### Run an MCP Server from OpenAPI
 
@@ -448,7 +452,7 @@ AgentBridge uses an AI analysis agent to generate the semantic parts of the kit:
 
 When `claude-agent-sdk` is installed, `--analysis-mode auto` uses it automatically for project directories. `ANTHROPIC_BASE_URL` is passed through for compatible endpoints such as DeepSeek. If the SDK is not installed, AgentBridge recommends installing `agbr[agent]` and falls back to the direct prompt route when possible. Use `--analysis-mode agentic` to require SDK analysis, or `--analysis-mode prompt` to force prompt-only analysis.
 
-Large projects are enhanced in batches. The first batch is ranked to cover the main capabilities; in an interactive terminal AgentBridge then asks whether to continue. Completed batch results are written under `analysis/batches/`, and `--resume` skips batches that already completed.
+Large projects are enhanced in batches. The first batch is ranked to cover the main capabilities; in an interactive terminal AgentBridge then asks whether to continue. Completed batch results are written under `analysis/batches/`, and `--resume` skips batches that already completed. Batches marked `fallback` are retried on `--resume`.
 
 ### Programmatic Usage
 

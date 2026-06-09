@@ -29,7 +29,7 @@ Rules are cheap, deterministic evidence collectors, and they also support the no
 
 ## Large-Project Analysis
 
-AgentBridge splits large project analysis into ranked batches. The first batch targets the main capabilities, then the CLI can ask whether to continue enhancing the remaining batches. Batch progress is recorded under `analysis/resume_state.json` and `analysis/batches/*.json`, and `--resume` skips batches that already completed.
+AgentBridge splits large project analysis into ranked batches. The first batch targets the main capabilities, then the CLI can ask whether to continue enhancing the remaining batches. Batch progress is recorded under `analysis/resume_state.json` and `analysis/batches/*.json`, and `--resume` skips batches that already completed. If a Claude Agent SDK plan or batch hangs, AgentBridge times it out, writes a deterministic fallback batch, generates a partial kit, and retries fallback batches on the next `--resume` run.
 
 `--analysis-mode auto` prefers Claude Agent SDK when `claude-agent-sdk` is installed, including when `ANTHROPIC_BASE_URL` points to an Anthropic-compatible endpoint such as DeepSeek. `--analysis-mode agentic` requires the SDK route, while `--analysis-mode prompt` forces direct prompt-based generation.
 

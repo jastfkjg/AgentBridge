@@ -107,9 +107,11 @@ class AgentKitGenerator:
         extra_capabilities = [cap for cap in analyzed_capabilities if cap.name not in existing_names]
         capabilities = list(rule_capabilities) + extra_capabilities
         analysis_capability_count = sum(len(batch) for batch in analysis_batches)
+        batch_result_summaries = ai_result.get("rule_signals", {}).get("batch_results", [])
+        fallback_batch_count = sum(1 for item in batch_result_summaries if item.get("status") == "fallback")
         analysis_partial = (
             getattr(analysis_generator, "model", "") != "static"
-            and analysis_capability_count < len(rule_capabilities)
+            and (analysis_capability_count < len(rule_capabilities) or fallback_batch_count > 0)
         )
         self._progress(f"Analysis complete. Writing {len(capabilities)} capabilities to {output_dir}...")
 
@@ -118,6 +120,10 @@ class AgentKitGenerator:
             output_dir,
             "writing",
             (
+                "Generated deterministic fallback for incomplete AI batches. "
+                "Writing kit files; run again with --resume to retry AI enhancement."
+                if fallback_batch_count
+                else
                 "Primary analysis complete. Writing kit files; remaining capabilities can be completed with --resume."
                 if analysis_partial
                 else "Analysis complete. Writing kit files."
@@ -127,6 +133,7 @@ class AgentKitGenerator:
             analysis_capability_count=analysis_capability_count,
             analysis_batch_count=len(analysis_batches),
             partial_analysis=analysis_partial,
+            fallback_batch_count=fallback_batch_count,
             capability_count=len(capabilities),
             lock=status_lock,
         )
@@ -141,6 +148,7 @@ class AgentKitGenerator:
             "batch_count": len(analysis_batches),
             "batch_size": self._batch_size_for(rule_capabilities),
             "partial": analysis_partial,
+            "fallback_batch_count": fallback_batch_count,
             "batches": [
                 {
                     "index": index,
@@ -179,6 +187,10 @@ class AgentKitGenerator:
             output_dir,
             "partial_complete" if analysis_partial else "complete",
             (
+                "Generated AgentBridge kit with deterministic fallback for incomplete AI batches. "
+                "Run again with --resume to retry AI enhancement."
+                if fallback_batch_count
+                else
                 "Generated AgentBridge kit after primary AI analysis. Run again with --resume to complete remaining capabilities."
                 if analysis_partial
                 else "Generated AgentBridge kit."
@@ -188,6 +200,7 @@ class AgentKitGenerator:
             analysis_capability_count=analysis_capability_count,
             analysis_batch_count=len(analysis_batches),
             partial_analysis=analysis_partial,
+            fallback_batch_count=fallback_batch_count,
             capability_count=len(capabilities),
             lock=status_lock,
         )
@@ -255,15 +268,26 @@ class AgentKitGenerator:
             )
 
         completed_indices: set[int] = set()
+        batch_statuses: dict[int, str] = {}
         batch_results: list[dict[str, Any]] = []
         analyzed_batches: list[list[Capability]] = []
-        self._write_resume_state(output_dir, kit_name, input_paths, rule_capabilities, batches, completed_indices, "running")
+        self._write_resume_state(
+            output_dir,
+            kit_name,
+            input_paths,
+            rule_capabilities,
+            batches,
+            completed_indices,
+            "running",
+            batch_statuses,
+        )
 
         for batch_index, batch in enumerate(batches, start=1):
             batch_path = self._batch_result_path(output_dir, batch_index)
             batch_result = self._load_batch_result(batch_path, batch) if self.resume else None
             if batch_result is not None:
                 self._progress(f"Resuming from completed AI batch {batch_index}/{batch_count}: {batch_path}")
+                batch_statuses[batch_index] = "complete"
                 self._write_status(
                     output_dir,
                     "analyzing",
@@ -311,7 +335,12 @@ class AgentKitGenerator:
                 self._write_json(batch_path, batch_result)
 
             batch_results.append(batch_result)
-            completed_indices.add(batch_index)
+            batch_status = str(batch_result.get("status") or "complete")
+            if batch_result.get("fallback"):
+                batch_status = "fallback"
+            batch_statuses[batch_index] = batch_status
+            if batch_status == "complete":
+                completed_indices.add(batch_index)
             analyzed_batches.append(batch)
             self._write_resume_state(
                 output_dir,
@@ -321,7 +350,37 @@ class AgentKitGenerator:
                 batches,
                 completed_indices,
                 "running" if len(completed_indices) < batch_count else "complete",
+                batch_statuses,
             )
+            if batch_status == "fallback":
+                remaining_batch_count = batch_count - batch_index
+                self._progress(
+                    f"Stopping AI enhancement after batch {batch_index}/{batch_count} fell back. "
+                    f"{remaining_batch_count} remaining batch(es) will stay deterministic until --resume retries them."
+                )
+                self._write_resume_state(
+                    output_dir,
+                    kit_name,
+                    input_paths,
+                    rule_capabilities,
+                    batches,
+                    completed_indices,
+                    "partial",
+                    batch_statuses,
+                )
+                self._write_status(
+                    output_dir,
+                    "partial_analysis",
+                    "AI enhancement stopped after a batch fallback; rerun with --resume to retry incomplete batches.",
+                    kit_name=kit_name,
+                    candidate_capability_count=len(rule_capabilities),
+                    analysis_batch_count=batch_count,
+                    completed_batch_count=len(completed_indices),
+                    fallback_batch_index=batch_index,
+                    remaining_batch_count=remaining_batch_count + 1,
+                    lock=status_lock,
+                )
+                break
             if not self._should_continue_after_primary_batch(
                 output_dir,
                 kit_name,
@@ -332,6 +391,7 @@ class AgentKitGenerator:
                 batch_index,
                 batch_count,
                 status_lock,
+                batch_statuses,
             ):
                 break
 
@@ -371,6 +431,7 @@ class AgentKitGenerator:
                 kit_name,
                 len(rule_capabilities),
                 getattr(analysis_generator, "timeout", 300.0),
+                getattr(analysis_generator, "agent_plan_timeout", _env_float("AGENTBRIDGE_AGENT_PLAN_TIMEOUT", 90.0)),
                 status_lock,
             ),
             daemon=True,
@@ -495,6 +556,7 @@ class AgentKitGenerator:
         batch_index: int,
         batch_count: int,
         status_lock: threading.Lock,
+        batch_statuses: dict[int, str],
     ) -> bool:
         if batch_count <= 1 or batch_index != 1:
             return True
@@ -542,6 +604,7 @@ class AgentKitGenerator:
             batches,
             completed_indices,
             "partial",
+            batch_statuses,
         )
         self._write_status(
             output_dir,
@@ -584,6 +647,10 @@ class AgentKitGenerator:
                     batch_count,
                     len(batch),
                     status_lock,
+                    _agent_timeout_for_status(
+                        getattr(analysis_generator, "agent_batch_timeout", _env_float("AGENTBRIDGE_AGENT_BATCH_TIMEOUT", 90.0)),
+                        getattr(analysis_generator, "timeout", 300.0),
+                    ),
                 ),
                 daemon=True,
             )
@@ -622,6 +689,25 @@ class AgentKitGenerator:
                 )
             ai_result = analysis_generator.generate_all(batch, kit_name, input_paths=batch_input_paths)
         except Exception as exc:
+            if use_agentic:
+                fallback = self._static_batch_result(batch, kit_name, batch_index, batch_count, str(exc))
+                self._progress(
+                    f"AI batch {batch_index}/{batch_count} failed in agentic mode; "
+                    f"using deterministic fallback for this batch: {exc}"
+                )
+                self._write_status(
+                    output_dir,
+                    "batch_fallback",
+                    "Claude Agent SDK batch did not complete; using deterministic fallback for this batch.",
+                    kit_name=kit_name,
+                    candidate_capability_count=total_capability_count,
+                    analysis_batch_count=batch_count,
+                    current_batch_index=batch_index,
+                    current_batch_capability_count=len(batch),
+                    fallback_reason=str(exc),
+                    lock=status_lock,
+                )
+                return fallback
             self._write_status(
                 output_dir,
                 "failed",
@@ -651,6 +737,38 @@ class AgentKitGenerator:
             "rule_signals": ai_result.get("rule_signals", {}),
             "system_prompt": ai_result.get("system_prompt", ""),
             "skills": ai_result.get("skills", {}),
+        }
+
+    def _static_batch_result(
+        self,
+        batch: list[Capability],
+        kit_name: str,
+        batch_index: int,
+        batch_count: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        from agentbridge.static import StaticAIGenerator
+
+        static_result = StaticAIGenerator().generate_all(batch, kit_name)
+        agent_analysis = dict(static_result.get("agent_analysis", {}))
+        assumptions = list(agent_analysis.get("assumptions", []) or [])
+        assumptions.append(f"Agentic AI enhancement fallback for batch {batch_index}: {reason}")
+        agent_analysis["assumptions"] = assumptions
+        return {
+            "batch_index": batch_index,
+            "batch_count": batch_count,
+            "capability_names": [cap.name for cap in batch],
+            "enhanced_capabilities": [
+                cap.to_dict() if isinstance(cap, Capability) else cap
+                for cap in static_result.get("enhanced_capabilities", [])
+            ],
+            "agent_analysis": agent_analysis,
+            "rule_signals": static_result.get("rule_signals", {}),
+            "system_prompt": static_result.get("system_prompt", ""),
+            "skills": static_result.get("skills", {}),
+            "status": "fallback",
+            "fallback": True,
+            "fallback_reason": reason,
         }
 
     def _merge_batch_results(
@@ -687,11 +805,14 @@ class AgentKitGenerator:
             "enhanced_capabilities": capabilities,
             "rule_signals": {
                 "candidate_capabilities": [cap.to_dict() for cap in rule_capabilities],
-                "batch_results": [
+            "batch_results": [
                     {
                         "batch_index": result.get("batch_index"),
                         "capability_count": len(result.get("capability_names", [])),
                         "capabilities": result.get("capability_names", []),
+                        "status": result.get("status", "complete"),
+                        "fallback": bool(result.get("fallback", False)),
+                        "fallback_reason": result.get("fallback_reason", ""),
                     }
                     for result in batch_results
                 ],
@@ -839,6 +960,9 @@ class AgentKitGenerator:
         if result.get("capability_names") != expected_names:
             self._progress(f"Existing batch result does not match current plan; regenerating: {path}")
             return None
+        if self.resume and result.get("fallback"):
+            self._progress(f"Existing batch result is deterministic fallback; retrying AI enhancement: {path}")
+            return None
         return result
 
     def _write_resume_state(
@@ -850,14 +974,19 @@ class AgentKitGenerator:
         batches: list[list[Capability]],
         completed_indices: set[int],
         status: str,
+        batch_statuses: dict[int, str] | None = None,
     ) -> None:
+        batch_statuses = batch_statuses or {}
         batch_infos = []
         for index, batch in enumerate(batches, start=1):
             result_path = self._batch_result_path(output_dir, index).relative_to(output_dir)
+            batch_status = batch_statuses.get(index)
+            if batch_status is None:
+                batch_status = "complete" if index in completed_indices else "pending"
             batch_infos.append(
                 {
                     "index": index,
-                    "status": "complete" if index in completed_indices else "pending",
+                    "status": batch_status,
                     "capability_count": len(batch),
                     "capabilities": [cap.name for cap in batch],
                     "result_path": str(result_path),
@@ -874,8 +1003,14 @@ class AgentKitGenerator:
                 "analysis_batch_size": self._batch_size_for(capabilities),
                 "analysis_batch_count": len(batches),
                 "completed_batch_count": len(completed_indices),
-                "remaining_batch_count": len(batches) - len(completed_indices),
+                "fallback_batch_count": sum(1 for item in batch_statuses.values() if item == "fallback"),
+                "remaining_batch_count": sum(
+                    1
+                    for index in range(1, len(batches) + 1)
+                    if batch_statuses.get(index, "complete" if index in completed_indices else "pending") != "complete"
+                ),
                 "completed_batches": sorted(completed_indices),
+                "fallback_batches": sorted(index for index, item in batch_statuses.items() if item == "fallback"),
                 "batches": batch_infos,
             },
         )
@@ -914,6 +1049,7 @@ class AgentKitGenerator:
         batch_count: int,
         batch_capability_count: int,
         status_lock: threading.Lock,
+        batch_timeout: float | None = None,
     ) -> None:
         started = time.monotonic()
         interval = float(self.progress_interval or 0.0)
@@ -924,7 +1060,7 @@ class AgentKitGenerator:
             message = (
                 f"Still waiting for AI batch {batch_index}/{batch_count} "
                 f"({elapsed}s elapsed, {batch_capability_count} capabilities in this batch, "
-                f"{total_capability_count} total)."
+                f"{total_capability_count} total{_fallback_time_suffix(batch_timeout)})."
             )
             self._progress(message)
             self._write_status(
@@ -947,13 +1083,14 @@ class AgentKitGenerator:
         kit_name: str,
         total_capability_count: int,
         llm_timeout: float,
+        agent_plan_timeout: float,
         status_lock: threading.Lock,
     ) -> None:
         started = time.monotonic()
         interval = float(self.progress_interval or 0.0)
         if interval <= 0:
             return
-        plan_timeout = min(_env_float("AGENTBRIDGE_AGENT_PLAN_TIMEOUT", 90.0), float(llm_timeout or 90.0))
+        plan_timeout = _agent_timeout_for_status(agent_plan_timeout, llm_timeout)
         while not stop_event.wait(interval):
             elapsed = int(time.monotonic() - started)
             message = (
@@ -993,6 +1130,16 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         return default
     return parsed if parsed > 0 else default
+
+
+def _agent_timeout_for_status(configured_timeout: float, llm_timeout: float) -> float:
+    return min(configured_timeout, llm_timeout) if llm_timeout > 0 else configured_timeout
+
+
+def _fallback_time_suffix(timeout_seconds: float | None) -> str:
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return ""
+    return f"; will fall back after about {int(timeout_seconds)}s"
 
 
 def _capability_order_from_plan(plan: dict[str, Any]) -> list[str]:

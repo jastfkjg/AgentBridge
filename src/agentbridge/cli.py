@@ -105,6 +105,8 @@ def _create_ai_generator(args: argparse.Namespace, paths: list[Path] | None = No
             model=getattr(args, "model", None),
             timeout=getattr(args, "llm_timeout", None),
             analysis_mode=getattr(args, "analysis_mode", None),
+            agent_plan_timeout=getattr(args, "agent_plan_timeout", None),
+            agent_batch_timeout=getattr(args, "agent_batch_timeout", None),
         )
     except (ValueError, ImportError) as exc:
         raise ValueError(str(exc)) from exc
@@ -420,6 +422,8 @@ def _add_llm_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-url", help="Custom LLM API endpoint. Defaults to ANTHROPIC_BASE_URL env var. Examples: https://api.deepseek.com/anthropic, https://openrouter.ai/api/v1")
     parser.add_argument("--model", help="LLM model name. Defaults to ANTHROPIC_MODEL env var or claude-sonnet-4-20250514. Examples: deepseek-v4-flash, claude-sonnet-4-20250514")
     parser.add_argument("--llm-timeout", type=float, help="LLM request timeout in seconds. Defaults to AGENTBRIDGE_LLM_TIMEOUT or 300.")
+    parser.add_argument("--agent-plan-timeout", type=float, help="Claude Agent SDK project planning timeout in seconds. Defaults to AGENTBRIDGE_AGENT_PLAN_TIMEOUT or 90.")
+    parser.add_argument("--agent-batch-timeout", type=float, help="Claude Agent SDK per-batch generation timeout in seconds. Defaults to AGENTBRIDGE_AGENT_BATCH_TIMEOUT or 90.")
     parser.add_argument(
         "--analysis-mode",
         choices=["auto", "agentic", "prompt"],

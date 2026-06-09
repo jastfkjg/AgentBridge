@@ -5,6 +5,8 @@ import importlib.util
 import inspect
 import json
 import os
+import queue
+import threading
 from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
@@ -28,6 +30,8 @@ class AIGenerator:
         timeout: float | None = None,
         progress: Callable[[str], None] | None = None,
         analysis_mode: str | None = None,
+        agent_plan_timeout: float | None = None,
+        agent_batch_timeout: float | None = None,
     ) -> None:
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if not self.api_key:
@@ -38,6 +42,16 @@ class AIGenerator:
         self.base_url = base_url or os.environ.get("ANTHROPIC_BASE_URL", "")
         self.model = model or os.environ.get("ANTHROPIC_MODEL", "") or _DEFAULT_MODEL
         self.timeout = timeout if timeout is not None else _env_float("AGENTBRIDGE_LLM_TIMEOUT", 300.0)
+        self.agent_plan_timeout = (
+            agent_plan_timeout
+            if agent_plan_timeout is not None
+            else _env_float("AGENTBRIDGE_AGENT_PLAN_TIMEOUT", 90.0)
+        )
+        self.agent_batch_timeout = (
+            agent_batch_timeout
+            if agent_batch_timeout is not None
+            else _env_float("AGENTBRIDGE_AGENT_BATCH_TIMEOUT", 90.0)
+        )
         self.progress = progress
         self.agentic_guidance = ""
         self.analysis_mode = analysis_mode or os.environ.get("AGENTBRIDGE_ANALYSIS_MODE", "auto")
@@ -272,6 +286,7 @@ class AIGenerator:
                 guidance_section=guidance_section,
             ),
             cwd=str(cwd) if cwd else None,
+            timeout=_bounded_agent_timeout(self.agent_batch_timeout, self.timeout),
         )
 
         return self._result_from_generation_text(capabilities, rule_context, result)
@@ -310,7 +325,7 @@ class AIGenerator:
                 risk_policy=json.dumps(rule_context.get("risk_policy", {}), indent=2),
             ),
             cwd=str(cwd) if cwd else None,
-            timeout=_agent_plan_timeout(self.timeout),
+            timeout=_bounded_agent_timeout(self.agent_plan_timeout, self.timeout),
         )
         parsed = _parse_json_object(result, {})
         if not parsed:
@@ -395,21 +410,43 @@ class AIGenerator:
         timeout: float | None = None,
     ) -> str:
         effective_timeout = timeout if timeout is not None else self.timeout
+        result_queue: queue.Queue[tuple[str, str | Exception]] = queue.Queue(maxsize=1)
+        cancelled = threading.Event()
+
+        def _worker() -> None:
+            try:
+                result = asyncio.run(self._collect_agent_sdk_response(system_prompt, user_prompt, cwd, cancelled))
+            except Exception as exc:
+                result_queue.put(("error", exc))
+            else:
+                result_queue.put(("ok", result))
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
         try:
-            return await asyncio.wait_for(
-                self._collect_agent_sdk_response(system_prompt, user_prompt, cwd),
-                timeout=effective_timeout,
-            )
-        except asyncio.TimeoutError as exc:
+            status, value = result_queue.get(timeout=effective_timeout)
+        except queue.Empty as exc:
+            cancelled.set()
             raise RuntimeError(
                 f"Claude Agent SDK request timed out after {effective_timeout:g} seconds. "
                 "Try --batch-size 3, increase --llm-timeout, or use --analysis-mode prompt."
             ) from exc
+        if status == "error":
+            raise value if isinstance(value, Exception) else RuntimeError(str(value))
+        return str(value)
 
-    async def _collect_agent_sdk_response(self, system_prompt: str, user_prompt: str, cwd: str | None = None) -> str:
+    async def _collect_agent_sdk_response(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        cwd: str | None = None,
+        cancelled: threading.Event | None = None,
+    ) -> str:
         from claude_agent_sdk import ClaudeAgentOptions
         from claude_agent_sdk import query
 
+        if cancelled is not None and cancelled.is_set():
+            return ""
         options_kwargs: dict[str, Any] = {
             "system_prompt": system_prompt,
             "max_turns": _env_int("AGENTBRIDGE_AGENT_MAX_TURNS", 12),
@@ -426,6 +463,8 @@ class AIGenerator:
         endpoint = f" via {self.base_url}" if self.base_url else ""
         self._progress(f"Calling Claude Agent SDK query{location}{endpoint}; waiting for streamed agent events...")
         async for message in query(prompt=user_prompt, options=options):
+            if cancelled is not None and cancelled.is_set():
+                return ""
             self._report_agent_sdk_message(message)
             collected.extend(_extract_assistant_texts(message))
         return "".join(collected)
@@ -766,9 +805,8 @@ def _env_float(name: str, default: float) -> float:
     return parsed if parsed > 0 else default
 
 
-def _agent_plan_timeout(llm_timeout: float) -> float:
-    configured = _env_float("AGENTBRIDGE_AGENT_PLAN_TIMEOUT", 90.0)
-    return min(configured, llm_timeout) if llm_timeout > 0 else configured
+def _bounded_agent_timeout(configured_timeout: float, llm_timeout: float) -> float:
+    return min(configured_timeout, llm_timeout) if llm_timeout > 0 else configured_timeout
 
 
 def _env_int(name: str, default: int) -> int:

@@ -29,7 +29,7 @@ agentbridge serve .agentbridge/openapi-kit --base-url http://localhost:8080 --ex
 
 ## 大型项目分析
 
-AgentBridge 会将大型项目分析拆成按优先级排序的批次。第一批优先覆盖主能力，然后 CLI 可以询问是否继续增强剩余批次。批次进度记录在 `analysis/resume_state.json` 和 `analysis/batches/*.json` 下，`--resume` 会跳过已经完成的批次。
+AgentBridge 会将大型项目分析拆成按优先级排序的批次。第一批优先覆盖主能力，然后 CLI 可以询问是否继续增强剩余批次。批次进度记录在 `analysis/resume_state.json` 和 `analysis/batches/*.json` 下，`--resume` 会跳过已经完成的批次。如果 Claude Agent SDK 计划或批次卡住，AgentBridge 会按超时兜底，写入确定性 fallback 批次，先生成 partial kit，并在下一次 `--resume` 时重试 fallback 批次。
 
 `--analysis-mode auto` 会在安装了 `claude-agent-sdk` 时优先使用 Claude Agent SDK，包括 `ANTHROPIC_BASE_URL` 指向 DeepSeek 等 Anthropic 兼容端点的情况。`--analysis-mode agentic` 要求走 SDK 路线，`--analysis-mode prompt` 则强制使用直接 prompt 生成。
 

@@ -343,6 +343,95 @@ class GeneratorRuntimeTests(unittest.TestCase):
         self.assertTrue(all(paths == [EXAMPLE] for paths in captured_input_paths))
         gen.set_agentic_guidance.assert_called()
 
+    def test_agentic_batch_failure_falls_back_and_marks_resume_state(self):
+        gen = _make_mock_generator()
+        gen.uses_agentic_analysis.return_value = True
+        gen.plan_agentic_analysis.return_value = {
+            "project_summary": "SDK-led project plan.",
+            "main_capability_names": [],
+            "questions": [],
+            "notes_for_generation": "",
+        }
+        gen.generate_all.side_effect = RuntimeError("mock sdk timeout")
+        messages: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            AgentKitGenerator(
+                ai_generator=gen,
+                progress=messages.append,
+                analysis_capability_limit=5,
+            ).generate([EXAMPLE], output, name="writing-kit")
+
+            state = json.loads((output / "analysis" / "resume_state.json").read_text(encoding="utf-8"))
+            status = json.loads((output / "generation_status.json").read_text(encoding="utf-8"))
+            batch = json.loads((output / "analysis" / "batches" / "batch_0001.json").read_text(encoding="utf-8"))
+            manifest_exists = (output / "manifest.json").exists()
+
+        self.assertTrue(manifest_exists)
+        self.assertEqual(batch["status"], "fallback")
+        self.assertEqual(state["status"], "partial")
+        self.assertEqual(state["fallback_batches"], [1])
+        self.assertEqual(status["status"], "partial_complete")
+        self.assertTrue(any("using deterministic fallback" in message for message in messages))
+
+    def test_generate_resume_retries_fallback_batches(self):
+        first_gen = _make_mock_generator()
+        first_gen.uses_agentic_analysis.return_value = True
+        first_gen.plan_agentic_analysis.return_value = {
+            "project_summary": "SDK-led project plan.",
+            "main_capability_names": [],
+            "questions": [],
+            "notes_for_generation": "",
+        }
+        first_gen.generate_all.side_effect = RuntimeError("mock sdk timeout")
+
+        second_gen = _make_mock_generator()
+        second_gen.uses_agentic_analysis.return_value = True
+        second_calls: list[list[Any]] = []
+
+        def _second_run(caps, _kit_name, input_paths=None):
+            second_calls.append(list(caps))
+            return {
+                "enhanced_capabilities": list(caps),
+                "rule_signals": {
+                    "candidate_capabilities": [cap.to_dict() for cap in caps],
+                    "risk_policy": {},
+                },
+                "agent_analysis": {
+                    "summary": "Recovered agentic batch.",
+                    "business_objects": [],
+                    "workflows": [],
+                    "permission_boundaries": [],
+                    "side_effects": [],
+                    "assumptions": [],
+                },
+                "system_prompt": "# Recovered Agentic Batch",
+                "skills": {},
+            }
+
+        second_gen.generate_all.side_effect = _second_run
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            AgentKitGenerator(
+                ai_generator=first_gen,
+                progress=lambda _message: None,
+                analysis_capability_limit=5,
+            ).generate([EXAMPLE], output, name="writing-kit")
+
+            AgentKitGenerator(
+                ai_generator=second_gen,
+                progress=lambda _message: None,
+                analysis_capability_limit=5,
+                resume=True,
+            ).generate([EXAMPLE], output, name="writing-kit")
+
+            state = json.loads((output / "analysis" / "resume_state.json").read_text(encoding="utf-8"))
+
+        self.assertGreaterEqual(len(second_calls), 1)
+        self.assertEqual(state["fallback_batch_count"], 0)
+
     def test_generate_resume_skips_completed_batches(self):
         def _batch_response(caps):
             return {

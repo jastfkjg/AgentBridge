@@ -163,12 +163,16 @@ agentbridge generate examples/writing_system \
   --analysis-mode agentic \
   --batch-size 10 \
   --resume \
-  --progress-interval 5
+  --progress-interval 5 \
+  --agent-plan-timeout 90 \
+  --agent-batch-timeout 90
 ```
 
 大型项目会先分析主能力批次，然后询问是否继续补齐剩余能力。如果选择停止，仍会生成可用 kit，剩余能力保留确定性元数据；之后可用 `--resume` 继续补齐 AI 增强批次。
 
-初始 Claude Agent SDK 项目理解计划只发送扫描器摘要，并使用比完整批次生成更短的超时时间。如果提供商需要更久，可用 `AGENTBRIDGE_AGENT_PLAN_TIMEOUT=120` 调整；超时后 AgentBridge 会回退到扫描器排序批次并继续生成。
+初始 Claude Agent SDK 项目理解计划只发送扫描器摘要，并使用比完整批次生成更短的超时时间。如果提供商需要更久，可用 `--agent-plan-timeout` 或 `AGENTBRIDGE_AGENT_PLAN_TIMEOUT=120` 调整；超时后 AgentBridge 会回退到扫描器排序批次并继续生成。
+
+每个 Claude Agent SDK 生成批次也有独立超时。可用 `--agent-batch-timeout` 或 `AGENTBRIDGE_AGENT_BATCH_TIMEOUT=120` 调整。如果 SDK 初始化或提供商调用卡住，AgentBridge 会写入确定性 fallback 批次，在 `analysis/resume_state.json` 标记，并先生成可用 kit；下次 `--resume` 会重试该批次。
 
 ### OpenAPI 一键运行 MCP Server
 
@@ -448,7 +452,7 @@ AgentBridge 使用 AI 分析 agent 生成套件中的语义内容：项目分析
 
 安装了 `claude-agent-sdk` 时，`--analysis-mode auto` 会在目录级项目分析中自动使用它。`ANTHROPIC_BASE_URL` 会透传给兼容端点，例如 DeepSeek。如果未安装 SDK，AgentBridge 会建议安装 `agbr[agent]`，并在可行时回退到直接 prompt 路线。使用 `--analysis-mode agentic` 可要求 SDK 分析，使用 `--analysis-mode prompt` 可强制 prompt-only 分析。
 
-大型项目会分批增强。第一批按优先级覆盖主能力；在交互式终端中，AgentBridge 会询问是否继续处理剩余批次。完成的批次结果写入 `analysis/batches/`，`--resume` 会跳过已完成批次。
+大型项目会分批增强。第一批按优先级覆盖主能力；在交互式终端中，AgentBridge 会询问是否继续处理剩余批次。完成的批次结果写入 `analysis/batches/`，`--resume` 会跳过已完成批次；标记为 `fallback` 的批次会在 `--resume` 时重新尝试。
 
 ### 编程式使用
 
