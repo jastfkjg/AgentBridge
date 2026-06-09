@@ -252,6 +252,22 @@ class AgentKitGenerator:
                 output_dir,
                 status_lock,
             )
+            if agentic_plan.get("status") == "fallback":
+                from agentbridge.static import LocalProjectAIGenerator
+
+                reason = str(agentic_plan.get("reason", "") or "Claude Agent SDK project planning did not complete.")
+                self._progress(
+                    "Switching to local basic agentic analysis for generation batches "
+                    f"because SDK planning was unavailable: {reason}"
+                )
+                analysis_generator = LocalProjectAIGenerator(
+                    reason=f"Claude Agent SDK planning fallback: {reason}",
+                    progress=self.progress,
+                    timeout=0.0,
+                )
+                self._apply_agentic_plan_guidance(analysis_generator, agentic_plan)
+                model = getattr(analysis_generator, "model", "")
+                use_agentic = True
         preferred_order = _capability_order_from_plan(agentic_plan)
         batches = [rule_capabilities] if model == "static" else self._build_analysis_batches(rule_capabilities, preferred_order)
         batch_count = len(batches)
@@ -259,7 +275,9 @@ class AgentKitGenerator:
             self._progress("Generating deterministic kit metadata...")
         else:
             mode_note = ""
-            if use_agentic:
+            if _is_local_basic_generator(analysis_generator):
+                mode_note = " with local basic project analysis"
+            elif use_agentic:
                 mode_note = " with Claude Agent SDK agentic project exploration"
             model_note = f" using {model}" if model else ""
             self._progress(
@@ -284,7 +302,7 @@ class AgentKitGenerator:
 
         for batch_index, batch in enumerate(batches, start=1):
             batch_path = self._batch_result_path(output_dir, batch_index)
-            batch_result = self._load_batch_result(batch_path, batch) if self.resume else None
+            batch_result = self._load_batch_result(batch_path, batch, analysis_generator) if self.resume else None
             if batch_result is not None:
                 self._progress(f"Resuming from completed AI batch {batch_index}/{batch_count}: {batch_path}")
                 batch_statuses[batch_index] = "complete"
@@ -333,6 +351,15 @@ class AgentKitGenerator:
                     len(rule_capabilities),
                 )
                 self._write_json(batch_path, batch_result)
+                if batch_result.get("local_basic"):
+                    from agentbridge.static import LocalProjectAIGenerator
+
+                    analysis_generator = LocalProjectAIGenerator(
+                        reason=str(batch_result.get("local_basic_reason", "Claude Agent SDK batch fallback.")),
+                        progress=self.progress,
+                        timeout=0.0,
+                    )
+                    model = getattr(analysis_generator, "model", "")
 
             batch_results.append(batch_result)
             batch_status = str(batch_result.get("status") or "complete")
@@ -407,17 +434,21 @@ class AgentKitGenerator:
         status_lock: threading.Lock,
     ) -> dict[str, Any]:
         plan_path = output_dir / "analysis" / "agentic_plan.json"
+        route_label = "Local basic project analysis" if _is_local_basic_generator(analysis_generator) else "Claude Agent SDK"
         if self.resume:
             existing_plan = self._load_agentic_plan(plan_path)
             if existing_plan is not None:
-                self._progress(f"Using existing Claude Agent SDK project understanding plan: {plan_path}")
-                self._apply_agentic_plan_guidance(analysis_generator, existing_plan)
-                return existing_plan
+                if _should_retry_existing_plan(existing_plan, analysis_generator):
+                    self._progress(f"Existing project understanding plan was fallback/local-basic; retrying AI planning: {plan_path}")
+                else:
+                    self._progress(f"Using existing project understanding plan: {plan_path}")
+                    self._apply_agentic_plan_guidance(analysis_generator, existing_plan)
+                    return existing_plan
 
         self._write_status(
             output_dir,
             "planning",
-            "Claude Agent SDK is inspecting the project and planning the main capability batches.",
+            f"{route_label} is inspecting the project and planning the main capability batches.",
             kit_name=kit_name,
             candidate_capability_count=len(rule_capabilities),
             lock=status_lock,
@@ -431,7 +462,7 @@ class AgentKitGenerator:
                 kit_name,
                 len(rule_capabilities),
                 getattr(analysis_generator, "timeout", 300.0),
-                getattr(analysis_generator, "agent_plan_timeout", _env_float("AGENTBRIDGE_AGENT_PLAN_TIMEOUT", 90.0)),
+                getattr(analysis_generator, "agent_plan_timeout", _env_float("AGENTBRIDGE_AGENT_PLAN_TIMEOUT", 120.0)),
                 status_lock,
             ),
             daemon=True,
@@ -443,7 +474,7 @@ class AgentKitGenerator:
                     self._status_progress(
                         output_dir,
                         "planning",
-                        "Claude Agent SDK is inspecting the project and planning the main capability batches.",
+                        f"{route_label} is inspecting the project and planning the main capability batches.",
                         kit_name=kit_name,
                         candidate_capability_count=len(rule_capabilities),
                         lock=status_lock,
@@ -484,18 +515,18 @@ class AgentKitGenerator:
         summary = str(plan.get("project_summary", "") or "").strip()
         main_names = _capability_order_from_plan(plan)
         if summary:
-            self._progress(f"Claude Agent SDK project summary: {summary[:300]}")
+            self._progress(f"{route_label} project summary: {summary[:300]}")
         if main_names:
             preview = ", ".join(main_names[:8])
             if len(main_names) > 8:
                 preview += ", ..."
-            self._progress(f"Claude Agent SDK prioritized {len(main_names)} main capabilities: {preview}")
+            self._progress(f"{route_label} prioritized {len(main_names)} main capabilities: {preview}")
         if questions:
-            self._progress(f"Claude Agent SDK has {len(questions)} clarifying question(s) before generation.")
+            self._progress(f"{route_label} has {len(questions)} clarifying question(s) before generation.")
             self._write_status(
                 output_dir,
                 "planning_questions",
-                "Claude Agent SDK has clarifying questions before generation.",
+                f"{route_label} has clarifying questions before generation.",
                 kit_name=kit_name,
                 candidate_capability_count=len(rule_capabilities),
                 agentic_project_summary=summary,
@@ -515,7 +546,7 @@ class AgentKitGenerator:
         self._write_status(
             output_dir,
             "planning_complete",
-            "Claude Agent SDK project understanding plan is ready.",
+            f"{route_label} project understanding plan is ready.",
             kit_name=kit_name,
             candidate_capability_count=len(rule_capabilities),
             agentic_project_summary=summary,
@@ -648,7 +679,7 @@ class AgentKitGenerator:
                     len(batch),
                     status_lock,
                     _agent_timeout_for_status(
-                        getattr(analysis_generator, "agent_batch_timeout", _env_float("AGENTBRIDGE_AGENT_BATCH_TIMEOUT", 90.0)),
+                        getattr(analysis_generator, "agent_batch_timeout", _env_float("AGENTBRIDGE_AGENT_BATCH_TIMEOUT", 180.0)),
                         getattr(analysis_generator, "timeout", 300.0),
                     ),
                 ),
@@ -661,7 +692,12 @@ class AgentKitGenerator:
         )
         batch_input_paths = input_paths if use_agentic else self._batch_source_paths(batch, input_paths)
         if model != "static":
-            if use_agentic:
+            if _is_local_basic_generator(analysis_generator):
+                self._progress(
+                    f"AI batch {batch_index}/{batch_count} will use local basic project evidence "
+                    f"over {len(batch_input_paths)} input path(s)."
+                )
+            elif use_agentic:
                 self._progress(
                     f"AI batch {batch_index}/{batch_count} will use Claude Agent SDK "
                     f"read-only project exploration over {len(batch_input_paths)} input path(s)."
@@ -690,21 +726,28 @@ class AgentKitGenerator:
             ai_result = analysis_generator.generate_all(batch, kit_name, input_paths=batch_input_paths)
         except Exception as exc:
             if use_agentic:
-                fallback = self._static_batch_result(batch, kit_name, batch_index, batch_count, str(exc))
+                fallback = self._local_basic_batch_result(
+                    batch,
+                    kit_name,
+                    input_paths,
+                    batch_index,
+                    batch_count,
+                    str(exc),
+                )
                 self._progress(
                     f"AI batch {batch_index}/{batch_count} failed in agentic mode; "
-                    f"using deterministic fallback for this batch: {exc}"
+                    f"using local basic project analysis for this batch: {exc}"
                 )
                 self._write_status(
                     output_dir,
-                    "batch_fallback",
-                    "Claude Agent SDK batch did not complete; using deterministic fallback for this batch.",
+                    "batch_local_basic",
+                    "AI batch did not complete; using local basic project analysis for this batch.",
                     kit_name=kit_name,
                     candidate_capability_count=total_capability_count,
                     analysis_batch_count=batch_count,
                     current_batch_index=batch_index,
                     current_batch_capability_count=len(batch),
-                    fallback_reason=str(exc),
+                    local_basic_reason=str(exc),
                     lock=status_lock,
                 )
                 return fallback
@@ -737,6 +780,41 @@ class AgentKitGenerator:
             "rule_signals": ai_result.get("rule_signals", {}),
             "system_prompt": ai_result.get("system_prompt", ""),
             "skills": ai_result.get("skills", {}),
+            "status": "complete",
+            "local_basic": getattr(analysis_generator, "model", "") == "local-basic-agentic",
+        }
+
+    def _local_basic_batch_result(
+        self,
+        batch: list[Capability],
+        kit_name: str,
+        input_paths: list[Path],
+        batch_index: int,
+        batch_count: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        from agentbridge.static import LocalProjectAIGenerator
+
+        local_result = LocalProjectAIGenerator(
+            reason=f"Claude Agent SDK batch fallback: {reason}",
+            progress=self.progress,
+            timeout=0.0,
+        ).generate_all(batch, kit_name, input_paths=input_paths)
+        return {
+            "batch_index": batch_index,
+            "batch_count": batch_count,
+            "capability_names": [cap.name for cap in batch],
+            "enhanced_capabilities": [
+                cap.to_dict() if isinstance(cap, Capability) else cap
+                for cap in local_result.get("enhanced_capabilities", [])
+            ],
+            "agent_analysis": local_result.get("agent_analysis", {}),
+            "rule_signals": local_result.get("rule_signals", {}),
+            "system_prompt": local_result.get("system_prompt", ""),
+            "skills": local_result.get("skills", {}),
+            "status": "complete",
+            "local_basic": True,
+            "local_basic_reason": reason,
         }
 
     def _static_batch_result(
@@ -813,6 +891,8 @@ class AgentKitGenerator:
                         "status": result.get("status", "complete"),
                         "fallback": bool(result.get("fallback", False)),
                         "fallback_reason": result.get("fallback_reason", ""),
+                        "local_basic": bool(result.get("local_basic", False)),
+                        "local_basic_reason": result.get("local_basic_reason", ""),
                     }
                     for result in batch_results
                 ],
@@ -855,6 +935,17 @@ class AgentKitGenerator:
                 value = analysis.get(key, {})
                 if isinstance(value, dict):
                     merged[key].update(value)
+        if len(analyses) > 1:
+            capability_count = len(merged["tool_enhancements"]) or sum(
+                int((analysis.get("local_basic_metrics") or {}).get("capability_count", 0))
+                for analysis in analyses
+                if isinstance(analysis.get("local_basic_metrics"), dict)
+            )
+            object_count = len(merged["business_objects"])
+            merged["summary"] = (
+                f"Merged batch analysis covering {capability_count} discovered capabilities "
+                f"across {object_count} business object/domain entries from {len(analyses)} batch(es)."
+            )
         return merged
 
     def _build_analysis_batches(self, capabilities: list[Capability], preferred_order: list[str] | None = None) -> list[list[Capability]]:
@@ -951,7 +1042,12 @@ class AgentKitGenerator:
     def _batch_result_path(self, output_dir: Path, batch_index: int) -> Path:
         return output_dir / "analysis" / "batches" / f"batch_{batch_index:04d}.json"
 
-    def _load_batch_result(self, path: Path, batch: list[Capability]) -> dict[str, Any] | None:
+    def _load_batch_result(
+        self,
+        path: Path,
+        batch: list[Capability],
+        analysis_generator: AIGenerator | None = None,
+    ) -> dict[str, Any] | None:
         try:
             result = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -962,6 +1058,9 @@ class AgentKitGenerator:
             return None
         if self.resume and result.get("fallback"):
             self._progress(f"Existing batch result is deterministic fallback; retrying AI enhancement: {path}")
+            return None
+        if self.resume and result.get("local_basic") and not _is_local_basic_generator(analysis_generator):
+            self._progress(f"Existing batch result is local-basic; retrying AI enhancement: {path}")
             return None
         return result
 
@@ -1140,6 +1239,16 @@ def _fallback_time_suffix(timeout_seconds: float | None) -> str:
     if timeout_seconds is None or timeout_seconds <= 0:
         return ""
     return f"; will fall back after about {int(timeout_seconds)}s"
+
+
+def _is_local_basic_generator(generator: Any) -> bool:
+    return getattr(generator, "model", "") == "local-basic-agentic"
+
+
+def _should_retry_existing_plan(plan: dict[str, Any], generator: Any) -> bool:
+    if _is_local_basic_generator(generator):
+        return False
+    return str(plan.get("status", "")) in {"fallback", "local_basic"}
 
 
 def _capability_order_from_plan(plan: dict[str, Any]) -> list[str]:

@@ -164,15 +164,15 @@ agentbridge generate examples/writing_system \
   --batch-size 10 \
   --resume \
   --progress-interval 5 \
-  --agent-plan-timeout 90 \
-  --agent-batch-timeout 90
+  --agent-plan-timeout 120 \
+  --agent-batch-timeout 180
 ```
 
-For large projects, AgentBridge analyzes the primary capability batch first, then asks whether to continue enhancing the remaining capabilities. If you stop after the first batch, the kit is still generated with deterministic metadata for the rest; rerun with `--resume` to fill in remaining AI-enhanced batches.
+For large projects, AgentBridge analyzes the primary capability batch first, then asks whether to continue enhancing the remaining capabilities. If you stop after the first batch, the kit is still generated with local basic project metadata for the rest; rerun with `--resume` to fill in remaining AI-enhanced batches.
 
-The initial Claude Agent SDK project-understanding plan uses a compact scanner summary and has a shorter timeout than full batch generation. Override it with `--agent-plan-timeout` or `AGENTBRIDGE_AGENT_PLAN_TIMEOUT=120` if your provider needs more time; on timeout AgentBridge falls back to scanner-ranked batches and continues.
+The initial Claude Agent SDK project-understanding plan uses compact scanner hints plus high-signal source excerpts and has a shorter timeout than full batch generation. Override it with `--agent-plan-timeout` or `AGENTBRIDGE_AGENT_PLAN_TIMEOUT=120` if your provider needs more time; on timeout AgentBridge falls back to scanner-ranked batches and continues.
 
-Each Claude Agent SDK generation batch has its own timeout as well. Override it with `--agent-batch-timeout` or `AGENTBRIDGE_AGENT_BATCH_TIMEOUT=120`. If SDK initialization or a provider call hangs, AgentBridge writes a deterministic fallback batch, marks it in `analysis/resume_state.json`, generates the kit, and retries that batch on the next `--resume` run.
+Each Claude Agent SDK generation batch has its own timeout as well. Override it with `--agent-batch-timeout` or `AGENTBRIDGE_AGENT_BATCH_TIMEOUT=180`. If SDK initialization or a provider call hangs, AgentBridge switches to local basic project analysis, generates a usable kit, and records batch provenance in `analysis/resume_state.json`. Later `--resume` runs with a working AI backend retry fallback or local-basic checkpoints.
 
 ### Run an MCP Server from OpenAPI
 
@@ -450,9 +450,9 @@ AgentBridge uses an AI analysis agent to generate the semantic parts of the kit:
 | **Claude Agent SDK** (primary) | `claude-agent-sdk` | Agentic project analysis, kit content generation, streamed tool/progress events, and interactive agent sessions |
 | **Anthropic API** (prompt route) | `anthropic` | Direct prompt-based generation, useful when SDK is unavailable or when forcing `--analysis-mode prompt` |
 
-When `claude-agent-sdk` is installed, `--analysis-mode auto` uses it automatically for project directories. `ANTHROPIC_BASE_URL` is passed through for compatible endpoints such as DeepSeek. If the SDK is not installed, AgentBridge recommends installing `agbr[agent]` and falls back to the direct prompt route when possible. Use `--analysis-mode agentic` to require SDK analysis, or `--analysis-mode prompt` to force prompt-only analysis.
+When `claude-agent-sdk` is installed, `--analysis-mode auto` uses it automatically for project directories. `ANTHROPIC_BASE_URL` is passed through for compatible endpoints such as DeepSeek, and `--analysis-mode agentic` can use the same compatible endpoint path as long as the SDK can connect to it. If the SDK is not installed, AgentBridge recommends installing `agbr[agent]` and falls back to the direct prompt route when possible. Use `--analysis-mode agentic` to require SDK analysis; this mode requires `ANTHROPIC_API_KEY` or `--api-key` and will not silently generate a local-only analysis. Use `--analysis-mode prompt` to force prompt-only analysis.
 
-Large projects are enhanced in batches. The first batch is ranked to cover the main capabilities; in an interactive terminal AgentBridge then asks whether to continue. Completed batch results are written under `analysis/batches/`, and `--resume` skips batches that already completed. Batches marked `fallback` are retried on `--resume`.
+Large projects are enhanced in batches. The first batch is ranked to cover the main capabilities; in an interactive terminal AgentBridge then asks whether to continue. Each Claude Agent SDK batch uses read-only project exploration and streams file reads, searches, and tool results into the progress output. Completed batch results are written under `analysis/batches/`, and `--resume` skips batches that already completed. Batches marked `fallback` or `local_basic` can be retried when a working AI backend is configured.
 
 ### Programmatic Usage
 

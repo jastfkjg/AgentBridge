@@ -51,8 +51,8 @@ agent-kit/
 
 Large-project generation may also write:
 
-- `analysis/resume_state.json`: current batch plan, completed batches, fallback batches, remaining batches, and partial/complete status.
-- `analysis/batches/*.json`: completed AI-enhancement or deterministic fallback batch outputs used by `--resume`; fallback batches are retried on resume.
+- `analysis/resume_state.json`: current batch plan, completed batches, fallback/local-basic batches, remaining batches, and partial/complete status.
+- `analysis/batches/*.json`: completed AI-enhancement or local basic batch outputs used by `--resume`; fallback/local-basic checkpoints can be retried when a working AI backend is configured.
 
 These files are additive and are not required for `agentbridge-kit/v1` consumers, but tools may read them to show progress or continue incomplete AI enhancement.
 

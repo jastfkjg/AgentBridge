@@ -91,6 +91,12 @@ def _create_ai_generator(args: argparse.Namespace, paths: list[Path] | None = No
             file=sys.stderr,
         )
     if not (getattr(args, "api_key", None) or os.environ.get("ANTHROPIC_API_KEY")):
+        if getattr(args, "analysis_mode", None) == "agentic":
+            raise ValueError(
+                "ANTHROPIC_API_KEY is required when --analysis-mode agentic is selected. "
+                "Set ANTHROPIC_API_KEY or pass --api-key so Claude Agent SDK can run real project analysis. "
+                "Use --analysis-mode auto or --no-ai only when local deterministic generation is acceptable."
+            )
         if any(path.is_dir() for path in paths or []):
             raise ValueError(
                 "Project directory analysis requires an AI backend. "
@@ -422,8 +428,8 @@ def _add_llm_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-url", help="Custom LLM API endpoint. Defaults to ANTHROPIC_BASE_URL env var. Examples: https://api.deepseek.com/anthropic, https://openrouter.ai/api/v1")
     parser.add_argument("--model", help="LLM model name. Defaults to ANTHROPIC_MODEL env var or claude-sonnet-4-20250514. Examples: deepseek-v4-flash, claude-sonnet-4-20250514")
     parser.add_argument("--llm-timeout", type=float, help="LLM request timeout in seconds. Defaults to AGENTBRIDGE_LLM_TIMEOUT or 300.")
-    parser.add_argument("--agent-plan-timeout", type=float, help="Claude Agent SDK project planning timeout in seconds. Defaults to AGENTBRIDGE_AGENT_PLAN_TIMEOUT or 90.")
-    parser.add_argument("--agent-batch-timeout", type=float, help="Claude Agent SDK per-batch generation timeout in seconds. Defaults to AGENTBRIDGE_AGENT_BATCH_TIMEOUT or 90.")
+    parser.add_argument("--agent-plan-timeout", type=float, help="Claude Agent SDK project planning timeout in seconds. Defaults to AGENTBRIDGE_AGENT_PLAN_TIMEOUT or 120.")
+    parser.add_argument("--agent-batch-timeout", type=float, help="Claude Agent SDK per-batch generation timeout in seconds. Defaults to AGENTBRIDGE_AGENT_BATCH_TIMEOUT or 180.")
     parser.add_argument(
         "--analysis-mode",
         choices=["auto", "agentic", "prompt"],

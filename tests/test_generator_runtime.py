@@ -343,7 +343,7 @@ class GeneratorRuntimeTests(unittest.TestCase):
         self.assertTrue(all(paths == [EXAMPLE] for paths in captured_input_paths))
         gen.set_agentic_guidance.assert_called()
 
-    def test_agentic_batch_failure_falls_back_and_marks_resume_state(self):
+    def test_agentic_batch_failure_uses_local_basic_analysis(self):
         gen = _make_mock_generator()
         gen.uses_agentic_analysis.return_value = True
         gen.plan_agentic_analysis.return_value = {
@@ -366,16 +366,20 @@ class GeneratorRuntimeTests(unittest.TestCase):
             state = json.loads((output / "analysis" / "resume_state.json").read_text(encoding="utf-8"))
             status = json.loads((output / "generation_status.json").read_text(encoding="utf-8"))
             batch = json.loads((output / "analysis" / "batches" / "batch_0001.json").read_text(encoding="utf-8"))
+            analysis = json.loads((output / "analysis" / "agent_analysis.json").read_text(encoding="utf-8"))
             manifest_exists = (output / "manifest.json").exists()
 
         self.assertTrue(manifest_exists)
-        self.assertEqual(batch["status"], "fallback")
-        self.assertEqual(state["status"], "partial")
-        self.assertEqual(state["fallback_batches"], [1])
-        self.assertEqual(status["status"], "partial_complete")
-        self.assertTrue(any("using deterministic fallback" in message for message in messages))
+        self.assertEqual(batch["status"], "complete")
+        self.assertTrue(batch["local_basic"])
+        self.assertEqual(state["status"], "complete")
+        self.assertEqual(state["fallback_batches"], [])
+        self.assertEqual(state["remaining_batch_count"], 0)
+        self.assertEqual(status["status"], "complete")
+        self.assertIn("Merged batch analysis", analysis["summary"])
+        self.assertTrue(any("using local basic project analysis" in message for message in messages))
 
-    def test_generate_resume_retries_fallback_batches(self):
+    def test_generate_resume_retries_local_basic_batches_with_ai_generator(self):
         first_gen = _make_mock_generator()
         first_gen.uses_agentic_analysis.return_value = True
         first_gen.plan_agentic_analysis.return_value = {
@@ -555,6 +559,28 @@ class GeneratorRuntimeTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("Starting generation", stderr.getvalue())
             self.assertIn("Project directory analysis requires an AI backend", stderr.getvalue())
+
+    def test_cli_agentic_without_api_key_requires_real_sdk_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            stderr = StringIO()
+            with patch.dict("os.environ", {}, clear=True), redirect_stderr(stderr):
+                code = cli.main([
+                    "generate",
+                    str(EXAMPLE),
+                    "--output",
+                    str(output),
+                    "--analysis-mode",
+                    "agentic",
+                    "--batch-size",
+                    "5",
+                    "--resume",
+                    "--yes",
+                ])
+
+        self.assertEqual(code, 1)
+        self.assertFalse((output / "generation_status.json").exists())
+        self.assertIn("ANTHROPIC_API_KEY is required when --analysis-mode agentic", stderr.getvalue())
 
     def test_cli_recommends_claude_agent_sdk_when_missing(self):
         args = cli.build_parser().parse_args([

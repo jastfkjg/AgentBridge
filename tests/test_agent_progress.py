@@ -8,10 +8,24 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agentbridge.agent import AIGenerator
+from agentbridge.agent import AIGenerator, _parse_json_object
 
 
 class AgentProgressTests(unittest.TestCase):
+    def test_parse_json_object_prefers_generation_payload(self):
+        text = (
+            "intermediate note {} "
+            '{"project_analysis": {"summary": "done"}, '
+            '"tool_enhancements": {"create_character": {"description": "Create character"}}, '
+            '"risk_assessments": {"create_character": {"risk": "write"}}, '
+            '"additional_tools": [], "system_prompt": "", "skills": {}}'
+        )
+
+        parsed = _parse_json_object(text, {})
+
+        self.assertEqual(parsed["project_analysis"]["summary"], "done")
+        self.assertIn("create_character", parsed["tool_enhancements"])
+
     def test_generate_all_reports_source_files_and_provider_call(self):
         messages: list[str] = []
         with tempfile.TemporaryDirectory() as tmp:
@@ -98,6 +112,9 @@ class AgentProgressTests(unittest.TestCase):
 
         self.assertEqual(FakeClaudeAgentOptions.last_kwargs["cwd"], str(root.resolve()))
         self.assertEqual(FakeClaudeAgentOptions.last_kwargs["base_url"], base_url)
+        self.assertEqual(FakeClaudeAgentOptions.last_kwargs["tools"], ["Read", "Grep"])
+        self.assertEqual(FakeClaudeAgentOptions.last_kwargs["allowed_tools"], ["Read", "Grep"])
+        self.assertIn("Agent", FakeClaudeAgentOptions.last_kwargs["disallowed_tools"])
         self.assertTrue(any("Using Claude Agent SDK agentic analysis" in message for message in messages))
         self.assertTrue(any(base_url in message for message in messages))
         self.assertTrue(any("Claude Agent SDK reading file: app.py" in message for message in messages))

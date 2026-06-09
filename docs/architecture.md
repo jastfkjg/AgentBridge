@@ -29,9 +29,9 @@ Rules are cheap, deterministic evidence collectors, and they also support the no
 
 ## Large-Project Analysis
 
-AgentBridge splits large project analysis into ranked batches. The first batch targets the main capabilities, then the CLI can ask whether to continue enhancing the remaining batches. Batch progress is recorded under `analysis/resume_state.json` and `analysis/batches/*.json`, and `--resume` skips batches that already completed. If a Claude Agent SDK plan or batch hangs, AgentBridge times it out, writes a deterministic fallback batch, generates a partial kit, and retries fallback batches on the next `--resume` run.
+AgentBridge splits large project analysis into ranked batches. The first batch targets the main capabilities, then the CLI can ask whether to continue enhancing the remaining batches. Claude Agent SDK batches stream read-only tool calls, file reads, code searches, and tool results into CLI progress output and `generation_status.json`. Batch progress is recorded under `analysis/resume_state.json` and `analysis/batches/*.json`, and `--resume` skips batches that already completed. If a Claude Agent SDK plan or batch hangs, AgentBridge times it out, switches to local basic project analysis, generates a usable kit, and can retry fallback or local-basic checkpoints later when a working AI backend is available.
 
-`--analysis-mode auto` prefers Claude Agent SDK when `claude-agent-sdk` is installed, including when `ANTHROPIC_BASE_URL` points to an Anthropic-compatible endpoint such as DeepSeek. `--analysis-mode agentic` requires the SDK route, while `--analysis-mode prompt` forces direct prompt-based generation.
+`--analysis-mode auto` prefers Claude Agent SDK when `claude-agent-sdk` is installed, including when `ANTHROPIC_BASE_URL` points to an Anthropic-compatible endpoint such as DeepSeek. `--analysis-mode agentic` requires the SDK route and also passes the compatible endpoint through to the SDK; `--analysis-mode prompt` forces direct prompt-based generation.
 
 ## Project Write Boundary
 

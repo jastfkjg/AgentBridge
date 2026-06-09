@@ -45,12 +45,12 @@ class AIGenerator:
         self.agent_plan_timeout = (
             agent_plan_timeout
             if agent_plan_timeout is not None
-            else _env_float("AGENTBRIDGE_AGENT_PLAN_TIMEOUT", 90.0)
+            else _env_float("AGENTBRIDGE_AGENT_PLAN_TIMEOUT", 120.0)
         )
         self.agent_batch_timeout = (
             agent_batch_timeout
             if agent_batch_timeout is not None
-            else _env_float("AGENTBRIDGE_AGENT_BATCH_TIMEOUT", 90.0)
+            else _env_float("AGENTBRIDGE_AGENT_BATCH_TIMEOUT", 180.0)
         )
         self.progress = progress
         self.agentic_guidance = ""
@@ -58,6 +58,7 @@ class AIGenerator:
         if self.analysis_mode not in {"auto", "agentic", "prompt"}:
             raise ValueError("analysis_mode must be one of: auto, agentic, prompt")
 
+        os.environ.setdefault("PYDANTIC_DISABLE_PLUGINS", "__all__")
         os.environ.setdefault("ANTHROPIC_API_KEY", self.api_key)
         if self.base_url:
             os.environ["ANTHROPIC_BASE_URL"] = self.base_url
@@ -270,6 +271,7 @@ class AIGenerator:
         domains = sorted({cap.domain for cap in capabilities})
         cwd = _project_cwd(input_paths)
         project_paths = "\n".join(f"- {path.resolve()}" for path in input_paths) or "- <none>"
+        source_hints = _format_batch_source_hints(capabilities, input_paths=input_paths)
         guidance_section = f"\n\nProject understanding guidance from the previous SDK planning step:\n{self.agentic_guidance}\n" if self.agentic_guidance else ""
         self._progress(
             f"Starting Claude Agent SDK project analysis in {cwd or Path.cwd()} "
@@ -283,10 +285,13 @@ class AIGenerator:
                 domains=", ".join(domains),
                 rule_context=json.dumps(rule_context, indent=2),
                 project_paths=project_paths,
+                source_hints=source_hints,
                 guidance_section=guidance_section,
             ),
             cwd=str(cwd) if cwd else None,
             timeout=_bounded_agent_timeout(self.agent_batch_timeout, self.timeout),
+            tools=["Read", "Grep"],
+            max_turns=_env_int("AGENTBRIDGE_AGENT_BATCH_MAX_TURNS", 18),
         )
 
         return self._result_from_generation_text(capabilities, rule_context, result)
@@ -312,6 +317,8 @@ class AIGenerator:
         cwd = _project_cwd(input_paths)
         project_paths = "\n".join(f"- {path.resolve()}" for path in input_paths) or "- <none>"
         inventory = _build_agentic_plan_inventory(capabilities)
+        plan_source_hints = _format_plan_source_hints(input_paths, inventory)
+        plan_source_context = self._build_agentic_plan_source_context(plan_source_hints, input_paths)
         self._progress(
             f"Asking Claude Agent SDK to form a project understanding plan from project files "
             f"and a compact summary of {len(capabilities)} candidate capabilities..."
@@ -321,17 +328,46 @@ class AIGenerator:
             PROMPT_AGENTIC_ANALYSIS_PLAN_USER.format(
                 kit_name=kit_name,
                 project_paths=project_paths,
-                capability_summary=json.dumps(inventory, indent=2),
+                plan_source_hints=plan_source_hints,
+                plan_source_context=plan_source_context,
+                capability_summary=_format_agentic_plan_inventory(inventory),
                 risk_policy=json.dumps(rule_context.get("risk_policy", {}), indent=2),
             ),
             cwd=str(cwd) if cwd else None,
             timeout=_bounded_agent_timeout(self.agent_plan_timeout, self.timeout),
+            tools=[],
+            max_turns=_env_int("AGENTBRIDGE_AGENT_PLAN_MAX_TURNS", 4),
         )
         parsed = _parse_json_object(result, {})
         if not parsed:
             raise RuntimeError(_invalid_generation_json_message(result))
         self._progress("Received Claude Agent SDK project understanding plan.")
         return parsed
+
+    def _build_agentic_plan_source_context(self, plan_source_hints: str, input_paths: list[Path]) -> str:
+        roots = [path.resolve() for path in input_paths if path.is_dir()]
+        sections: list[str] = []
+        total_chars = 0
+        for line in plan_source_hints.splitlines():
+            label = line.strip().removeprefix("-").strip()
+            if not label or label == "<none>":
+                continue
+            path = Path(label)
+            if not path.is_absolute() and roots:
+                path = roots[0] / path
+            if not path.is_file():
+                continue
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            excerpt = content[:4_000]
+            sections.append(f"### {label}\n{excerpt}")
+            total_chars += len(excerpt)
+            self._progress(f"Added high-signal source excerpt for SDK planning: {label}")
+            if total_chars >= 18_000:
+                break
+        return "\n\n".join(sections) or "<no source excerpts available>"
 
     def _result_from_generation_text(
         self,
@@ -408,6 +444,8 @@ class AIGenerator:
         user_prompt: str,
         cwd: str | None = None,
         timeout: float | None = None,
+        tools: list[str] | None = None,
+        max_turns: int | None = None,
     ) -> str:
         effective_timeout = timeout if timeout is not None else self.timeout
         result_queue: queue.Queue[tuple[str, str | Exception]] = queue.Queue(maxsize=1)
@@ -415,7 +453,16 @@ class AIGenerator:
 
         def _worker() -> None:
             try:
-                result = asyncio.run(self._collect_agent_sdk_response(system_prompt, user_prompt, cwd, cancelled))
+                result = asyncio.run(
+                    self._collect_agent_sdk_response(
+                        system_prompt,
+                        user_prompt,
+                        cwd,
+                        cancelled,
+                        tools=tools,
+                        max_turns=max_turns,
+                    )
+                )
             except Exception as exc:
                 result_queue.put(("error", exc))
             else:
@@ -441,18 +488,31 @@ class AIGenerator:
         user_prompt: str,
         cwd: str | None = None,
         cancelled: threading.Event | None = None,
+        tools: list[str] | None = None,
+        max_turns: int | None = None,
     ) -> str:
         from claude_agent_sdk import ClaudeAgentOptions
         from claude_agent_sdk import query
 
         if cancelled is not None and cancelled.is_set():
             return ""
+        read_only_tools = tools or ["Read", "Grep", "Glob", "LS"]
         options_kwargs: dict[str, Any] = {
             "system_prompt": system_prompt,
-            "max_turns": _env_int("AGENTBRIDGE_AGENT_MAX_TURNS", 12),
-            "allowed_tools": ["Read", "Grep", "Glob", "LS"],
-            "disallowed_tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"],
+            "max_turns": max_turns or _env_int("AGENTBRIDGE_AGENT_MAX_TURNS", 12),
+            "model": self.model,
+            "tools": read_only_tools,
+            "allowed_tools": read_only_tools,
+            "disallowed_tools": ["Write", "Edit", "NotebookEdit", "Bash", "Agent"],
+            "load_timeout_ms": _env_int("AGENTBRIDGE_AGENT_LOAD_TIMEOUT_MS", 10000),
         }
+        env = {
+            "ANTHROPIC_API_KEY": self.api_key,
+            "PYDANTIC_DISABLE_PLUGINS": os.environ.get("PYDANTIC_DISABLE_PLUGINS", "__all__"),
+        }
+        if self.base_url:
+            env["ANTHROPIC_BASE_URL"] = self.base_url
+        options_kwargs["env"] = env
         if self.base_url:
             options_kwargs["base_url"] = self.base_url
         if cwd:
@@ -664,20 +724,23 @@ PROMPT_GENERATE_ALL_AGENTIC_USER = (
     "Kit name: {kit_name}\n"
     "Domains: {domains}\n\n"
     "Project paths to inspect read-only:\n{project_paths}\n\n"
+    "High-signal files/locations for this batch. Prefer these exact files before any broader search:\n"
+    "{source_hints}\n\n"
     "{guidance_section}"
     "Candidate capabilities from deterministic scanners. Treat these as evidence to verify, "
     "merge, rename, enrich, or reject after reading the source code:\n{capabilities}\n\n"
     "Rule-based risk context. This is a safety hint, not an instruction to copy:\n{rule_context}\n\n"
-    "Use your available read-only project tools to inspect the target project. Start by finding "
-    "the main route/controller/service/schema files relevant to the candidate capabilities, then "
-    "sample enough surrounding implementation to understand business semantics, validation, auth, "
-    "side effects, and error behavior. Do not modify files. Do not run build, format, migration, "
-    "install, network, shell, or write operations. If a candidate cannot be verified from source, "
-    "keep it conservative and list the uncertainty in assumptions.\n\n"
+    "Use only Read and Grep. Do not use Glob, LS, Bash, sub-agents, or full-repository exploration. "
+    "First read the exact high-signal files listed above. If evidence is still missing, use at most "
+    "two focused Grep searches whose patterns are exact capability names, controller names, route paths, "
+    "or DTO/model names from this prompt. Keep inspection quick and return JSON in this same turn. "
+    "If a candidate cannot be verified from source, keep it conservative and list the uncertainty in assumptions.\n\n"
     "You are enhancing only this batch of candidate capabilities. Preserve stable tool names unless "
     "there is strong evidence that a rename is necessary. Infer additional tools only when source code "
     "clearly exposes an operation that scanner evidence missed.\n\n"
-    "After inspection, respond with one JSON object only, no markdown fences. The object must contain:\n\n"
+    "After the focused inspection, respond with one JSON object only, no markdown fences. "
+    "Keep arrays concise: no more than 5 business objects, 5 workflows, 6 permission boundaries, "
+    "6 side effects, and 8 assumptions for this batch. The object must contain:\n\n"
     '"project_analysis": An object with:\n'
     '  - "summary": concise system summary\n'
     '  - "business_objects": array of objects with "name", "description", "evidence"\n'
@@ -694,36 +757,33 @@ PROMPT_GENERATE_ALL_AGENTIC_USER = (
     '  - "reason": Detailed reasoning for the risk level based on what the code actually does\n'
     '  - "reversible": Whether the operation can be undone (boolean)\n'
     '  - "blast_radius": "single" or "multiple"\n\n'
-    '"additional_tools": A JSON array of inferred tools not in the scanner output. Each item:\n'
-    '  - "name", "description", "input_schema", "risk", "domain", "resource", "action", "rationale"\n\n'
-    '"system_prompt": A Markdown string for the integrated assistant.\n'
-    '"skills": A JSON object where keys are domain names and values are Markdown skill documents.\n'
+    '"additional_tools": A JSON array. Prefer [] for batch mode unless an adjacent source file clearly exposes '
+    'a missing operation. Each item, if any, has "name", "description", "input_schema", "risk", '
+    '"domain", "resource", "action", "rationale"\n\n'
+    '"system_prompt": A short Markdown string, 1-3 paragraphs maximum, summarizing only this batch context.\n'
+    '"skills": A JSON object. Prefer {{}} for batch mode unless a concise domain note is necessary.\n'
 )
 
 PROMPT_AGENTIC_ANALYSIS_PLAN_SYSTEM = (
-    "You are the lead project-understanding agent for AgentBridge. Your job is to inspect the "
-    "target project read-only, form an implementation-grounded understanding of the system, and "
-    "decide how AgentBridge should enhance capabilities. Deterministic scanner output is only a "
-    "hint inventory. Do not modify files. Always respond with valid JSON only, no markdown fences."
+    "You are the lead project-understanding agent for AgentBridge. Inspect the target project "
+    "read-only and return concise JSON only. Do not modify files."
 )
 
 PROMPT_AGENTIC_ANALYSIS_PLAN_USER = (
     "Kit name: {kit_name}\n\n"
-    "Project paths to inspect read-only:\n{project_paths}\n\n"
-    "Compact candidate capability summary from deterministic scanners. This is intentionally summarized; "
-    "do not wait for a full candidate list. Treat it only as hints while you inspect the project:\n"
+    "Project root for cwd/reference only. Do not Read this directory path directly:\n{project_paths}\n\n"
+    "High-signal files to inspect read-only. Read these exact files first; skip paths that do not exist:\n"
+    "{plan_source_hints}\n\n"
+    "Representative source excerpts from those files:\n"
+    "{plan_source_context}\n\n"
+    "Scanner hints:\n"
     "{capability_summary}\n\n"
-    "Risk policy:\n{risk_policy}\n\n"
-    "Use your read-only tools to understand the project at the path above. Focus on the system's "
-    "main business objects, routing/service structure, permissions, side effects, and the operations "
-    "an AI assistant should expose first. Prefer quick, high-signal inspection over exhaustive analysis. "
-    "You are planning the analysis; do not generate the final kit yet.\n\n"
-    "Respond with one JSON object containing:\n"
-    '"project_summary": short summary of what the project appears to do,\n'
-    '"main_capability_names": array of candidate capability names that should be enhanced first, ordered by business importance,\n'
-    '"remaining_strategy": short explanation of how to handle the rest,\n'
-    '"questions": array of up to 3 short clarifying questions for the user, only if answers would materially change the generated kit,\n'
-    '"notes_for_generation": concise guidance to pass into later kit-generation batches.\n'
+    "No tool use is needed in this planning pass; use the scanner hints and source excerpts above. "
+    "Do not attempt repository exploration, shell commands, sub-agents, or directory-wide analysis. "
+    "Keep this as a quick planning pass. "
+    "Return a JSON object with "
+    "keys: project_summary, main_capability_names, remaining_strategy, questions, notes_for_generation. "
+    "Focus on the project structure and the most important capabilities. Do not do exhaustive analysis."
 )
 
 
@@ -761,6 +821,7 @@ def _build_agentic_plan_inventory(capabilities: list[Capability], sample_limit: 
     domain_counts = Counter(cap.domain for cap in capabilities)
     action_counts = Counter(cap.action for cap in capabilities)
     risk_counts = Counter(cap.risk for cap in capabilities)
+    source_counts = Counter(cap.source.path for cap in capabilities if cap.source.path)
     samples = [
         {
             "name": cap.name,
@@ -768,19 +829,189 @@ def _build_agentic_plan_inventory(capabilities: list[Capability], sample_limit: 
             "resource": cap.resource,
             "action": cap.action,
             "risk": cap.risk,
-            "source": cap.source.to_dict(),
+            "source": {"kind": cap.source.kind, "location": cap.source.location},
         }
-        for cap in capabilities[:sample_limit]
+        for cap in _rank_capabilities_for_inventory(capabilities)[:sample_limit]
     ]
     return {
         "candidate_count": len(capabilities),
         "top_domains": dict(domain_counts.most_common(10)),
         "top_actions": dict(action_counts.most_common(10)),
         "risk_summary": dict(risk_counts.most_common()),
+        "high_signal_paths": [path for path, _count in source_counts.most_common(12)],
         "sample_capabilities": samples,
         "sample_limit": sample_limit,
         "note": "This is a compact hint set. Use project files as the source of truth.",
     }
+
+
+def _rank_capabilities_for_inventory(capabilities: list[Capability]) -> list[Capability]:
+    source_priority = {"openapi": 5, "graphql": 4, "source_route": 3, "database_schema": 2, "warning": 0}
+    action_priority = {"create": 5, "update": 4, "list": 3, "get": 2, "delete": 1}
+    return sorted(
+        capabilities,
+        key=lambda cap: (
+            -source_priority.get(cap.source.kind, 1),
+            -action_priority.get(cap.action, 1),
+            cap.domain,
+            cap.resource,
+            cap.name,
+        ),
+    )
+
+
+def _format_agentic_plan_inventory(inventory: dict[str, Any]) -> str:
+    def _items(mapping: Any, limit: int = 8) -> str:
+        if not isinstance(mapping, dict):
+            return "none"
+        return ", ".join(f"{key}={value}" for key, value in list(mapping.items())[:limit]) or "none"
+
+    lines = [
+        f"- candidate_count: {inventory.get('candidate_count', 0)}",
+        f"- top_domains: {_items(inventory.get('top_domains'))}",
+        f"- top_actions: {_items(inventory.get('top_actions'))}",
+        f"- risk_summary: {_items(inventory.get('risk_summary'))}",
+        "- high_signal_paths:",
+    ]
+    for path in inventory.get("high_signal_paths", [])[:12]:
+        lines.append(f"  - {path}")
+    lines.append("- sample_capabilities:")
+    for sample in inventory.get("sample_capabilities", [])[:12]:
+        if not isinstance(sample, dict):
+            continue
+        source = sample.get("source", {}) if isinstance(sample.get("source"), dict) else {}
+        location = source.get("location", "")
+        lines.append(
+            f"  - {sample.get('name')} ({sample.get('domain')}/{sample.get('action')}, "
+            f"risk={sample.get('risk')}, source={source.get('kind', '')} {location})"
+        )
+    return "\n".join(lines)
+
+
+def _format_plan_source_hints(input_paths: list[Path], inventory: dict[str, Any], limit: int = 14) -> str:
+    roots = [path.resolve() for path in input_paths if path.is_dir()]
+    candidates = [
+        "CLAUDE.md",
+        "README.md",
+        "package.json",
+        "services/api/openapi.json",
+        "services/api/openapi-zh.json",
+        "docs/api.md",
+        "docs/specs-overview.md",
+        "services/api/prisma/schema.prisma",
+        "services/api/prisma/migrations/0_init/migration.sql",
+    ]
+    candidates.extend(str(path) for path in inventory.get("high_signal_paths", []) if path)
+
+    seen: set[str] = set()
+    lines: list[str] = []
+
+    def _add(label: str) -> None:
+        if label and label not in seen and len(lines) < limit:
+            seen.add(label)
+            lines.append(f"- {label}")
+
+    for path in input_paths:
+        if path.is_file():
+            _add(str(path.resolve()))
+
+    for candidate in candidates:
+        candidate_path = Path(candidate)
+        if candidate_path.is_absolute():
+            if candidate_path.is_file():
+                _add(str(candidate_path))
+            continue
+        for root in roots:
+            resolved = root / candidate
+            if resolved.is_file():
+                _add(candidate)
+                break
+
+    return "\n".join(lines) or "- <none>"
+
+
+def _format_batch_source_hints(
+    capabilities: list[Capability],
+    limit: int = 12,
+    input_paths: list[Path] | None = None,
+) -> str:
+    roots = [path.resolve() for path in input_paths or [] if path.is_dir()]
+    seen: set[tuple[str, str]] = set()
+    lines: list[str] = []
+    for cap in capabilities:
+        key = (cap.source.path, cap.source.location)
+        if key in seen:
+            continue
+        seen.add(key)
+        detail = f"{cap.source.path}"
+        if cap.source.location:
+            detail += f" ({cap.source.location})"
+        lines.append(f"- {detail}")
+        for module_guess in _module_source_guesses(cap):
+            if len(lines) >= limit:
+                break
+            if roots and not any((root / module_guess).is_file() for root in roots):
+                continue
+            guess_key = (module_guess, "")
+            if guess_key in seen:
+                continue
+            seen.add(guess_key)
+            lines.append(f"- {module_guess}")
+        for adjacent in _adjacent_source_guesses(cap.source.path):
+            if len(lines) >= limit:
+                break
+            guess_key = (adjacent, "")
+            if guess_key in seen:
+                continue
+            seen.add(guess_key)
+            lines.append(f"- {adjacent}")
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines[:limit]) or "- <none>"
+
+
+def _module_source_guesses(capability: Capability) -> list[str]:
+    names: list[str] = []
+    normalized = _module_name_guess(capability.resource)
+    if normalized:
+        names.append(normalized)
+    guesses: list[str] = []
+    for name in names:
+        guesses.extend(
+            [
+                f"services/api/src/modules/{name}/{name}.controller.ts",
+                f"services/api/src/modules/{name}/{name}.service.ts",
+                f"services/api/src/modules/{name}/{name}-v1.controller.ts",
+                f"services/api/src/modules/{name}/{name}-v1.service.ts",
+            ]
+        )
+    return guesses
+
+
+def _module_name_guess(value: str) -> str:
+    normalized = value.strip().lower().replace("_", "-")
+    if not normalized or normalized in {"inferred", "unknown"}:
+        return ""
+    if normalized.endswith("y") and len(normalized) > 1 and normalized[-2] not in "aeiou":
+        return f"{normalized[:-1]}ies"
+    if normalized.endswith(("s", "x", "z", "ch", "sh")):
+        return f"{normalized}es" if not normalized.endswith("s") else normalized
+    return f"{normalized}s"
+
+
+def _adjacent_source_guesses(path: str) -> list[str]:
+    if not path:
+        return []
+    source = Path(path)
+    guesses: list[str] = []
+    name = source.name
+    if name.endswith(".controller.ts"):
+        guesses.append(str(source.with_name(name.replace(".controller.ts", ".service.ts"))))
+    elif name.endswith(".service.ts"):
+        guesses.append(str(source.with_name(name.replace(".service.ts", ".controller.ts"))))
+    if source.name in {"openapi.json", "openapi-zh.json"}:
+        guesses.append(str(source.parent / "prisma" / "schema.prisma"))
+    return guesses
 
 
 def _invalid_generation_json_message(text: str) -> str:
@@ -892,7 +1123,7 @@ def _agent_sdk_progress_events(message: Any) -> list[str]:
     events: list[str] = []
     message_type = _message_type(message)
     if message_type:
-        if message_type in {"SystemMessage", "system", "ResultMessage", "result"}:
+        if message_type in {"ResultMessage", "result"}:
             events.append(f"Claude Agent SDK event: {message_type}.")
 
     for block in _iter_content_blocks(getattr(message, "content", None)):
@@ -915,7 +1146,7 @@ def _agent_sdk_progress_events(message: Any) -> list[str]:
                 events.append(f"Claude Agent SDK assistant update: {preview[:160]}")
             else:
                 events.append(f"Claude Agent SDK assistant text received ({len(text)} chars).")
-    if not events and message_type:
+    if not events and message_type and message_type not in {"SystemMessage", "system"}:
         events.append(f"Claude Agent SDK event: {message_type}.")
     return events
 
@@ -1070,6 +1301,19 @@ def _json_progress_event(text: str) -> str:
 
 def _parse_json_object(text: str, fallback: dict[str, Any]) -> dict[str, Any]:
     decoder = json.JSONDecoder()
+    candidates: list[tuple[int, int, dict[str, Any]]] = []
+    expected_keys = {
+        "project_analysis",
+        "tool_enhancements",
+        "risk_assessments",
+        "additional_tools",
+        "system_prompt",
+        "skills",
+        "project_summary",
+        "main_capability_names",
+        "remaining_strategy",
+        "notes_for_generation",
+    }
     for start, char in enumerate(text):
         if char != "{":
             continue
@@ -1078,8 +1322,12 @@ def _parse_json_object(text: str, fallback: dict[str, Any]) -> dict[str, Any]:
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict):
-            return parsed
-    return fallback
+            score = sum(1 for key in expected_keys if key in parsed)
+            candidates.append((score, start, parsed))
+    if not candidates:
+        return fallback
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return candidates[-1][2]
 
 
 def _parse_json_array(text: str, fallback: list[Any]) -> list[Any]:

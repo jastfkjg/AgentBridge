@@ -51,8 +51,8 @@ agent-kit/
 
 大型项目生成时还可能写入：
 
-- `analysis/resume_state.json`：当前批次计划、已完成批次、fallback 批次、剩余批次和 partial/complete 状态。
-- `analysis/batches/*.json`：已完成的 AI 增强批次或确定性 fallback 批次输出，供 `--resume` 使用；fallback 批次会在 resume 时重试。
+- `analysis/resume_state.json`：当前批次计划、已完成批次、fallback/local-basic 批次、剩余批次和 partial/complete 状态。
+- `analysis/batches/*.json`：已完成的 AI 增强批次或本地基础分析批次输出，供 `--resume` 使用；配置可用 AI 后端后可重试 fallback/local-basic 检查点。
 
 这些文件是增量文件，不是 `agentbridge-kit/v1` 消费者的必需文件，但工具可以读取它们来展示进度或继续未完成的 AI 增强。
 
