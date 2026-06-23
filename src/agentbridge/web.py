@@ -238,13 +238,16 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
   <style>
     :root {{
       color-scheme: light;
-      --ink: #17201b;
-      --muted: #66736c;
-      --line: #d9e0dc;
-      --surface: #f7f8f5;
+      --ink: #1f2522;
+      --muted: #6d746f;
+      --line: #e3e5e1;
+      --surface: #f6f6f2;
+      --surface-strong: #eeeee8;
       --panel: #ffffff;
-      --accent: #0f7b63;
-      --danger: #a43d3d;
+      --accent: #16745f;
+      --accent-ink: #ffffff;
+      --danger: #ad4545;
+      --shadow: 0 18px 45px rgba(31, 37, 34, 0.10);
     }}
     * {{ box-sizing: border-box; }}
     html {{
@@ -259,23 +262,23 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       letter-spacing: 0;
       overflow: hidden;
     }}
-    .app {{
+    .app, .workspace-shell {{
       height: 100svh;
       display: grid;
-      grid-template-columns: minmax(240px, 320px) 1fr minmax(260px, 360px);
+      grid-template-columns: 286px minmax(0, 1fr) 320px;
       overflow: hidden;
     }}
     aside, main {{
       min-width: 0;
       min-height: 0;
     }}
-    .left, .right {{
-      padding: 22px;
+    .left, .right, .sidebar-panel, .tool-rail {{
+      padding: 18px;
       border-right: 1px solid var(--line);
-      background: #fbfcfa;
+      background: #fbfbf8;
       overflow: auto;
     }}
-    .right {{
+    .right, .tool-rail {{
       border-right: 0;
       border-left: 1px solid var(--line);
       display: flex;
@@ -313,7 +316,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       background: var(--panel);
       color: var(--ink);
       padding: 10px 11px;
-      border-radius: 6px;
+      border-radius: 10px;
     }}
     input:disabled {{
       color: var(--muted);
@@ -321,7 +324,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     }}
     button {{
       border: 0;
-      border-radius: 6px;
+      border-radius: 10px;
       padding: 10px 13px;
       background: var(--accent);
       color: white;
@@ -336,7 +339,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     button.ghost {{
       width: 100%;
       margin-top: 16px;
-      background: var(--ink);
+      background: #242925;
       color: white;
     }}
     button.icon {{
@@ -345,23 +348,23 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       padding: 0;
       display: inline-grid;
       place-items: center;
-      background: #e5ebe7;
+      background: #f0f1ed;
       color: var(--ink);
-      font-size: 20px;
+      font-size: 18px;
       line-height: 1;
     }}
     button.danger {{
       background: var(--danger);
     }}
-    .main {{
+    .main, .chat-panel {{
       display: grid;
       grid-template-rows: auto 1fr auto;
       height: 100svh;
       min-height: 0;
-      background: var(--panel);
+      background: linear-gradient(180deg, #ffffff 0%, #fafaf6 100%);
     }}
-    .top {{
-      padding: 18px 24px;
+    .top, .chat-header {{
+      padding: 18px 28px;
       border-bottom: 1px solid var(--line);
       display: flex;
       justify-content: space-between;
@@ -372,16 +375,17 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       color: {("#a43d3d" if config.execute else "#0f7b63")};
       font-weight: 650;
     }}
-    .messages {{
+    .messages, .message-stream {{
       overflow: auto;
       min-height: 0;
-      padding: 22px 24px;
+      padding: 30px 28px 28px;
       display: grid;
       align-content: start;
-      gap: 14px;
+      gap: 18px;
     }}
     .msg {{
-      width: min(78%, 820px);
+      width: fit-content;
+      max-width: min(72%, 720px);
       animation: rise 160ms ease-out;
     }}
     .msg.user {{
@@ -393,8 +397,9 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     .role {{
       color: var(--muted);
       font-size: 12px;
-      margin-bottom: 4px;
+      margin-bottom: 6px;
       text-transform: uppercase;
+      letter-spacing: 0;
     }}
     .msg.user .role {{
       text-align: right;
@@ -403,49 +408,109 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       white-space: pre-wrap;
       border: 1px solid var(--line);
       border-radius: 14px;
-      padding: 11px 13px;
-      background: #f8faf8;
-      box-shadow: 0 2px 10px rgba(23, 32, 27, 0.04);
+      padding: 12px 14px;
+      background: #ffffff;
+      box-shadow: 0 8px 22px rgba(31, 37, 34, 0.05);
     }}
     .msg.assistant .bubble {{
-      border-color: #cfd9d4;
+      border-color: #e1e4df;
       background: #ffffff;
     }}
     .msg.user .bubble {{
-      border-color: #0f7b63;
-      background: #0f7b63;
-      color: #ffffff;
+      border-color: #e7e7e2;
+      background: #f1f2ee;
+      color: var(--ink);
     }}
-    .composer {{
+    .markdown-body {{
+      white-space: normal;
+      overflow-wrap: anywhere;
+      line-height: 1.55;
+    }}
+    .markdown-body p {{
+      margin: 0 0 10px;
+    }}
+    .markdown-body p:last-child {{
+      margin-bottom: 0;
+    }}
+    .markdown-body ul {{
+      margin: 8px 0 10px;
+      padding-left: 20px;
+    }}
+    .markdown-body li + li {{
+      margin-top: 4px;
+    }}
+    .markdown-body strong {{
+      font-weight: 700;
+    }}
+    .markdown-body code {{
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f6f6f2;
+      padding: 1px 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 0.92em;
+    }}
+    .composer, .composer-dock {{
       position: sticky;
       bottom: 0;
       z-index: 2;
-      border-top: 1px solid var(--line);
-      padding: 16px 24px;
-      background: var(--panel);
+      padding: 18px 28px 20px;
+      background: linear-gradient(180deg, rgba(250,250,246,0) 0%, #fafaf6 28%, #fafaf6 100%);
     }}
-    .composer-shell {{
+    .composer-shell, .composer-card {{
       position: relative;
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 22px;
       background: #fff;
-      padding: 8px;
-      box-shadow: 0 8px 24px rgba(23, 32, 27, 0.06);
+      padding: 10px;
+      box-shadow: var(--shadow);
+      max-width: 920px;
+      margin: 0 auto;
     }}
     .composer-row {{
       display: grid;
-      grid-template-columns: auto 1fr auto;
+      grid-template-rows: auto auto;
       gap: 8px;
-      align-items: end;
     }}
     .composer textarea {{
-      min-height: 46px;
-      max-height: 160px;
+      min-height: 52px;
+      max-height: 180px;
       resize: vertical;
       margin: 0;
       border: 0;
-      padding: 10px 8px;
+      padding: 8px 10px;
       outline: none;
+      line-height: 1.5;
+    }}
+    .composer-actions {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }}
+    .composer-tools {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }}
+    .composer-hint {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .send-button {{
+      width: 42px;
+      height: 42px;
+      padding: 0;
+      border-radius: 14px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+    }}
+    .send-icon {{
+      width: 18px;
+      height: 18px;
+      display: block;
     }}
     .command-menu {{
       position: absolute;
@@ -456,7 +521,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       max-height: 260px;
       overflow: auto;
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 14px;
       background: #fff;
       box-shadow: 0 14px 34px rgba(23, 32, 27, 0.14);
       padding: 6px;
@@ -467,7 +532,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     .suggestion {{
       width: 100%;
       border: 0;
-      border-radius: 6px;
+      border-radius: 10px;
       background: transparent;
       color: var(--ink);
       text-align: left;
@@ -490,7 +555,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     }}
     .attachment {{
       border: 1px solid var(--line);
-      border-radius: 6px;
+      border-radius: 10px;
       background: #f7faf8;
       color: var(--ink);
       padding: 5px 7px;
@@ -510,7 +575,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     .conversation {{
       width: 100%;
       border: 0;
-      border-radius: 6px;
+      border-radius: 10px;
       background: transparent;
       color: var(--ink);
       text-align: left;
@@ -570,8 +635,8 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
   </style>
 </head>
 <body>
-  <div class="app">
-    <aside class="left">
+  <div class="app workspace-shell">
+    <aside class="left sidebar-panel">
       <div class="brand">AgentBridge</div>
       <div class="subtle">Chat with an existing system through a generated kit.</div>
       <label>User</label>
@@ -595,17 +660,17 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         </div>
       </div>
     </aside>
-    <main class="main">
-      <div class="top">
+    <main class="main chat-panel">
+      <div class="top chat-header">
         <div>
           <strong>Chat</strong>
           <div class="subtle">Use /tools, /run tool key=value, confirm, or cancel.</div>
         </div>
         <div class="mode">{'Execute' if config.execute else 'Dry-run'} mode</div>
       </div>
-      <div class="messages" id="messages"></div>
-      <div class="composer">
-        <div class="composer-shell">
+      <div class="messages message-stream" id="messages"></div>
+      <div class="composer composer-dock">
+        <div class="composer-shell composer-card">
           <div class="command-menu" id="commandMenu">
             <button class="suggestion" data-command="/tools"><strong>/tools</strong><span class="subtle">List tools in the active kit</span></button>
             <button class="suggestion" data-command="/run"><strong>/run</strong><span class="subtle">Run a generated tool with key=value arguments</span></button>
@@ -615,14 +680,23 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
           <div class="attachments" id="attachments"></div>
           <div class="composer-row">
             <input id="fileInput" type="file" multiple hidden>
-            <button class="icon" id="attachBtn" title="Attach files" type="button">+</button>
             <textarea id="message" placeholder="Ask the agent to operate the system..."></textarea>
-            <button id="send">Send</button>
+            <div class="composer-actions">
+              <div class="composer-tools">
+                <button class="icon" id="attachBtn" title="Attach files" type="button">+</button>
+                <span class="composer-hint">Enter to send, Shift+Enter for newline</span>
+              </div>
+              <button class="send-button" id="send" title="Send message" aria-label="Send message">
+                <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 19V5m0 0-6 6m6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path>
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
       </div>
     </main>
-    <aside class="right">
+    <aside class="right tool-rail">
       <strong>Tools</strong>
       <div class="subtle">Loaded from the active kit.</div>
       <div class="tools" id="tools"></div>
@@ -659,11 +733,68 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       if (allowKitSwitch) qs.set('kit', els.kit.value);
       return qs;
     }}
+    function escapeHtml(value) {{
+      return String(value || '').replace(/[&<>"']/g, char => {{
+        switch (char) {{
+          case '&': return '&amp;';
+          case '<': return '&lt;';
+          case '>': return '&gt;';
+          case '"': return '&quot;';
+          case "'": return '&#39;';
+          default: return char;
+        }}
+      }});
+    }}
+    function formatInlineMarkdown(value) {{
+      return escapeHtml(value)
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+    }}
+    function renderMarkdown(text) {{
+      const lines = String(text || '').replace(/\\r\\n/g, '\\n').split('\\n');
+      const html = [];
+      let paragraph = [];
+      let listOpen = false;
+      function closeParagraph() {{
+        if (!paragraph.length) return;
+        html.push('<p>' + paragraph.map(formatInlineMarkdown).join('<br>') + '</p>');
+        paragraph = [];
+      }}
+      function closeList() {{
+        if (!listOpen) return;
+        html.push('</ul>');
+        listOpen = false;
+      }}
+      lines.forEach(line => {{
+        const trimmed = line.trim();
+        const bullet = trimmed.match(/^[-*]\\s+(.+)$/);
+        if (!trimmed) {{
+          closeParagraph();
+          closeList();
+          return;
+        }}
+        if (bullet) {{
+          closeParagraph();
+          if (!listOpen) {{
+            html.push('<ul>');
+            listOpen = true;
+          }}
+          html.push('<li>' + formatInlineMarkdown(bullet[1]) + '</li>');
+          return;
+        }}
+        closeList();
+        paragraph.push(line);
+      }});
+      closeParagraph();
+      closeList();
+      return html.join('') || '<p></p>';
+    }}
     function addMessage(role, text) {{
       const node = document.createElement('div');
       node.className = 'msg ' + role;
-      node.innerHTML = '<div class="role">' + role + '</div><div class="bubble"></div>';
-      node.querySelector('.bubble').textContent = text;
+      node.innerHTML = '<div class="role"></div><div class="bubble markdown-body"></div>';
+      node.querySelector('.role').textContent = role;
+      node.querySelector('.bubble').innerHTML = renderMarkdown(text);
       els.messages.appendChild(node);
       els.messages.scrollTop = els.messages.scrollHeight;
     }}

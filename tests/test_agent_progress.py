@@ -8,10 +8,40 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agentbridge.agent import AIGenerator, _parse_json_object
+from agentbridge.agent import AIGenerator, _extract_agent_result_text, _parse_json_object
 
 
 class AgentProgressTests(unittest.TestCase):
+    def test_extract_agent_result_text_reads_result_message_result(self):
+        class FakeResultMessage:
+            result = "你好，我可以帮你操作这个系统。"
+            content = []
+
+        text = _extract_agent_result_text(FakeResultMessage())
+
+        self.assertEqual(text, "你好，我可以帮你操作这个系统。")
+
+    def test_agent_runner_query_text_prefers_final_result_over_stream_text(self):
+        class FakeAssistantMessage:
+            content = [{"type": "text", "text": "draft response"}]
+            result = None
+
+        class FakeResultMessage:
+            content = []
+            result = "final response"
+
+        class FakeRunner:
+            async def query(self, _prompt):
+                yield FakeAssistantMessage()
+                yield FakeResultMessage()
+
+        from agentbridge.agent import AgentRunner
+
+        runner = AgentRunner.__new__(AgentRunner)
+        runner.query = FakeRunner().query  # type: ignore[method-assign]
+
+        self.assertEqual(runner.query_text("hello"), "final response")
+
     def test_parse_json_object_prefers_generation_payload(self):
         text = (
             "intermediate note {} "

@@ -656,12 +656,17 @@ class AgentRunner:
         return _run_async(self._query_text_async(prompt))
 
     async def _query_text_async(self, prompt: str) -> str:
-        chunks: list[str] = []
+        content_chunks: list[str] = []
+        result_chunks: list[str] = []
         async for msg in self.query(prompt):
+            result_text = _extract_agent_result_text(msg)
+            if result_text:
+                result_chunks.append(result_text)
+                continue
             text = _extract_agent_message_text(msg)
             if text:
-                chunks.append(text)
-        return "\n".join(chunks).strip()
+                content_chunks.append(text)
+        return "\n".join(result_chunks or content_chunks).strip()
 
     def _build_kit_tools(self, tool_decorator: Any) -> list[Any]:
         tools: list[Any] = []
@@ -721,6 +726,11 @@ def _extract_agent_message_text(message: Any) -> str:
             elif getattr(block, "type", "") == "text" and getattr(block, "text", ""):
                 chunks.append(str(getattr(block, "text")))
     return "\n".join(chunks).strip()
+
+
+def _extract_agent_result_text(message: Any) -> str:
+    result = message.get("result") if isinstance(message, dict) else getattr(message, "result", None)
+    return str(result).strip() if result else ""
 
 
 PROMPT_GENERATE_ALL_SYSTEM = (

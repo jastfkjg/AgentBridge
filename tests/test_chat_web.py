@@ -205,6 +205,38 @@ class WebChatTests(unittest.TestCase):
             self.assertIn('id="conversations"', html)
             self.assertIn("\\n\\nAttached files:\\n", html)
 
+    def test_rendered_web_ui_uses_polished_chat_components(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("workspace-shell", html)
+            self.assertIn("chat-panel", html)
+            self.assertIn("message-stream", html)
+            self.assertIn("composer-card", html)
+            self.assertIn("composer-actions", html)
+            self.assertIn("send-button", html)
+            self.assertIn("max-width: 920px", html)
+            self.assertIn("border-radius: 22px", html)
+            self.assertIn("width: fit-content", html)
+            self.assertIn("max-width: min(72%, 720px)", html)
+            self.assertIn("aria-label=\"Send message\"", html)
+            self.assertIn("send-icon", html)
+
+    def test_rendered_web_ui_renders_markdown_safely(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("renderMarkdown", html)
+            self.assertIn("escapeHtml", html)
+            self.assertIn("markdown-body", html)
+            self.assertIn("<ul>", html)
+
     def test_rendered_web_ui_aligns_user_messages_to_the_right(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
