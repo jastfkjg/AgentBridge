@@ -576,6 +576,14 @@ class AgentRunner:
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        target_base_url: str = "",
+        headers: dict[str, str] | None = None,
+        execute: bool = False,
+        timeout: float = 30.0,
+        read_only: bool = False,
+        deny_risks: set[str] | None = None,
+        allow_tools: set[str] | None = None,
+        audit_log: Path | None = None,
     ) -> None:
         self.kit_dir = Path(kit_dir)
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -594,6 +602,21 @@ class AgentRunner:
         self._capabilities: dict[str, dict[str, Any]] = {}
         self._system_prompt = ""
         self._load_kit()
+        from agentbridge.mcp_server import AgentBridgeMCPServer, MCPServerConfig
+
+        self._server = AgentBridgeMCPServer(
+            MCPServerConfig(
+                kit_dir=self.kit_dir,
+                base_url=target_base_url,
+                headers=headers or {},
+                execute=execute,
+                timeout=timeout,
+                read_only=read_only,
+                deny_risks=deny_risks or set(),
+                allow_tools=allow_tools or set(),
+                audit_log=audit_log,
+            )
+        )
 
     def _load_kit(self) -> None:
         caps_path = self.kit_dir / "capabilities.json"
@@ -629,6 +652,17 @@ class AgentRunner:
             async for msg in client.receive_response():
                 yield msg
 
+    def query_text(self, prompt: str) -> str:
+        return _run_async(self._query_text_async(prompt))
+
+    async def _query_text_async(self, prompt: str) -> str:
+        chunks: list[str] = []
+        async for msg in self.query(prompt):
+            text = _extract_agent_message_text(msg)
+            if text:
+                chunks.append(text)
+        return "\n".join(chunks).strip()
+
     def _build_kit_tools(self, tool_decorator: Any) -> list[Any]:
         tools: list[Any] = []
         for name, cap in self._capabilities.items():
@@ -648,18 +682,45 @@ class AgentRunner:
             cap_desc = cap.get("description", name)
 
             async def _handler(args: dict, _name: str = cap_name) -> dict[str, Any]:
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": json.dumps({"tool": _name, "args": args, "status": "dry_run"}),
-                        }
-                    ]
-                }
+                response = self._server.handle(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": _name,
+                        "method": "tools/call",
+                        "params": {"name": _name, "arguments": args or {}},
+                    }
+                )
+                if not response:
+                    text = json.dumps({"tool": _name, "error": "No MCP response"})
+                    return {"content": [{"type": "text", "text": text}], "isError": True}
+                if "error" in response:
+                    text = json.dumps({"tool": _name, "error": response["error"].get("message", "Tool call failed")})
+                    return {"content": [{"type": "text", "text": text}], "isError": True}
+                return response.get("result", {"content": [{"type": "text", "text": "{}"}]})
 
             t = tool_decorator(name, cap_desc, param_types)(_handler)
             tools.append(t)
         return tools
+
+
+def _extract_agent_message_text(message: Any) -> str:
+    if isinstance(message, str):
+        return message
+    if isinstance(message, dict):
+        content = message.get("content", [])
+    else:
+        content = getattr(message, "content", [])
+    if isinstance(content, str):
+        return content
+    chunks: list[str] = []
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text" and block.get("text"):
+                    chunks.append(str(block["text"]))
+            elif getattr(block, "type", "") == "text" and getattr(block, "text", ""):
+                chunks.append(str(getattr(block, "text")))
+    return "\n".join(chunks).strip()
 
 
 PROMPT_GENERATE_ALL_SYSTEM = (

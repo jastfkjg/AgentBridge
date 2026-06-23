@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import uuid
@@ -28,6 +29,8 @@ class ChatConfig:
     deny_risks: set[str] = field(default_factory=set)
     allow_tools: set[str] = field(default_factory=set)
     audit_log: Path | None = None
+    agent_enabled: bool = True
+    agent_runner: Any | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -121,6 +124,7 @@ class ChatSession:
         self.history: list[dict[str, str]] = list(state.get("history", []))
         pending_data = state.get("pending")
         self.pending: PendingCall | None = PendingCall.from_dict(pending_data) if isinstance(pending_data, dict) else None
+        self.agent_runner = config.agent_runner
 
     def process(self, message: str) -> ChatResponse:
         text = message.strip()
@@ -145,8 +149,10 @@ class ChatSession:
 
         parsed = parse_tool_request(text, self.capabilities)
         if not parsed:
-            guidance = "I could not map that to a tool. Try /tools or /run <tool_name> key=value."
-            return self._reply("not_understood", guidance)
+            if text.startswith("/"):
+                guidance = "Unknown command. Try /tools, /run <tool_name> key=value, confirm, or cancel."
+                return self._reply("unknown_command", guidance)
+            return self._agent_reply(text)
         tool_name, args = parsed
         return self.call_tool(tool_name, args, confirmed=False)
 
@@ -250,6 +256,46 @@ class ChatSession:
             payload = {"text": text}
         payload["is_error"] = bool(result.get("isError"))
         return payload
+
+    def _agent_reply(self, text: str) -> ChatResponse:
+        if not self.config.agent_enabled:
+            return self._reply("agent_unavailable", agent_unavailable_message())
+        runner = self._get_agent_runner()
+        if runner is None:
+            return self._reply("agent_unavailable", agent_unavailable_message())
+        try:
+            if hasattr(runner, "query_text"):
+                message = str(runner.query_text(text)).strip()
+            else:
+                message = ""
+            if not message:
+                message = "The AI agent did not return a response."
+            return self._reply("agent_response", message)
+        except Exception as exc:
+            return self._reply("agent_error", f"AI agent request failed: {exc}")
+
+    def _get_agent_runner(self) -> Any | None:
+        if self.agent_runner is not None:
+            return self.agent_runner
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            return None
+        try:
+            from agentbridge.agent import AgentRunner
+
+            self.agent_runner = AgentRunner(
+                self.config.kit_dir,
+                target_base_url=self.config.base_url,
+                headers=self.config.headers,
+                execute=self.config.execute,
+                timeout=self.config.timeout,
+                read_only=self.config.read_only,
+                deny_risks=self.config.deny_risks,
+                allow_tools=self.config.allow_tools,
+                audit_log=self.config.audit_log,
+            )
+            return self.agent_runner
+        except Exception:
+            return None
 
     def _reply(
         self,
@@ -437,3 +483,10 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
         next_step = result.get("next_step", "")
         return f"{tool_name} planned. {next_step}"
     return f"{tool_name} completed."
+
+
+def agent_unavailable_message() -> str:
+    return (
+        "AI agent chat is not configured. Set ANTHROPIC_API_KEY and install the Claude Agent SDK "
+        "with `pip install \"agbr[agent]\"`, then restart `agentbridge web`."
+    )
