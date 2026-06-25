@@ -31,5 +31,8 @@ agentbridge = "agentbridge.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+agentbridge = ["assets/*.js", "assets/*.LICENSE"]
+
 [tool.setuptools_scm]
 fallback_version = "0.0.0"

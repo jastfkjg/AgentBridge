@@ -4,6 +4,7 @@ import json
 from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -37,6 +38,14 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
             parsed = urlparse(self.path)
             if parsed.path == "/":
                 self._send_html(render_index(base_config, allow_kit_switch))
+                return
+            if parsed.path == "/assets/markdown-it.min.js":
+                asset = files("agentbridge").joinpath("assets/markdown-it.min.js").read_bytes()
+                self._send_bytes(
+                    asset,
+                    content_type="text/javascript; charset=utf-8",
+                    cache_control="public, max-age=3600",
+                )
                 return
             if parsed.path == "/api/tools":
                 session = self._session_from_query(parsed.query)
@@ -115,9 +124,18 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
             self.wfile.write(data)
 
         def _send_html(self, html: str) -> None:
-            data = html.encode("utf-8")
+            self._send_bytes(html.encode("utf-8"), content_type="text/html; charset=utf-8")
+
+        def _send_bytes(
+            self,
+            data: bytes,
+            content_type: str,
+            cache_control: str | None = None,
+        ) -> None:
             self.send_response(HTTPStatus.OK.value)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Type", content_type)
+            if cache_control:
+                self.send_header("Cache-Control", cache_control)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -272,13 +290,13 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       min-width: 0;
       min-height: 0;
     }}
-    .left, .right, .sidebar-panel, .tool-rail {{
+    .left, .right, .sidebar-panel {{
       padding: 18px;
       border-right: 1px solid var(--line);
       background: #fbfbf8;
       overflow: auto;
     }}
-    .right, .tool-rail {{
+    .right {{
       border-right: 0;
       border-left: 1px solid var(--line);
       display: flex;
@@ -332,6 +350,11 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       transition: transform 120ms ease, opacity 120ms ease;
     }}
     button:hover {{ transform: translateY(-1px); }}
+    button:disabled {{
+      cursor: not-allowed;
+      opacity: 0.55;
+      transform: none;
+    }}
     button.secondary {{
       background: #e5ebe7;
       color: var(--ink);
@@ -620,55 +643,430 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       gap: 8px;
       margin-top: 10px;
     }}
+    .app, .workspace-shell {{
+      grid-template-columns: 64px minmax(0, 1fr) auto;
+      background: var(--panel);
+    }}
+    .navigation-rail {{
+      z-index: 5;
+      padding: 10px;
+      border-right: 1px solid var(--line);
+      background: #f7f8f5;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }}
+    .brand-mark {{
+      width: 42px;
+      height: 42px;
+      margin-bottom: 10px;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      background: #1f2924;
+      color: #fff;
+      font-weight: 750;
+      font-size: 17px;
+    }}
+    .rail-spacer {{
+      flex: 1;
+    }}
+    .rail-button, .mobile-menu, .drawer-close {{
+      width: 44px;
+      height: 44px;
+      padding: 0;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      background: transparent;
+      color: #536058;
+    }}
+    .rail-button:hover, .rail-button.active, .mobile-menu:hover, .drawer-close:hover {{
+      background: #e6ebe7;
+      color: #17201b;
+      transform: none;
+    }}
+    .rail-button svg, .mobile-menu svg, .drawer-close svg {{
+      width: 20px;
+      height: 20px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.8;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }}
+    .main, .chat-panel {{
+      min-width: 0;
+      background: #fff;
+    }}
+    .top, .chat-header {{
+      min-height: 64px;
+      padding: 10px 22px;
+      background: rgba(255,255,255,.94);
+      backdrop-filter: blur(12px);
+    }}
+    .header-leading {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }}
+    .header-copy {{
+      min-width: 0;
+    }}
+    .header-title {{
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 15px;
+    }}
+    .header-meta {{
+      margin-top: 1px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .mobile-menu {{
+      display: none;
+    }}
+    .mode {{
+      padding: 5px 9px;
+      border-radius: 999px;
+      background: {("#fff0f0" if config.execute else "#e8f3ef")};
+      font-size: 12px;
+    }}
+    .messages, .message-stream {{
+      padding: 34px clamp(20px, 6vw, 88px) 40px;
+      gap: 28px;
+      grid-template-columns: minmax(0, 1fr);
+      scroll-behavior: smooth;
+    }}
+    .reading-column::before {{
+      content: "";
+      width: min(100%, 820px);
+      justify-self: center;
+    }}
+    .msg {{
+      min-width: 0;
+      width: 100%;
+      max-width: 820px;
+      justify-self: center;
+    }}
+    .msg.user {{
+      width: fit-content;
+      max-width: min(72%, 680px);
+      justify-self: end;
+      margin-right: max(0px, calc((100% - 820px) / 2));
+    }}
+    .msg.assistant {{
+      justify-self: center;
+    }}
+    .role {{
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 8px;
+      font-size: 11px;
+      font-weight: 650;
+    }}
+    .msg.assistant .role::before {{
+      content: "A";
+      width: 22px;
+      height: 22px;
+      border-radius: 7px;
+      display: grid;
+      place-items: center;
+      background: #1f2924;
+      color: #fff;
+      font-size: 10px;
+      font-weight: 750;
+    }}
+    .msg.user .role {{
+      display: none;
+    }}
+    .bubble {{
+      box-shadow: none;
+    }}
+    .msg.assistant .bubble {{
+      padding: 0 0 0 29px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+    }}
+    .msg.user .bubble {{
+      padding: 10px 14px;
+      border: 1px solid #e1e5e1;
+      border-radius: 16px 16px 4px 16px;
+      background: #f0f2ef;
+    }}
+    .markdown-body {{
+      min-width: 0;
+      color: #242a26;
+      font-size: 15px;
+      line-height: 1.72;
+    }}
+    .markdown-body h1, .markdown-body h2, .markdown-body h3,
+    .markdown-body h4, .markdown-body h5, .markdown-body h6 {{
+      margin: 1.4em 0 .55em;
+      color: #17201b;
+      line-height: 1.3;
+      font-weight: 700;
+    }}
+    .markdown-body h1:first-child, .markdown-body h2:first-child,
+    .markdown-body h3:first-child {{
+      margin-top: 0;
+    }}
+    .markdown-body h1 {{ font-size: 1.55rem; }}
+    .markdown-body h2 {{ font-size: 1.3rem; }}
+    .markdown-body h3 {{ font-size: 1.12rem; }}
+    .markdown-body p {{
+      margin: 0 0 12px;
+    }}
+    .markdown-body ul, .markdown-body ol {{
+      margin: 8px 0 16px;
+      padding-left: 24px;
+    }}
+    .markdown-body li + li {{
+      margin-top: 5px;
+    }}
+    .markdown-body blockquote {{
+      margin: 14px 0;
+      padding: 2px 0 2px 14px;
+      border-left: 3px solid #b8c5be;
+      color: #56615b;
+    }}
+    .markdown-body pre {{
+      margin: 14px 0;
+      padding: 14px 16px;
+      overflow: auto;
+      border: 1px solid #dfe4e0;
+      border-radius: 10px;
+      background: #f5f7f5;
+      line-height: 1.55;
+    }}
+    .markdown-body pre code {{
+      padding: 0;
+      border: 0;
+      background: transparent;
+      font-size: 13px;
+    }}
+    .markdown-body a {{
+      color: #096c58;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 2px;
+    }}
+    .markdown-body hr {{
+      margin: 22px 0;
+      border: 0;
+      border-top: 1px solid var(--line);
+    }}
+    .table-scroll {{
+      width: 100%;
+      max-width: 100%;
+      margin: 14px 0 18px;
+      overflow-x: auto;
+      border: 1px solid #dfe4e0;
+      border-radius: 10px;
+    }}
+    .markdown-body table {{
+      width: 100%;
+      min-width: 520px;
+      border-collapse: collapse;
+      font-size: 14px;
+    }}
+    .markdown-body th, .markdown-body td {{
+      padding: 9px 12px;
+      border-right: 1px solid #e4e8e5;
+      border-bottom: 1px solid #e4e8e5;
+      text-align: left;
+      vertical-align: top;
+    }}
+    .markdown-body th {{
+      background: #f3f6f3;
+      color: #26302a;
+      font-weight: 650;
+    }}
+    .markdown-body tr:last-child td {{
+      border-bottom: 0;
+    }}
+    .markdown-body th:last-child, .markdown-body td:last-child {{
+      border-right: 0;
+    }}
+    .plain-text {{
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }}
+    .composer, .composer-dock {{
+      padding: 12px clamp(20px, 6vw, 88px) 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0) 0%, #fff 26%, #fff 100%);
+    }}
+    .composer-shell, .composer-card {{
+      max-width: 820px;
+      border-radius: 18px;
+      padding: 9px;
+      box-shadow: 0 14px 38px rgba(31, 42, 36, .12);
+    }}
+    .composer textarea {{
+      min-height: 48px;
+      padding: 8px 10px 2px;
+      resize: none;
+      font-size: 16px;
+    }}
+    .composer textarea:focus-visible {{
+      outline: none;
+    }}
+    .composer-card:focus-within {{
+      border-color: #9eb5aa;
+      box-shadow: 0 0 0 3px rgba(22,116,95,.11), 0 14px 38px rgba(31,42,36,.12);
+    }}
+    .send-button {{
+      width: 40px;
+      height: 40px;
+      border-radius: 12px;
+    }}
+    .context-drawer, .drawer-panel {{
+      width: 320px;
+      height: 100svh;
+      border-left: 1px solid var(--line);
+      background: #fafbf9;
+      display: none;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+    }}
+    .context-drawer.open {{
+      display: grid;
+    }}
+    .drawer-header {{
+      min-height: 64px;
+      padding: 10px 12px 10px 18px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }}
+    .drawer-title {{
+      font-weight: 700;
+    }}
+    .drawer-content {{
+      padding: 18px;
+      overflow: auto;
+    }}
+    .drawer-pane {{
+      display: none;
+    }}
+    .drawer-pane.active {{
+      display: block;
+    }}
+    .drawer-pane label:first-child {{
+      margin-top: 0;
+    }}
+    .drawer-backdrop {{
+      display: none;
+    }}
+    button:focus-visible, input:focus-visible, textarea:focus-visible {{
+      outline: 3px solid rgba(22,116,95,.25);
+      outline-offset: 2px;
+    }}
     @keyframes rise {{
       from {{ opacity: 0; transform: translateY(4px); }}
       to {{ opacity: 1; transform: translateY(0); }}
     }}
-    @media (max-width: 920px) {{
-      body {{ overflow: auto; }}
-      .app {{ grid-template-columns: 1fr; }}
-      .left, .right {{ border: 0; border-bottom: 1px solid var(--line); }}
-      .app, .main {{ height: auto; min-height: 100svh; overflow: visible; }}
-      .left, .right {{ overflow: visible; }}
-      .tools {{ max-height: 40svh; }}
+    @media (max-width: 760px) {{
+      .app, .workspace-shell {{
+        grid-template-columns: minmax(0, 1fr);
+      }}
+      .navigation-rail {{
+        display: none;
+      }}
+      .mobile-menu {{
+        display: grid;
+      }}
+      .top, .chat-header {{
+        padding: 9px 12px;
+      }}
+      .header-meta {{
+        display: none;
+      }}
+      .messages, .message-stream {{
+        padding: 24px 16px 30px;
+      }}
+      .msg.user {{
+        max-width: 88%;
+        margin-right: 0;
+      }}
+      .msg.assistant .bubble {{
+        padding-left: 0;
+      }}
+      .composer, .composer-dock {{
+        padding: 10px 12px max(12px, env(safe-area-inset-bottom));
+      }}
+      .composer-hint {{
+        display: none;
+      }}
+      .context-drawer, .drawer-panel {{
+        position: fixed;
+        inset: 0 auto 0 0;
+        z-index: 20;
+        width: min(88vw, 340px);
+        border-left: 0;
+        border-right: 1px solid var(--line);
+        box-shadow: 18px 0 42px rgba(22,30,25,.18);
+      }}
+      .drawer-backdrop.show {{
+        position: fixed;
+        inset: 0;
+        z-index: 19;
+        display: block;
+        border: 0;
+        border-radius: 0;
+        background: rgba(22,28,24,.42);
+      }}
+      .markdown-body {{
+        font-size: 16px;
+      }}
+    }}
+    @media (prefers-reduced-motion: reduce) {{
+      *, *::before, *::after {{
+        scroll-behavior: auto !important;
+        animation-duration: .01ms !important;
+        transition-duration: .01ms !important;
+      }}
     }}
   </style>
 </head>
 <body>
   <div class="app workspace-shell">
-    <aside class="left sidebar-panel">
-      <div class="brand">AgentBridge</div>
-      <div class="subtle">Chat with an existing system through a generated kit.</div>
-      <label>User</label>
-      <input id="user" value="{escape_attr(config.user)}">
-      <div class="field-help">Names the operator for memory and audit context.</div>
-      <label>Session</label>
-      <input id="session" value="{escape_attr(config.session_id)}">
-      <div class="field-help">Session memory is grouped by user and session.</div>
-      <label>Kit</label>
-      <input id="kit" value="{escape_attr(kit)}" {"disabled" if not allow_kit_switch else ""}>
-      <div class="field-help">{kit_help}</div>
-      <button class="ghost" id="newChatBtn">New Chat</button>
-      <label>Recent</label>
-      <div class="conversation-list" id="conversations"></div>
-      <div class="pending" id="pending">
-        <strong>Confirmation required</strong>
-        <div class="subtle" id="pendingText"></div>
-        <div class="actions">
-          <button id="confirmBtn">Confirm</button>
-          <button class="secondary" id="cancelBtn">Cancel</button>
-        </div>
-      </div>
-    </aside>
+    <nav class="navigation-rail" aria-label="Workspace navigation">
+      <div class="brand-mark" title="AgentBridge">A</div>
+      <button class="rail-button" type="button" data-drawer="conversations" title="Recent conversations" aria-label="Recent conversations">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8.5 8.5 0 0 1-9 8.5 9.5 9.5 0 0 1-4-.9L3 21l1.4-4A8.5 8.5 0 1 1 21 12Z"></path></svg>
+      </button>
+      <button class="rail-button" type="button" data-drawer="context" title="Chat context" aria-label="Chat context">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"></circle><path d="M5.5 20a6.5 6.5 0 0 1 13 0"></path></svg>
+      </button>
+      <button class="rail-button" type="button" data-drawer="tools" title="Available tools" aria-label="Available tools">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.7 6.3 3-3a4.2 4.2 0 0 1-5.4 5.4l-7.6 7.6a2.1 2.1 0 0 0 3 3l7.6-7.6a4.2 4.2 0 0 0 5.4-5.4l-3 3"></path></svg>
+      </button>
+      <div class="rail-spacer"></div>
+      <button class="rail-button" id="newChatBtn" type="button" title="New chat" aria-label="New chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+      </button>
+    </nav>
     <main class="main chat-panel">
       <div class="top chat-header">
-        <div>
-          <strong>Chat</strong>
-          <div class="subtle">Use /tools, /run tool key=value, confirm, or cancel.</div>
+        <div class="header-leading">
+          <button class="mobile-menu" id="mobileMenuBtn" type="button" aria-label="Open navigation">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
+          </button>
+          <div class="header-copy">
+            <strong class="header-title">AgentBridge</strong>
+            <div class="header-meta">Chat with the active integration kit</div>
+          </div>
         </div>
         <div class="mode">{'Execute' if config.execute else 'Dry-run'} mode</div>
       </div>
-      <div class="messages message-stream" id="messages"></div>
+      <div class="messages message-stream reading-column" id="messages" aria-live="polite"></div>
       <div class="composer composer-dock">
         <div class="composer-shell composer-card">
           <div class="command-menu" id="commandMenu">
@@ -683,7 +1081,9 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
             <textarea id="message" placeholder="Ask the agent to operate the system..."></textarea>
             <div class="composer-actions">
               <div class="composer-tools">
-                <button class="icon" id="attachBtn" title="Attach files" type="button">+</button>
+                <button class="icon" id="attachBtn" title="Attach files" aria-label="Attach files" type="button">
+                  <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path></svg>
+                </button>
                 <span class="composer-hint">Enter to send, Shift+Enter for newline</span>
               </div>
               <button class="send-button" id="send" title="Send message" aria-label="Send message">
@@ -696,12 +1096,46 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         </div>
       </div>
     </main>
-    <aside class="right tool-rail">
-      <strong>Tools</strong>
-      <div class="subtle">Loaded from the active kit.</div>
-      <div class="tools" id="tools"></div>
+    <aside class="context-drawer drawer-panel" id="contextDrawer" aria-label="Workspace details">
+      <div class="drawer-header">
+        <div class="drawer-title" id="drawerTitle">Recent conversations</div>
+        <button class="drawer-close" id="drawerCloseBtn" type="button" title="Close panel" aria-label="Close panel">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+        </button>
+      </div>
+      <div class="drawer-content">
+        <section class="drawer-pane active" data-pane="conversations">
+          <div class="subtle">Continue a previous session or start a new chat.</div>
+          <div class="conversation-list" id="conversations"></div>
+        </section>
+        <section class="drawer-pane" data-pane="context">
+          <label for="user">User</label>
+          <input id="user" value="{escape_attr(config.user)}">
+          <div class="field-help">Operator identity used for memory and audit context.</div>
+          <label for="session">Session</label>
+          <input id="session" value="{escape_attr(config.session_id)}">
+          <div class="field-help">Session memory is grouped by user and session.</div>
+          <label for="kit">Kit</label>
+          <input id="kit" value="{escape_attr(kit)}" {"disabled" if not allow_kit_switch else ""}>
+          <div class="field-help">{kit_help}</div>
+        </section>
+        <section class="drawer-pane" data-pane="tools">
+          <div class="subtle">Tools loaded from the active kit.</div>
+          <div class="tools" id="tools"></div>
+        </section>
+        <div class="pending" id="pending">
+          <strong>Confirmation required</strong>
+          <div class="subtle" id="pendingText"></div>
+          <div class="actions">
+            <button id="confirmBtn">Confirm</button>
+            <button class="secondary" id="cancelBtn">Cancel</button>
+          </div>
+        </div>
+      </div>
     </aside>
+    <button class="drawer-backdrop" id="drawerBackdrop" type="button" aria-label="Close navigation"></button>
   </div>
+  <script src="/assets/markdown-it.min.js"></script>
   <script>
     const allowKitSwitch = {allow_switch};
     const executeMode = {execute};
@@ -711,16 +1145,37 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       kit: document.getElementById('kit'),
       messages: document.getElementById('messages'),
       message: document.getElementById('message'),
+      send: document.getElementById('send'),
       fileInput: document.getElementById('fileInput'),
       attachments: document.getElementById('attachments'),
       commandMenu: document.getElementById('commandMenu'),
       conversations: document.getElementById('conversations'),
       tools: document.getElementById('tools'),
       pending: document.getElementById('pending'),
-      pendingText: document.getElementById('pendingText')
+      pendingText: document.getElementById('pendingText'),
+      contextDrawer: document.getElementById('contextDrawer'),
+      drawerTitle: document.getElementById('drawerTitle'),
+      drawerBackdrop: document.getElementById('drawerBackdrop')
     }};
     let toolsCache = [];
     let attachments = [];
+    let sendInFlight = false;
+    const markdownRenderer = window.markdownit ? window.markdownit({{
+      html: false,
+      linkify: true,
+      typographer: false,
+      breaks: false
+    }}) : null;
+    const allowedMarkdownTags = new Set([
+      'A', 'BLOCKQUOTE', 'BR', 'CODE', 'DEL', 'EM', 'H1', 'H2', 'H3',
+      'H4', 'H5', 'H6', 'HR', 'LI', 'OL', 'P', 'PRE', 'S', 'STRONG',
+      'TABLE', 'TBODY', 'TD', 'TH', 'THEAD', 'TR', 'UL'
+    ]);
+    const drawerTitles = {{
+      conversations: 'Recent conversations',
+      context: 'Chat context',
+      tools: 'Available tools'
+    }};
     function payload(extra = {{}}) {{
       return Object.assign({{
         user: els.user.value,
@@ -733,70 +1188,90 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       if (allowKitSwitch) qs.set('kit', els.kit.value);
       return qs;
     }}
-    function escapeHtml(value) {{
-      return String(value || '').replace(/[&<>"']/g, char => {{
-        switch (char) {{
-          case '&': return '&amp;';
-          case '<': return '&lt;';
-          case '>': return '&gt;';
-          case '"': return '&quot;';
-          case "'": return '&#39;';
-          default: return char;
+    function isSafeLink(value) {{
+      const href = String(value || '').trim();
+      if (!href) return false;
+      const scheme = href.match(/^([a-z][a-z0-9+.-]*):/i);
+      return !scheme || ['http', 'https', 'mailto', 'tel'].includes(scheme[1].toLowerCase());
+    }}
+    function sanitizeMarkdownFragment(fragment) {{
+      Array.from(fragment.querySelectorAll('*')).forEach(element => {{
+        if (!allowedMarkdownTags.has(element.tagName)) {{
+          element.replaceWith(document.createTextNode(element.textContent || ''));
+          return;
+        }}
+        Array.from(element.attributes).forEach(attribute => {{
+          const name = attribute.name.toLowerCase();
+          const isLinkAttribute = element.tagName === 'A' && ['href', 'title'].includes(name);
+          const isCodeClass = element.tagName === 'CODE' && name === 'class' && /^language-[a-z0-9_-]+$/i.test(attribute.value);
+          const isTableAlignment = ['TH', 'TD'].includes(element.tagName) &&
+            name === 'style' && /^text-align:\\s*(left|right|center);?$/i.test(attribute.value);
+          if (!isLinkAttribute && !isCodeClass && !isTableAlignment) {{
+            element.removeAttribute(attribute.name);
+          }}
+        }});
+        if (element.tagName === 'A') {{
+          if (!isSafeLink(element.getAttribute('href'))) {{
+            element.removeAttribute('href');
+          }} else {{
+            element.setAttribute('target', '_blank');
+            element.setAttribute('rel', 'noopener noreferrer');
+          }}
         }}
       }});
-    }}
-    function formatInlineMarkdown(value) {{
-      return escapeHtml(value)
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        .replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+      Array.from(fragment.querySelectorAll('table')).forEach(table => {{
+        const wrapper = document.createElement('div');
+        wrapper.className = 'table-scroll';
+        table.replaceWith(wrapper);
+        wrapper.appendChild(table);
+      }});
+      return fragment;
     }}
     function renderMarkdown(text) {{
-      const lines = String(text || '').replace(/\\r\\n/g, '\\n').split('\\n');
-      const html = [];
-      let paragraph = [];
-      let listOpen = false;
-      function closeParagraph() {{
-        if (!paragraph.length) return;
-        html.push('<p>' + paragraph.map(formatInlineMarkdown).join('<br>') + '</p>');
-        paragraph = [];
+      const template = document.createElement('template');
+      if (!markdownRenderer) {{
+        const fallback = document.createElement('p');
+        fallback.className = 'plain-text';
+        fallback.textContent = String(text || '');
+        template.content.appendChild(fallback);
+        return template.content;
       }}
-      function closeList() {{
-        if (!listOpen) return;
-        html.push('</ul>');
-        listOpen = false;
-      }}
-      lines.forEach(line => {{
-        const trimmed = line.trim();
-        const bullet = trimmed.match(/^[-*]\\s+(.+)$/);
-        if (!trimmed) {{
-          closeParagraph();
-          closeList();
-          return;
-        }}
-        if (bullet) {{
-          closeParagraph();
-          if (!listOpen) {{
-            html.push('<ul>');
-            listOpen = true;
-          }}
-          html.push('<li>' + formatInlineMarkdown(bullet[1]) + '</li>');
-          return;
-        }}
-        closeList();
-        paragraph.push(line);
-      }});
-      closeParagraph();
-      closeList();
-      return html.join('') || '<p></p>';
+      template.innerHTML = markdownRenderer.render(String(text || ''));
+      return sanitizeMarkdownFragment(template.content);
+    }}
+    function renderPlainText(text) {{
+      const fragment = document.createDocumentFragment();
+      const content = document.createElement('div');
+      content.className = 'plain-text';
+      content.textContent = String(text || '');
+      fragment.appendChild(content);
+      return fragment;
     }}
     function addMessage(role, text) {{
       const node = document.createElement('div');
       node.className = 'msg ' + role;
       node.innerHTML = '<div class="role"></div><div class="bubble markdown-body"></div>';
-      node.querySelector('.role').textContent = role;
-      node.querySelector('.bubble').innerHTML = renderMarkdown(text);
+      node.querySelector('.role').textContent = role === 'assistant' ? 'AgentBridge' : role;
+      const bubble = node.querySelector('.bubble');
+      bubble.replaceChildren(role === 'user' ? renderPlainText(text) : renderMarkdown(text));
       els.messages.appendChild(node);
       els.messages.scrollTop = els.messages.scrollHeight;
+    }}
+    function setDrawer(name, open = true) {{
+      document.querySelectorAll('.drawer-pane').forEach(pane => {{
+        pane.classList.toggle('active', pane.dataset.pane === name);
+      }});
+      document.querySelectorAll('[data-drawer]').forEach(button => {{
+        button.classList.toggle('active', open && button.dataset.drawer === name);
+      }});
+      els.drawerTitle.textContent = drawerTitles[name] || 'Workspace details';
+      els.contextDrawer.classList.toggle('open', open);
+      els.drawerBackdrop.classList.toggle('show', open);
+    }}
+    function closeDrawer() {{
+      els.contextDrawer.classList.remove('open');
+      els.drawerBackdrop.classList.remove('show');
+      document.querySelectorAll('[data-drawer]').forEach(button => button.classList.remove('active'));
     }}
     async function post(url, body) {{
       const res = await fetch(url, {{
@@ -811,23 +1286,36 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       const lines = attachments.map(file => '- ' + file.name + ' (' + file.size + ' bytes)');
       return (text || '').trim() + '\\n\\nAttached files:\\n' + lines.join('\\n');
     }}
+    function setSending(sending) {{
+      sendInFlight = sending;
+      els.send.disabled = sending;
+      els.send.setAttribute('aria-busy', sending ? 'true' : 'false');
+    }}
     async function sendMessage(text) {{
+      if (sendInFlight) return;
       if (!text.trim() && !attachments.length) return;
-      addMessage('user', displayTextWithAttachments(text));
-      const outgoingAttachments = attachments;
-      els.message.value = '';
-      attachments = [];
-      renderAttachments();
-      renderCommandMenu();
-      const data = await post('/api/chat', payload({{ message: text, attachments: outgoingAttachments }}));
-      if (data.error) {{
-        addMessage('assistant', data.error);
-        return;
+      setSending(true);
+      try {{
+        addMessage('user', displayTextWithAttachments(text));
+        const outgoingAttachments = attachments;
+        els.message.value = '';
+        attachments = [];
+        renderAttachments();
+        renderCommandMenu();
+        const data = await post('/api/chat', payload({{ message: text, attachments: outgoingAttachments }}));
+        if (data.error) {{
+          addMessage('assistant', data.error);
+          return;
+        }}
+        addMessage('assistant', data.message);
+        renderPending(data.pending);
+        if (data.tools && data.tools.length) renderTools(data.tools);
+        if (data.conversations) renderConversations(data.conversations);
+      }} catch (error) {{
+        addMessage('assistant', 'Request failed: ' + (error && error.message ? error.message : error));
+      }} finally {{
+        setSending(false);
       }}
-      addMessage('assistant', data.message);
-      renderPending(data.pending);
-      if (data.tools && data.tools.length) renderTools(data.tools);
-      if (data.conversations) renderConversations(data.conversations);
     }}
     function renderPending(pending) {{
       if (!pending) {{
@@ -952,12 +1440,24 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     }}
     document.getElementById('send').onclick = () => sendMessage(els.message.value);
     document.getElementById('attachBtn').onclick = () => els.fileInput.click();
+    document.querySelectorAll('[data-drawer]').forEach(button => {{
+      button.addEventListener('click', () => {{
+        const isSameOpenDrawer = els.contextDrawer.classList.contains('open') &&
+          document.querySelector('.drawer-pane.active')?.dataset.pane === button.dataset.drawer;
+        if (isSameOpenDrawer) closeDrawer();
+        else setDrawer(button.dataset.drawer, true);
+      }});
+    }});
+    document.getElementById('mobileMenuBtn').onclick = () => setDrawer('conversations', true);
+    document.getElementById('drawerCloseBtn').onclick = closeDrawer;
+    els.drawerBackdrop.onclick = closeDrawer;
     document.getElementById('newChatBtn').onclick = () => {{
       const now = new Date();
       const stamp = now.toISOString().replace(/[-:]/g, '').slice(0, 15);
       els.session.value = 'chat-' + stamp;
       els.messages.innerHTML = '';
       els.pending.classList.remove('show');
+      closeDrawer();
       loadState();
     }};
     els.fileInput.addEventListener('change', async () => {{
@@ -981,7 +1481,11 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       els.fileInput.value = '';
       renderAttachments();
     }});
-    els.message.addEventListener('input', renderCommandMenu);
+    els.message.addEventListener('input', () => {{
+      renderCommandMenu();
+      els.message.style.height = 'auto';
+      els.message.style.height = Math.min(180, els.message.scrollHeight) + 'px';
+    }});
     els.message.addEventListener('blur', () => setTimeout(() => els.commandMenu.classList.remove('show'), 120));
     els.message.addEventListener('focus', renderCommandMenu);
     els.message.addEventListener('keydown', (event) => {{

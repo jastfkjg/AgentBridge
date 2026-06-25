@@ -232,10 +232,56 @@ class WebChatTests(unittest.TestCase):
 
             html = render_index(config, allow_kit_switch=False)
 
-            self.assertIn("renderMarkdown", html)
-            self.assertIn("escapeHtml", html)
+            self.assertIn('src="/assets/markdown-it.min.js"', html)
+            self.assertNotIn("cdn.jsdelivr.net", html)
+            self.assertNotIn("unpkg.com", html)
             self.assertIn("markdown-body", html)
-            self.assertIn("<ul>", html)
+
+    def test_rendered_web_ui_supports_safe_offline_markdown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("window.markdownit", html)
+            self.assertIn("html: false", html)
+            self.assertIn("sanitizeMarkdownFragment", html)
+            self.assertIn("allowedMarkdownTags", html)
+            self.assertIn("isSafeLink", html)
+            self.assertIn("table-scroll", html)
+            self.assertIn(".table-scroll {\n      width: 100%;", html)
+            self.assertIn(".msg {\n      min-width: 0;", html)
+            self.assertIn("renderPlainText", html)
+            self.assertIn("role === 'user'", html)
+
+    def test_rendered_web_ui_uses_reading_first_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("navigation-rail", html)
+            self.assertIn("context-drawer", html)
+            self.assertIn("reading-column", html)
+            self.assertIn('aria-label="Open navigation"', html)
+            self.assertIn("drawer-panel", html)
+            self.assertNotIn("tool-rail", html)
+            self.assertIn("@media (max-width: 760px)", html)
+
+    def test_rendered_web_ui_blocks_duplicate_send_while_request_is_in_flight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("let sendInFlight = false", html)
+            self.assertIn("if (sendInFlight) return", html)
+            self.assertIn("setSending(true)", html)
+            self.assertIn("setSending(false)", html)
+            self.assertIn("els.send.disabled = sending", html)
 
     def test_rendered_web_ui_aligns_user_messages_to_the_right(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -297,6 +343,29 @@ class WebChatTests(unittest.TestCase):
 
             self.assertEqual(response["status"], "tools")
             self.assertIn("list_chapter", response["message"])
+
+    def test_web_serves_local_markdown_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            from http.server import ThreadingHTTPServer
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), build_handler(config))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.shutdown)
+            self.addCleanup(server.server_close)
+            base = f"http://127.0.0.1:{server.server_port}"
+
+            with urllib.request.urlopen(base + "/assets/markdown-it.min.js") as response:
+                script = response.read().decode("utf-8")
+                content_type = response.headers.get("Content-Type")
+                cache_control = response.headers.get("Cache-Control")
+
+            self.assertIn("markdownit", script)
+            self.assertEqual(content_type, "text/javascript; charset=utf-8")
+            self.assertEqual(cache_control, "public, max-age=3600")
 
     def test_web_api_lists_recent_conversations_from_memory(self):
         with tempfile.TemporaryDirectory() as tmp:

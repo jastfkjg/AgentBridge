@@ -9,4 +9,4 @@ venv/
 build/
 dist/
 .agentbridge/
-
+.superpowers/
