@@ -46,6 +46,108 @@ class AgentProgressTests(unittest.TestCase):
         self.assertEqual(runner.last_usage["output_tokens"], 30)
         self.assertEqual(runner.last_usage["total_tokens"], 150)
 
+    def test_agent_runner_reuses_one_sdk_client_for_session_queries(self):
+        class FakeResultMessage:
+            content = []
+            usage = {"input_tokens": 10, "output_tokens": 5}
+
+            def __init__(self, result: str) -> None:
+                self.result = result
+
+        class FakeClaudeAgentOptions:
+            last_kwargs: dict[str, object] | None = None
+
+            def __init__(self, **kwargs: object) -> None:
+                FakeClaudeAgentOptions.last_kwargs = kwargs
+
+        class FakeClaudeSDKClient:
+            instances: list["FakeClaudeSDKClient"] = []
+
+            def __init__(self, options: object) -> None:
+                self.options = options
+                self.connected = 0
+                self.disconnected = 0
+                self.query_calls: list[tuple[str, str]] = []
+                FakeClaudeSDKClient.instances.append(self)
+
+            async def connect(self) -> None:
+                self.connected += 1
+
+            async def disconnect(self) -> None:
+                self.disconnected += 1
+
+            async def query(self, prompt: str, session_id: str = "default") -> None:
+                self.query_calls.append((prompt, session_id))
+
+            async def receive_response(self):
+                yield FakeResultMessage(f"response {len(self.query_calls)}")
+
+        def fake_tool(_name: str, _description: str, _param_types: dict[str, type]):
+            def decorate(handler):
+                return handler
+
+            return decorate
+
+        fake_module = types.ModuleType("claude_agent_sdk")
+        fake_module.ClaudeAgentOptions = FakeClaudeAgentOptions
+        fake_module.ClaudeSDKClient = FakeClaudeSDKClient
+        fake_module.create_sdk_mcp_server = lambda **kwargs: kwargs
+        fake_module.tool = fake_tool
+
+        from agentbridge.agent import AgentRunner, _agent_sdk_session_id
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"claude_agent_sdk": fake_module}):
+            kit = Path(tmp) / "kit"
+            kit.mkdir()
+            (kit / "capabilities.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "list_chapter",
+                            "domain": "writing",
+                            "resource": "chapter",
+                            "action": "list",
+                            "description": "List chapters",
+                            "input_schema": {"type": "object", "properties": {}},
+                            "risk": "read",
+                            "confirm_required": False,
+                            "source": {"kind": "openapi", "path": "openapi.json", "location": "GET /chapters"},
+                            "transport": {"type": "http", "method": "GET", "path": "/chapters"},
+                            "dry_run_supported": True,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (kit / "guardrails").mkdir()
+            (kit / "guardrails" / "permissions.json").write_text(
+                json.dumps(
+                    {
+                        "tools": {
+                            "list_chapter": {
+                                "risk": "read",
+                                "confirm_required": False,
+                                "transport": {"type": "http", "method": "GET", "path": "/chapters"},
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runner = AgentRunner(kit, api_key="sk-test", session_id="web-session")
+            sdk_session_id = _agent_sdk_session_id(kit, "web-session")
+
+            self.assertEqual(runner.query_text("first"), "response 1")
+            self.assertEqual(runner.query_text("second"), "response 2")
+            runner.close()
+
+        self.assertEqual(len(FakeClaudeSDKClient.instances), 1)
+        client = FakeClaudeSDKClient.instances[0]
+        self.assertEqual(client.connected, 1)
+        self.assertEqual(client.disconnected, 1)
+        self.assertEqual(client.query_calls, [("first", sdk_session_id), ("second", sdk_session_id)])
+        self.assertEqual(FakeClaudeAgentOptions.last_kwargs["session_id"], sdk_session_id)
+
     def test_extract_agent_usage_supports_sdk_result_metadata(self):
         class FakeResultMessage:
             usage = {

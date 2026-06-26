@@ -212,6 +212,20 @@ class ChatSessionTests(unittest.TestCase):
             self.assertEqual(response.usage["total_tokens"], 100)
             self.assertEqual(response.usage["session_total_tokens"], 100)
 
+    def test_chat_sends_follow_up_agent_turns_to_the_same_runner_without_rewriting_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            runner = _FakeAgentRunner("第一轮回答。")
+            session = ChatSession(ChatConfig(kit_dir=kit, memory_enabled=False, agent_runner=runner))
+
+            session.process("介绍下登录流程")
+            runner.reply = "继续说明。"
+            response = session.process("继续")
+
+            self.assertEqual(response.status, "agent_response")
+            self.assertEqual(runner.prompts[0], "介绍下登录流程")
+            self.assertEqual(runner.prompts[1], "继续")
+
     def test_chat_explains_agent_configuration_when_unavailable(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {}, clear=True):
             kit = _make_kit(Path(tmp))
@@ -543,7 +557,7 @@ class WebChatTests(unittest.TestCase):
     def test_web_api_accepts_attachment_metadata_with_chat_message(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
-            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+            config = ChatConfig(kit_dir=kit, memory_enabled=False, agent_runner=_FakeAgentRunner("received"))
 
             from http.server import ThreadingHTTPServer
 

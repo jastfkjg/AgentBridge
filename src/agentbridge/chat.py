@@ -145,6 +145,7 @@ class ChatSession:
         self.config = replace(self.config, base_url=base_url, execute=execute)
         self.server = self._build_server(self.config)
         if not self._agent_runner_supplied:
+            self._close_agent_runner()
             self.agent_runner = None
         self._save()
 
@@ -320,10 +321,17 @@ class ChatSession:
                 deny_risks=self.config.deny_risks,
                 allow_tools=self.config.allow_tools,
                 audit_log=self.config.audit_log,
+                session_id=self.config.session_id,
             )
             return self.agent_runner
         except Exception:
             return None
+
+    def _close_agent_runner(self) -> None:
+        runner = self.agent_runner
+        close = getattr(runner, "close", None)
+        if callable(close):
+            close()
 
     def _reply(
         self,

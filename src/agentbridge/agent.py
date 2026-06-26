@@ -7,6 +7,7 @@ import json
 import os
 import queue
 import threading
+import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
@@ -584,6 +585,7 @@ class AgentRunner:
         deny_risks: set[str] | None = None,
         allow_tools: set[str] | None = None,
         audit_log: Path | None = None,
+        session_id: str = "default",
     ) -> None:
         self.kit_dir = Path(kit_dir)
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -594,6 +596,8 @@ class AgentRunner:
             )
         self.base_url = base_url or os.environ.get("ANTHROPIC_BASE_URL", "")
         self.model = model or os.environ.get("ANTHROPIC_MODEL", "") or _DEFAULT_MODEL
+        self.session_id = session_id or "default"
+        self.sdk_session_id = _agent_sdk_session_id(self.kit_dir, self.session_id)
 
         os.environ.setdefault("ANTHROPIC_API_KEY", self.api_key)
         if self.base_url:
@@ -618,6 +622,11 @@ class AgentRunner:
                 audit_log=audit_log,
             )
         )
+        self._client: Any | None = None
+        self._client_loop: asyncio.AbstractEventLoop | None = None
+        self._client_thread: threading.Thread | None = None
+        self._client_lock = threading.Lock()
+        self._query_lock = threading.Lock()
 
     def _load_kit(self) -> None:
         caps_path = self.kit_dir / "capabilities.json"
@@ -629,6 +638,65 @@ class AgentRunner:
             self._system_prompt = prompt_path.read_text(encoding="utf-8")
 
     async def query(self, prompt: str) -> Any:
+        messages = await asyncio.to_thread(self.query_messages, prompt)
+        for msg in messages:
+            yield msg
+
+    def query_messages(self, prompt: str) -> list[Any]:
+        with self._query_lock:
+            loop = self._ensure_client_loop()
+            future = asyncio.run_coroutine_threadsafe(self._query_messages_async(prompt), loop)
+            return future.result()
+
+    def query_text(self, prompt: str) -> str:
+        if "query" in self.__dict__:
+            return _run_async(self._query_text_async(prompt))
+        messages = self.query_messages(prompt)
+        return self._messages_to_text(messages)
+
+    def close(self) -> None:
+        loop = self._client_loop
+        if loop is None:
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(self._close_client_async(), loop)
+            future.result(timeout=5)
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+            if self._client_thread is not None:
+                self._client_thread.join(timeout=5)
+            self._client_loop = None
+            self._client_thread = None
+
+    def _ensure_client_loop(self) -> asyncio.AbstractEventLoop:
+        with self._client_lock:
+            if self._client_loop is not None and self._client_loop.is_running():
+                return self._client_loop
+            ready: queue.Queue[asyncio.AbstractEventLoop] = queue.Queue(maxsize=1)
+
+            def run_loop() -> None:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                ready.put(loop)
+                try:
+                    loop.run_forever()
+                finally:
+                    loop.close()
+
+            thread = threading.Thread(target=run_loop, name=f"agentbridge-agent-{self.sdk_session_id}", daemon=True)
+            thread.start()
+            self._client_loop = ready.get()
+            self._client_thread = thread
+            return self._client_loop
+
+    async def _query_messages_async(self, prompt: str) -> list[Any]:
+        client = await self._ensure_client_async()
+        await client.query(prompt, session_id=self.sdk_session_id)
+        return [msg async for msg in client.receive_response()]
+
+    async def _ensure_client_async(self) -> Any:
+        if self._client is not None:
+            return self._client
         from claude_agent_sdk import (
             ClaudeAgentOptions,
             ClaudeSDKClient,
@@ -643,24 +711,42 @@ class AgentRunner:
             tools=kit_tools,
         )
         allowed = [f"mcp__agentbridge-kit__{name}" for name in self._capabilities]
-        options = ClaudeAgentOptions(
-            system_prompt=self._system_prompt,
-            mcp_servers={"agentbridge-kit": server},
-            allowed_tools=allowed,
+        options = _construct_with_supported_kwargs(
+            ClaudeAgentOptions,
+            {
+                "system_prompt": self._system_prompt,
+                "mcp_servers": {"agentbridge-kit": server},
+                "allowed_tools": allowed,
+                "session_id": self.sdk_session_id,
+                "model": self.model,
+                "base_url": self.base_url or None,
+                "env": {
+                    "ANTHROPIC_API_KEY": self.api_key,
+                    **({"ANTHROPIC_BASE_URL": self.base_url} if self.base_url else {}),
+                },
+            },
         )
-        async with ClaudeSDKClient(options=options) as client:
-            await client.query(prompt)
-            async for msg in client.receive_response():
-                yield msg
+        self._client = ClaudeSDKClient(options=options)
+        await self._client.connect()
+        return self._client
 
-    def query_text(self, prompt: str) -> str:
-        return _run_async(self._query_text_async(prompt))
+    async def _close_client_async(self) -> None:
+        if self._client is None:
+            return
+        try:
+            await self._client.disconnect()
+        finally:
+            self._client = None
 
     async def _query_text_async(self, prompt: str) -> str:
+        messages = [msg async for msg in self.query(prompt)]
+        return self._messages_to_text(messages)
+
+    def _messages_to_text(self, messages: list[Any]) -> str:
         content_chunks: list[str] = []
         result_chunks: list[str] = []
         usage: dict[str, Any] = {}
-        async for msg in self.query(prompt):
+        for msg in messages:
             message_usage = _extract_agent_usage(msg)
             if message_usage:
                 usage = message_usage
@@ -1184,6 +1270,13 @@ def _is_timeout_error(exc: Exception) -> bool:
 
 def _claude_agent_sdk_available() -> bool:
     return _module_available("claude_agent_sdk")
+
+
+def _agent_sdk_session_id(kit_dir: Path, session_id: str) -> str:
+    try:
+        return str(uuid.UUID(session_id))
+    except ValueError:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"agentbridge:{kit_dir.resolve()}:{session_id}"))
 
 
 def _anthropic_available() -> bool:
