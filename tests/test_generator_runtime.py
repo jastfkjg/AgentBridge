@@ -15,6 +15,7 @@ from agentbridge import cli
 from agentbridge.agent import AIGenerator
 from agentbridge.discovery import CapabilityDiscoverer
 from agentbridge.generator import AgentKitGenerator, GenerationBoundaryError, validate_output_boundary
+from agentbridge.models import Capability, SourceRef
 from agentbridge.runtime import dry_run
 
 
@@ -168,6 +169,94 @@ class GeneratorRuntimeTests(unittest.TestCase):
             output = Path(tmp) / "kit"
             AgentKitGenerator(ai_generator=gen).generate([EXAMPLE], output, name="writing-kit")
             gen.generate_all.assert_called_once()
+
+    def test_generator_merges_existing_kit_capabilities_before_ai_analysis(self):
+        gen = _make_mock_generator()
+        captured: list[Capability] = []
+
+        def generate_all(caps, _kit_name, input_paths=None):
+            captured.extend(caps)
+            return {
+                "enhanced_capabilities": list(caps),
+                "rule_signals": {"candidate_capabilities": [cap.to_dict() for cap in caps]},
+                "agent_analysis": {},
+                "system_prompt": "",
+                "skills": {},
+            }
+
+        gen.generate_all.side_effect = generate_all
+        existing = Capability(
+            name="legacy_workflow",
+            domain="legacy",
+            resource="workflow",
+            action="run",
+            description="Existing AI-inferred workflow",
+            input_schema={"type": "object", "properties": {}, "required": []},
+            risk="read",
+            confirm_required=False,
+            source=SourceRef("ai_inferred", "", "existing kit"),
+            transport={"type": "inferred"},
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            AgentKitGenerator(
+                ai_generator=gen,
+                existing_capabilities=[existing],
+            ).generate([EXAMPLE], output, name="writing-kit")
+
+        self.assertIn("legacy_workflow", {cap.name for cap in captured})
+
+    def test_parser_exposes_existing_kit_enhance_command(self):
+        args = cli.build_parser().parse_args(
+            ["enhance", "build/kit", "project", "--api-key", "sk-test"]
+        )
+
+        self.assertEqual(args.command, "enhance")
+        self.assertEqual(args.kit, "build/kit")
+        self.assertEqual(args.paths, ["project"])
+
+    def test_enhance_forces_claude_agent_sdk_analysis(self):
+        existing = CapabilityDiscoverer().discover([EXAMPLE])[0]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kit_dir = Path(tmp) / "kit"
+            kit_dir.mkdir()
+            (kit_dir / "capabilities.json").write_text(
+                json.dumps([existing.to_dict()]),
+                encoding="utf-8",
+            )
+            (kit_dir / "manifest.json").write_text(
+                json.dumps({"name": "existing-kit"}),
+                encoding="utf-8",
+            )
+            args = cli.build_parser().parse_args(
+                ["enhance", str(kit_dir), str(EXAMPLE), "--api-key", "sk-test"]
+            )
+            generated_kit = MagicMock()
+            generated_kit.to_manifest.return_value = {"name": "existing-kit"}
+            generator_instance = MagicMock()
+            generator_instance.generate.return_value = generated_kit
+            report = MagicMock(ok=True)
+
+            with (
+                patch("agentbridge.cli._claude_agent_sdk_installed", return_value=True),
+                patch("agentbridge.cli.AIGenerator") as ai_generator,
+                patch("agentbridge.cli.AgentKitGenerator", return_value=generator_instance),
+                patch("agentbridge.cli.validate_kit", return_value=report),
+                patch("agentbridge.cli.format_report", return_value="Kit valid"),
+                patch("sys.stdout", new=StringIO()),
+            ):
+                result = cli._run_enhance(args)
+
+            self.assertEqual(result, 0)
+            self.assertEqual(ai_generator.call_args.kwargs["analysis_mode"], "agentic")
+            self.assertNotIn("no_ai", ai_generator.call_args.kwargs)
+            generator_instance.generate.assert_called_once_with(
+                [EXAMPLE],
+                kit_dir,
+                "existing-kit",
+            )
 
     def test_generate_leaves_status_when_ai_generation_fails(self):
         gen = _make_mock_generator()

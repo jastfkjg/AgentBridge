@@ -1,650 +1,184 @@
-<div align="center">
+# AgentBridge
 
-# 🌉 AgentBridge
+AgentBridge 用于分析已有项目，并生成版本化的 Agent Integration Kit，其中包含工具、提示词、技能、资源 Schema、Guardrail、Dry-run 计划和测试。
 
-**将现有系统秒变 AI Agent 就绪平台。**
+[English](README.md)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen.svg)](CONTRIBUTING.md)
+## 核心能力
 
-[English](README.md) · [中文](README.zh-CN.md)
+- 使用 Claude Agent SDK 进行 AI 优先的项目分析。
+- 从 OpenAPI、GraphQL、SQL 和源码路由收集候选能力。
+- 同时生成 MCP、Claude、OpenAI 和 Vercel AI 工具定义。
+- 通过 Web 或终端 Chat 操作生成的 Kit。
+- 默认 Dry-run，高风险操作需要用户明确授权。
+- 支持会话历史、点击调用工具、必填参数提示、文件上传和 AI Token 用量。
+- 项目变化后可在已有 Kit 基础上继续分析。
 
-</div>
-
----
-
-AgentBridge 使用 AI 分析 agent 理解项目代码，然后生成完整的 **Agent 集成套件**，开箱即用支持 MCP、Claude、OpenAI 和 Vercel AI SDK。
-
-确定性扫描器仍会从 OpenAPI、GraphQL、SQL 和源码路由收集候选证据，但它们不是最终事实来源。AI agent 会读取项目上下文，推理业务对象、副作用和权限边界，再生成 tools、skills、prompts、guardrails、tests 和协议元数据。
-
-## 📑 目录
-
-- [✨ 特性](#-特性)
-- [🚀 快速开始](#-快速开始)
-- [📖 CLI 参考](#-cli-参考)
-- [🔍 AgentBridge 如何分析项目](#-agentbridge-如何分析项目)
-- [🔍 候选证据来源](#-候选证据来源)
-- [📁 稳定套件协议](#-稳定套件协议)
-- [🤖 AI Agent 生成](#-ai-agent-生成)
-- [🛡️ 安全模型](#-安全模型)
-- [🏗️ 架构](#-架构)
-- [📚 文档](#-文档)
-- [🧩 扩展 AgentBridge](#-扩展-agentbridge)
-- [📦 发布与安装](#-发布与安装)
-- [🤝 参与贡献](#-参与贡献)
-- [📄 许可证](#-许可证)
-
----
-
-## ✨ 特性
-
-<table>
-<tr><td width="50%">
-
-🔍 **AI 优先代码分析**
-由 AI agent 理解项目中的业务对象、工作流、权限边界和副作用
-
-</td><td width="50%">
-
-🔧 **多格式生成**
-同时输出 MCP、Claude、OpenAI 和 Vercel AI SDK 工具定义
-
-</td></tr>
-<tr><td>
-
-🤖 **AI 驱动生成**
-使用 Claude Agent SDK（首选）或 Anthropic API（备选）动态生成工具、技能和提示词
-
-</td><td>
-
-🧠 **Agent 即服务**
-通过 Claude Agent SDK 作为已有项目的交互式 Agent 运行
-
-</td></tr>
-<tr><td>
-
-🛡️ **安全优先**
-按风险等级分类操作，危险操作需人工确认
-
-</td><td>
-
-🧪 **Dry-run 验证**
-在执行前根据生成的护栏测试工具调用
-
-</td></tr>
-<tr><td>
-
-🌐 **自定义 LLM 提供商**
-支持 DeepSeek、OpenRouter 等任何兼容 Anthropic 协议的端点
-
-</td><td>
-
-🪶 **规则作为证据**
-OpenAPI、GraphQL、SQL 和路由扫描器只提供候选信号，由 AI agent 验证或覆盖
-
-</td></tr>
-</table>
-
----
-
-## 🚀 快速开始
-
-### 安装
-
-```bash
-pip install agbr
-```
-
-目录级项目分析推荐安装 Agent SDK extra。这样 AgentBridge 可以通过 Claude Agent SDK 分步探索项目，并实时输出 tool/progress 事件：
+## 安装
 
 ```bash
 pip install "agbr[agent]"
 ```
 
-<details>
-<summary>📦 安装可选功能</summary>
+项目目录分析和 `agentbridge enhance` 需要：
 
 ```bash
-# AI 驱动生成 + Agent 会话（推荐）
-pip install "agbr[agent]"
-
-# 轻量级 AI 生成（不含 Claude Agent SDK）
-pip install "agbr[ai]"
-
-# 全部安装
-pip install "agbr[all]"
-
-# 从源码安装（开发用）
-git clone git@github.com:jastfkjg/AgentBridge.git
-cd AgentBridge
-pip install -e ".[all]"
+export ANTHROPIC_API_KEY="..."
 ```
 
-</details>
-
-### 配置 LLM 提供商
-
-AgentBridge 在理解已有项目时依赖 AI 后端。确定性扫描器、正则和规则信号只作为 AI agent 的候选证据，而不是最终项目模型。只有 schema-only 的 OpenAPI 到 MCP 快速路径适合使用 `--no-ai`；目录级项目分析推荐使用 Claude Agent SDK。DeepSeek、OpenRouter 等 Anthropic 兼容端点可通过 `ANTHROPIC_BASE_URL` 配置。
+可选的 Anthropic 兼容端点：
 
 ```bash
-# 项目目录分析必需
-export ANTHROPIC_API_KEY="sk-ant-..."
-
-# 可选：自定义 API 端点
-export ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"   # DeepSeek
-# export ANTHROPIC_BASE_URL="https://openrouter.ai/api/v1"       # OpenRouter
-
-# 可选：自定义模型名称
-export ANTHROPIC_MODEL="deepseek-v4-flash"
+export ANTHROPIC_BASE_URL="https://api.example.com/anthropic"
+export ANTHROPIC_MODEL="your-model"
 ```
 
-<details>
-<summary>🔑 或通过 CLI 参数传入</summary>
+## 生成 Kit
+
+使用 Claude Agent SDK 分析项目目录：
 
 ```bash
-agentbridge generate examples/writing_system --output build/kit \
-  --api-key "sk-..." \
-  --base-url "https://api.deepseek.com/anthropic" \
-  --model "deepseek-v4-flash" \
+agentbridge generate ./my-system \
+  --output .agentbridge/my-system-kit \
   --analysis-mode agentic
 ```
 
-> **注意：** `--analysis-mode auto` 会在已安装 `claude-agent-sdk` 时优先使用 Claude Agent SDK，即使 `ANTHROPIC_BASE_URL` 指向兼容端点。使用 `--analysis-mode prompt` 可强制走直接 prompt 路线。
-
-</details>
-
-### 生成 Agent 集成套件
+仅根据 Schema 做确定性生成：
 
 ```bash
-# 项目目录分析使用 AI；生成文件只写入 --output 指定目录
-agentbridge generate examples/writing_system \
-  --output .agentbridge/writing-kit \
-  --analysis-mode agentic \
-  --batch-size 10 \
-  --resume \
-  --progress-interval 5 \
-  --agent-plan-timeout 120 \
-  --agent-batch-timeout 180
+agentbridge generate ./openapi.json \
+  --output .agentbridge/openapi-kit \
+  --no-ai
 ```
 
-大型项目会先分析主能力批次，然后询问是否继续补齐剩余能力。如果选择停止，仍会生成可用 kit，剩余能力保留本地基础项目元数据；之后可用 `--resume` 继续补齐 AI 增强批次。
-
-初始 Claude Agent SDK 项目理解计划会发送扫描器摘要和高信号源码摘录，并使用比完整批次生成更短的超时时间。如果提供商需要更久，可用 `--agent-plan-timeout` 或 `AGENTBRIDGE_AGENT_PLAN_TIMEOUT=120` 调整；超时后 AgentBridge 会回退到扫描器排序批次并继续生成。
-
-每个 Claude Agent SDK 生成批次也有独立超时。可用 `--agent-batch-timeout` 或 `AGENTBRIDGE_AGENT_BATCH_TIMEOUT=180` 调整。如果 SDK 初始化或提供商调用卡住，AgentBridge 会切换到本地基础项目分析，先生成可用 kit，并在 `analysis/resume_state.json` 记录批次来源；之后配置可用 AI 后端再运行 `--resume` 时，会重试 fallback 或 local-basic 检查点。
-
-### OpenAPI 一键运行 MCP Server
+验证 Kit：
 
 ```bash
-agentbridge generate openapi.json --output .agentbridge/openapi-kit --no-ai
+agentbridge validate .agentbridge/my-system-kit
+```
 
-# 默认 dry-run，不触发目标系统副作用
-agentbridge serve .agentbridge/openapi-kit
+## 增强已有 Kit
 
-# 真实调用目标 HTTP 系统
-agentbridge serve .agentbridge/openapi-kit \
+重新分析当前项目，并原地更新已有 Kit：
+
+```bash
+agentbridge enhance .agentbridge/my-system-kit ./my-system
+```
+
+该命令强制使用 Claude Agent SDK。已有 AI 推断能力会作为基线保留，当前项目会重新扫描，重复端点会被合并，变化或新增能力会重新生成。
+
+复用有效的批次检查点：
+
+```bash
+agentbridge enhance .agentbridge/my-system-kit ./my-system --resume
+```
+
+## 启动 Web Chat
+
+```bash
+agentbridge web .agentbridge/my-system-kit --port 8765
+```
+
+打开命令输出的 URL。Web 页面支持：
+
+- 切换 Dry-run 和真实系统模式。
+- Base URL 校验和连通测试。
+- 点击工具后自动填入 `/run` 命令和必填参数。
+- 高风险操作显示明确的授权/取消按钮。
+- 最近会话、文件上传、Markdown 响应和 Claude Agent SDK Token 用量。
+
+真实系统模式仍会执行生成的 Guardrail 和确认规则。
+
+启动时可传入运行凭据：
+
+```bash
+agentbridge web .agentbridge/my-system-kit \
   --base-url http://localhost:8080 \
   --bearer-env API_TOKEN \
   --execute
 ```
 
-生成 Claude Desktop、Claude Code、Codex CLI 或通用 stdio MCP 客户端配置片段：
+## 启动终端 Chat
 
 ```bash
-agentbridge mcp-config .agentbridge/openapi-kit \
+agentbridge chat .agentbridge/my-system-kit
+```
+
+常用命令：
+
+```text
+/tools
+/use
+/run <tool> key=value
+/mode dry-run
+/mode execute http://localhost:8080
+/connect http://localhost:8080
+/usage
+/history
+```
+
+`/use` 提供编号工具选择，并逐项询问必填参数。高风险操作会显示 Authorize/Cancel 选项。
+
+## 启动 MCP Server
+
+Dry-run：
+
+```bash
+agentbridge serve .agentbridge/my-system-kit
+```
+
+真实 HTTP 执行：
+
+```bash
+agentbridge serve .agentbridge/my-system-kit \
   --base-url http://localhost:8080 \
   --bearer-env API_TOKEN \
   --execute
 ```
 
-### 作为 Agent 运行
+生成客户端配置：
 
 ```bash
-agentbridge chat .agentbridge/writing-kit
-
-# 浏览器聊天界面
-agentbridge web .agentbridge/writing-kit --port 8765
+agentbridge mcp-config .agentbridge/my-system-kit --write
 ```
 
-### 运行测试
+## 默认安全规则
+
+- Dry-run 不会执行目标系统操作。
+- 删除和外部副作用工具必须明确确认。
+- 切换运行模式会清除待授权操作。
+- 项目分析只读，生成文件只写入指定 Kit 目录。
+- 密钥属于运行时输入，不能写入生成的 Kit。
+
+## 主要命令
+
+| 命令 | 作用 |
+| --- | --- |
+| `discover <paths>` | 输出确定性候选能力 |
+| `generate <paths> -o <kit>` | 生成新 Kit |
+| `enhance <kit> <paths>` | 使用 Claude Agent SDK 更新已有 Kit |
+| `validate <kit>` | 验证 Kit 协议和安全约束 |
+| `doctor <kit>` | 检查运行配置 |
+| `web <kit>` | 启动浏览器 Chat |
+| `chat <kit>` | 启动终端 Chat |
+| `serve <kit>` | 启动 stdio MCP Server |
+| `dry-run <kit> <tool>` | 预览单次工具调用 |
+| `mcp-config <kit>` | 生成 MCP 客户端配置 |
+
+## 详细文档
+
+- [架构](docs/architecture.zh-CN.md)
+- [Chat 与 Web UI](docs/chat.zh-CN.md)
+- [MCP 运行时](docs/mcp-server.zh-CN.md)
+- [Kit 协议](docs/kit-protocol.zh-CN.md)
+
+## 开发验证
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests
+PYTHONPATH=src python -m compileall src tests
 ```
 
----
+## License
 
-## 📖 CLI 参考
-
-| 命令 | 说明 |
-|---|---|
-| `agentbridge discover <paths>` | 发现并打印能力为 JSON |
-| `agentbridge init <paths> -o <dir>` | 生成、校验并打印新 kit 的下一步命令 |
-| `agentbridge generate <paths> -o <dir>` | 生成 Agent 集成套件；在配置 AI 后可使用 `--analysis-mode`、`--resume` 和批次进度支持 |
-| `agentbridge validate <kit>` | 校验 kit 协议、guardrails、transport 和潜在 secret |
-| `agentbridge doctor <kit>` | 诊断 kit 在 dry-run 或执行模式下的就绪状态 |
-| `agentbridge mcp-config <kit>` | 打印或写入 Claude/Codex/通用 MCP 客户端配置片段 |
-| `agentbridge serve <kit>` | 将生成套件作为 stdio MCP Server 运行 |
-| `agentbridge dry-run <kit> <tool>` | Dry-run 工具调用 |
-| `agentbridge chat <kit>` | 通过 kit runtime 启动交互式 CLI chat |
-| `agentbridge web <kit>` | 通过 kit runtime 启动浏览器聊天界面 |
-
-<details>
-<summary>📝 完整命令详情</summary>
-
-### `discover`
-
-```bash
-agentbridge discover examples/writing_system
-```
-
-### `generate`
-
-```bash
-agentbridge init examples/writing_system/openapi.json --output build/openapi-kit --no-ai
-agentbridge generate examples/writing_system --output build/agent-kit
-
-# 不使用 LLM，适合 schema-only 的 OpenAPI 到 MCP Server 快速 kit
-agentbridge generate examples/writing_system/openapi.json --output build/openapi-kit --no-ai
-
-# 自定义名称
-agentbridge generate examples/writing_system --output build/agent-kit --name my-kit
-
-# 自定义 LLM 提供商
-agentbridge generate examples/writing_system --output build/agent-kit \
-  --api-key "sk-..." \
-  --base-url "https://api.deepseek.com/anthropic" \
-  --model "deepseek-v4-flash" \
-  --analysis-mode agentic \
-  --batch-size 10 \
-  --resume \
-  --progress-interval 5
-
-# 强制使用直接 prompt 路线，而不是 Claude Agent SDK
-agentbridge generate examples/writing_system --output build/agent-kit \
-  --analysis-mode prompt \
-  --batch-size 10 \
-  --resume
-```
-
-### `dry-run`
-
-```bash
-# 普通调用
-agentbridge dry-run build/agent-kit create_chapter --args '{"project_id":"p1","title":"Opening"}'
-
-# 高风险操作（需要确认）
-agentbridge dry-run build/agent-kit delete_character \
-  --args '{"project_id":"p1","character_id":"c1"}' --confirmed
-```
-
-### `validate` 和 `doctor`
-
-```bash
-agentbridge validate build/agent-kit
-agentbridge doctor build/agent-kit --execute --base-url http://localhost:8080
-```
-
-### `serve`
-
-```bash
-# stdio MCP Server，默认只 dry-run
-agentbridge serve build/openapi-kit
-
-# 真实调用目标 HTTP 系统
-agentbridge serve build/openapi-kit \
-  --base-url http://localhost:8080 \
-  --header "X-Tenant=demo" \
-  --bearer-env API_TOKEN \
-  --execute \
-  --audit-log .agentbridge/audit.jsonl
-
-# 保守运行策略
-agentbridge serve build/openapi-kit --read-only
-agentbridge serve build/openapi-kit --deny-risk destructive --deny-risk external_side_effect
-```
-
-### `chat`
-
-```bash
-agentbridge chat build/agent-kit
-
-# 真实调用 HTTP 系统，并使用会话记忆
-agentbridge chat build/agent-kit \
-  --base-url http://localhost:8080 \
-  --bearer-env API_TOKEN \
-  --execute \
-  --audit-log .agentbridge/audit.jsonl \
-  --user alice \
-  --session demo
-```
-
-聊天中可使用 `/tools`、`/run <tool> key=value`、`confirm`、`cancel` 和 `/history`。
-
-### `web`
-
-```bash
-agentbridge web build/agent-kit --port 8765
-
-# 在 Web UI 中真实调用 HTTP 系统
-agentbridge web build/agent-kit \
-  --base-url http://localhost:8080 \
-  --bearer-env API_TOKEN \
-  --execute \
-  --read-only
-```
-
-### `mcp-config`
-
-```bash
-agentbridge mcp-config build/openapi-kit \
-  --base-url http://localhost:8080 \
-  --bearer-env API_TOKEN \
-  --execute
-
-# 将配置片段写回 kit
-agentbridge mcp-config build/openapi-kit --write
-```
-
-</details>
-
----
-
-## 🔍 AgentBridge 如何分析项目
-
-AgentBridge 的设计目标是让 AI agent 承担主要项目理解工作。规则发现刻意保持保守，只负责收集证据。
-
-| 阶段 | 作用 |
-|---|---|
-| 候选扫描 | 提取 OpenAPI 操作、GraphQL 字段、SQL 表和路由处理器 |
-| AI 项目分析 | Claude Agent SDK 以只读方式探索项目文件，并推断业务对象、工作流、权限边界、副作用、缺失操作和假设 |
-| 能力标准化 | 将 AI 增强后的分析转换为稳定的工具能力 |
-| 套件生成 | 输出 tools、skills、prompts、resource schemas、guardrails、dry-run plans 和 tests |
-
-AgentBridge 在发现和生成阶段不会修改目标项目。所有生成产物只写入调用方通过 `--output` 指定的新目录，建议放在项目外部，或放在 `.agentbridge/` 这样的专用忽略目录下。
-
-生成套件会保留两层信息：
-
-- `analysis/rule_signals.json`：确定性扫描器的候选证据
-- `analysis/agent_analysis.json`：AI agent 的项目分析和推理
-- `analysis/resume_state.json` 和 `analysis/batches/*.json`：可选的分批增强检查点，供 `--resume` 使用
-
-## 🔍 候选证据来源
-
-| 来源类型 | 格式 |
-|---|---|
-| 🌐 API Schema | OpenAPI JSON/YAML、GraphQL Schema |
-| 🗄️ 数据库 Schema | SQL `CREATE TABLE` 语句 |
-| 🐍 Python 路由 | FastAPI `@router.get/post/...`、Flask `@app.route` |
-| 📜 JavaScript 路由 | Express `app.get/post/...` |
-| ☕ Java 路由 | Spring `@GetMapping/@PostMapping/...` |
-
-所有来源被标准化为统一的能力模型，包含：
-
-| 字段 | 说明 |
-|---|---|
-| `domain` + `resource` | 逻辑分组 |
-| `action` | 能力做什么 |
-| `input_schema` | JSON Schema 参数 |
-| `risk` | `read` / `write` / `destructive` / `external_side_effect` |
-| `confirm_required` | 是否需要人工审批 |
-| `source` | 完整可追溯至原始文件 |
-
----
-
-## 📁 稳定套件协议
-
-当前协议：`agentbridge-kit/v1`。详见 [docs/kit-protocol.zh-CN.md](docs/kit-protocol.zh-CN.md)。
-
-```text
-agent-kit/
-├── manifest.json                  # 套件元数据和摘要
-├── capabilities.json              # AI 增强后的标准能力
-├── analysis/
-│   ├── rule_signals.json          # 提供给 AI 的扫描证据
-│   └── agent_analysis.json        # AI 项目分析和风险推理
-├── spec/
-│   └── kit-protocol.md            # 复制进套件的协议契约
-├── tools/
-│   ├── mcp_tools.json             # MCP 工具定义
-│   ├── openai_tools.json          # OpenAI 函数调用格式
-│   ├── claude_tools.json          # Claude 工具使用格式
-│   └── vercel_ai_tools.ts         # Vercel AI SDK TypeScript 工具
-├── skills/
-│   └── writing.md                 # 领域特定技能定义
-├── prompts/
-│   └── system.md                  # Agent 系统提示词
-├── resources/
-│   └── schema.json                # 资源 Schema 摘要
-├── guardrails/
-│   └── permissions.json           # 风险策略和确认规则
-├── tests/
-│   ├── tool_invocation_tests.json # 自动生成的调用测试
-│   └── test_generated_tools.py    # Python 工具契约单元测试
-├── clients/
-│   ├── mcp-client-configs.json    # Claude/Codex/通用 MCP 配置片段
-│   └── README.md                  # 客户端接入说明
-└── dry_run_plan.json              # Dry-run 执行计划
-```
-
----
-
-## 🤖 AI Agent 生成
-
-AgentBridge 使用 AI 分析 agent 生成套件中的语义内容：项目分析、工具描述、skills、系统提示词、风险评估和推断工具。规则分析会作为候选证据和安全提示传给 agent，而不是直接复制为最终输出。
-
-| 生成内容 | 说明 |
-|---|---|
-| 🧭 **项目分析** | 业务对象、工作流、权限边界、副作用和假设 |
-| 📝 **增强的工具描述** | 上下文感知的描述，捕捉业务语义 |
-| 🎯 **领域特定技能** | 为你的领域定制的技能工作流提示词 |
-| 🧠 **智能系统提示词** | 理解资源间关系的提示词，建议安全操作序列 |
-| 🔍 **推断的额外工具** | Schema 隐含但未显式存在的工具 |
-| ⚠️ **改进的风险评估** | LLM 结合规则提示评估风险 |
-
-### AI 后端
-
-| 后端 | 包 | 用途 |
-|---|---|---|
-| **Claude Agent SDK**（首选） | `claude-agent-sdk` | Agentic 项目分析、kit 内容生成、流式 tool/progress 事件和交互式 Agent 会话 |
-| **Anthropic API**（prompt 路线） | `anthropic` | 直接 prompt 生成，适合未安装 SDK 或显式使用 `--analysis-mode prompt` |
-
-安装了 `claude-agent-sdk` 时，`--analysis-mode auto` 会在目录级项目分析中自动使用它。`ANTHROPIC_BASE_URL` 会透传给兼容端点，例如 DeepSeek；只要 SDK 能连通该端点，`--analysis-mode agentic` 也会使用同一条兼容端点路线。如果未安装 SDK，AgentBridge 会建议安装 `agbr[agent]`，并在可行时回退到直接 prompt 路线。使用 `--analysis-mode agentic` 可要求 SDK 分析；该模式需要 `ANTHROPIC_API_KEY` 或 `--api-key`，不会静默生成本地-only 分析。使用 `--analysis-mode prompt` 可强制 prompt-only 分析。
-
-大型项目会分批增强。第一批按优先级覆盖主能力；在交互式终端中，AgentBridge 会询问是否继续处理剩余批次。每个 Claude Agent SDK 批次都会使用只读项目探索，并把读取文件、搜索代码、工具返回等事件实时输出到进度信息中。完成的批次结果写入 `analysis/batches/`，`--resume` 会跳过已完成批次；标记为 `fallback` 或 `local_basic` 的批次可在配置可用 AI 后端后重新尝试。
-
-### 编程式使用
-
-```python
-from pathlib import Path
-from agentbridge.generator import AgentKitGenerator
-from agentbridge.agent import AIGenerator, AgentRunner
-
-# 使用默认提供商（Anthropic Claude）生成
-ai = AIGenerator(api_key="sk-ant-...")
-kit = AgentKitGenerator(ai_generator=ai).generate(
-    [Path("examples/writing_system")],
-    Path("build/agent-kit"),
-)
-
-# 自定义 LLM 提供商（如 DeepSeek）
-ai = AIGenerator(
-    api_key="sk-d831ecabc21842fdae6f30c24dd3b052",
-    base_url="https://api.deepseek.com/anthropic",
-    model="deepseek-v4-flash",
-    analysis_mode="agentic",
-)
-
-# Agent 会话
-import asyncio
-async def main():
-    runner = AgentRunner(kit_dir="build/agent-kit", api_key="sk-ant-...")
-    async for message in runner.query("列出项目 p1 的所有章节"):
-        print(message)
-asyncio.run(main())
-```
-
----
-
-## 🛡️ 安全模型
-
-| 风险等级 | 是否需要确认 | 示例 |
-|---|---|---|
-| 🟢 `read` | 不需要 | GET、list、search、find |
-| 🟡 `write` | 按策略可选 | POST、create、update、rewrite |
-| 🔴 `destructive` | **必须** | DELETE、remove、destroy、drop、cancel |
-| 🟠 `external_side_effect` | **必须** | publish、send、email、pay、deploy、export |
-
-安全模型一致应用。基于规则的风险分类提供初始上下文，LLM 可在有充分理由时覆盖。
-
----
-
-## 🏗️ 架构
-
-```text
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│ 规则信号     │────▶│ AI 分析 Agent│────▶│ 套件生成器      │
-│ (Schema,    │     │             │     │ (protocol v1)  │
-│  路由, SQL) │     │             │     │                │
-└─────────────┘     └──────┬──────┘     └────────┬────────┘
-                           │                     │
-                    ┌──────▼──────┐       ┌──────▼────────┐
-                    │ 能力/Skills │       │ Agent 运行时  │
-                    │ Guardrails  │       │ Dry-run +     │
-                    │             │       │ Guardrails    │
-                    └─────────────┘       └───────────────┘
-```
-
----
-
-## 📚 文档
-
-- [Architecture](docs/architecture.md)
-- [Kit protocol](docs/kit-protocol.md)
-- [OpenAPI to MCP Server](docs/mcp-server.md)
-- [Chat entrypoints](docs/chat.md)
-- [TODO / Roadmap](TODO.md)
-- [English README](README.md)
-- [中文架构说明](docs/architecture.zh-CN.md)
-- [中文套件协议](docs/kit-protocol.zh-CN.md)
-- [中文 OpenAPI 到 MCP Server](docs/mcp-server.zh-CN.md)
-- [中文聊天入口](docs/chat.zh-CN.md)
-
----
-
-## 🧩 扩展 AgentBridge
-
-| 扩展方式 | 如何实现 |
-|---|---|
-| 新 Schema 解析器 | 在 `discovery.py` 中实现发现器 |
-| 新工具格式 | 在 `generator.py` 中添加构建函数 |
-| 自定义 AI 提示词 | 在 `agent.py` 中覆盖默认提示词 |
-| 自定义风险策略 | 修改 `policy.py` |
-| 自定义 Agent 工具 | 扩展 `AgentRunner._build_kit_tools()` |
-
----
-
-## 📦 发布与安装
-
-<details>
-<summary>🔧 `pip install "agbr"` 是如何工作的？</summary>
-
-AgentBridge 使用 **`pyproject.toml`** + **setuptools** 打包为标准 Python 包。以下是机制说明：
-
-### 1. 包结构
-
-```text
-AgentBridge/
-├── pyproject.toml          # 包元数据、依赖、入口点
-├── src/
-│   └── agentbridge/        # 实际的 Python 包
-│       ├── __init__.py
-│       ├── cli.py          # CLI 入口点
-│       ├── agent.py
-│       ├── generator.py
-│       └── ...
-└── tests/
-```
-
-### 2. `pyproject.toml` 关键配置
-
-```toml
-[project]
-name = "agbr"                    # pip install agbr
-version = "0.2.0"
-
-[project.optional-dependencies]         # pip install "agbr[agent]"
-agent = ["claude-agent-sdk>=0.1.0"]
-ai = ["anthropic>=0.30.0"]
-
-[project.scripts]
-agentbridge = "agentbridge.cli:main"    # CLI 入口点
-
-[tool.setuptools.packages.find]
-where = ["src"]                         # 代码位于 src/
-```
-
-### 3. `pip install` 的工作流程
-
-1. **构建**：`pip` 读取 `pyproject.toml`，使用 `setuptools` 构建 wheel（`.whl`）
-2. **安装**：wheel 被安装到 Python 环境的 `site-packages/` 目录
-3. **CLI**：`[project.scripts]` 配置在 PATH 中创建 `agentbridge` 可执行文件，调用 `agentbridge.cli:main`
-
-### 4. 发布到 PyPI（使任何人都可以 `pip install`）
-
-```bash
-# 构建包
-pip install build
-python -m build
-
-# 上传到 TestPyPI（测试用）
-pip install twine
-twine upload --repository testpypi dist/*
-
-# 上传到 PyPI（正式发布）
-twine upload dist/*
-```
-
-发布后，任何人都可以运行 `pip install "agbr"`。
-
-### 5. 未发布到 PyPI 时的安装方式
-
-在包发布到 PyPI 之前，用户可以通过以下方式安装：
-
-```bash
-# 从本地源码安装（可编辑模式，开发用）
-pip install -e .
-
-# 从 GitHub 仓库安装
-pip install git+ssh://git@github.com/jastfkjg/AgentBridge.git
-
-# 从本地 wheel 安装
-pip install dist/agentbridge-0.2.0-py3-none-any.whl
-```
-
-</details>
-
----
-
-## 🤝 参与贡献
-
-欢迎贡献！参与方式：
-
-1. **Fork** 本仓库
-2. **创建** 功能分支（`git checkout -b feature/amazing-feature`）
-3. **提交** 更改（`git commit -m 'Add amazing feature'`）
-4. **推送** 到分支（`git push origin feature/amazing-feature`）
-5. **发起** Pull Request
-
-请确保测试通过：
-
-```bash
-PYTHONPATH=src python -m unittest discover -s tests -v
-```
-
----
-
-## 📄 许可证
-
-本项目基于 MIT 许可证 — 详见 [LICENSE](LICENSE) 文件。
+MIT

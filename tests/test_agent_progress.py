@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agentbridge.agent import AIGenerator, _extract_agent_result_text, _parse_json_object
+from agentbridge.agent import AIGenerator, _extract_agent_result_text, _extract_agent_usage, _parse_json_object
 
 
 class AgentProgressTests(unittest.TestCase):
@@ -29,6 +29,7 @@ class AgentProgressTests(unittest.TestCase):
         class FakeResultMessage:
             content = []
             result = "final response"
+            usage = {"input_tokens": 120, "output_tokens": 30}
 
         class FakeRunner:
             async def query(self, _prompt):
@@ -41,6 +42,31 @@ class AgentProgressTests(unittest.TestCase):
         runner.query = FakeRunner().query  # type: ignore[method-assign]
 
         self.assertEqual(runner.query_text("hello"), "final response")
+        self.assertEqual(runner.last_usage["input_tokens"], 120)
+        self.assertEqual(runner.last_usage["output_tokens"], 30)
+        self.assertEqual(runner.last_usage["total_tokens"], 150)
+
+    def test_extract_agent_usage_supports_sdk_result_metadata(self):
+        class FakeResultMessage:
+            usage = {
+                "input_tokens": 100,
+                "output_tokens": 25,
+                "cache_read_input_tokens": 40,
+                "cache_creation_input_tokens": 10,
+            }
+            total_cost_usd = 0.0123
+            duration_ms = 456
+            num_turns = 3
+
+        usage = _extract_agent_usage(FakeResultMessage())
+
+        self.assertEqual(usage["input_tokens"], 100)
+        self.assertEqual(usage["output_tokens"], 25)
+        self.assertEqual(usage["total_tokens"], 125)
+        self.assertEqual(usage["cache_read_input_tokens"], 40)
+        self.assertEqual(usage["cost_usd"], 0.0123)
+        self.assertEqual(usage["duration_ms"], 456)
+        self.assertEqual(usage["turns"], 3)
 
     def test_parse_json_object_prefers_generation_payload(self):
         text = (

@@ -50,9 +50,12 @@ Open the printed URL in a browser. The UI includes:
 
 - user and session selectors
 - active kit display
-- tool list
+- Dry-run / Real system runtime selector
+- Base URL validation and target-system connectivity test
+- clickable tool list that inserts `/run` commands and required parameters
 - chat transcript
-- pending-operation confirmation panel
+- visible Authorize/Cancel controls for pending operations
+- Claude Agent SDK token usage for the last response and current session
 
 Run in execution mode:
 
@@ -63,6 +66,10 @@ agentbridge web .agentbridge/openapi-kit \
   --execute \
   --read-only
 ```
+
+The mode can also be changed directly in the Web UI. Real system mode requires an `http://` or `https://` Base URL. The connectivity test sends `HEAD` to the Base URL and falls back to `GET` when `HEAD` is not supported; any HTTP response means the system is reachable. Switching modes clears any pending confirmation before rebuilding the runtime, while guardrails and human confirmation remain enforced.
+
+Terminal chat exposes the same core workflows through `/use`, `/mode`, `/connect`, and `/usage`. `/use` lists numbered tools and prompts for required parameters. High-risk calls present an explicit Authorize/Cancel selection.
 
 Allow the browser UI to switch kit directories:
 

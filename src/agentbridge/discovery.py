@@ -336,14 +336,117 @@ def object_schema(properties: dict[str, Any], required: list[str] | None = None)
 
 
 def dedupe_capabilities(capabilities: list[Capability]) -> list[Capability]:
-    seen: dict[str, int] = {}
-    result: list[Capability] = []
+    by_identity: dict[tuple[str, ...], Capability] = {}
+    identity_order: list[tuple[str, ...]] = []
     for cap in capabilities:
+        identity = capability_identity(cap)
+        existing = by_identity.get(identity)
+        if existing is None:
+            by_identity[identity] = cap
+            identity_order.append(identity)
+        elif source_priority(cap.source.kind) > source_priority(existing.source.kind):
+            by_identity[identity] = cap
+
+    unique = [by_identity[identity] for identity in identity_order]
+    used_names: set[str] = set()
+    result: list[Capability] = []
+    for cap in unique:
         base = cap.name
-        count = seen.get(base, 0)
-        seen[base] = count + 1
-        if count:
-            cap.name = f"{base}_{count + 1}"
+        if base in used_names:
+            cap.name = disambiguated_capability_name(cap, base, used_names)
+        used_names.add(cap.name)
         result.append(cap)
     return result
 
+
+def capability_identity(capability: Capability) -> tuple[str, ...]:
+    transport = capability.transport
+    transport_type = str(transport.get("type", ""))
+    if transport_type == "http":
+        return (
+            "http",
+            str(transport.get("method", "GET")).upper(),
+            normalize_transport_path(str(transport.get("path", ""))),
+        )
+    if transport_type == "graphql":
+        return (
+            "graphql",
+            str(transport.get("operation", "")),
+            str(transport.get("field", "")),
+        )
+    if transport_type == "database":
+        return (
+            "database",
+            str(transport.get("table", "")),
+            capability.action,
+        )
+    if transport_type == "inferred":
+        return (
+            "inferred",
+            capability.action,
+            capability.resource,
+            ",".join(sorted(capability.input_schema.get("required", []))),
+        )
+    return (
+        transport_type or capability.source.kind,
+        capability.action,
+        capability.resource,
+        capability.source.location,
+    )
+
+
+def normalize_transport_path(path: str) -> str:
+    normalized = re.sub(r":([A-Za-z_][A-Za-z0-9_]*)", r"{\1}", path)
+    normalized = re.sub(r"\{[A-Za-z_][A-Za-z0-9_]*\}", "{}", normalized)
+    return normalized.rstrip("/") or "/"
+
+
+def source_priority(kind: str) -> int:
+    return {
+        "openapi": 50,
+        "graphql": 45,
+        "source_route": 40,
+        "database_schema": 30,
+        "ai_inferred": 20,
+        "warning": 0,
+    }.get(kind, 10)
+
+
+def disambiguated_capability_name(
+    capability: Capability,
+    base: str,
+    used_names: set[str],
+) -> str:
+    transport = capability.transport
+    hints = [
+        str(transport.get("operation_id", "")),
+        str(transport.get("handler", "")),
+        str(transport.get("field", "")),
+    ]
+    path = str(transport.get("path", ""))
+    literal_path_parts = [
+        snake_case(part)
+        for part in path.split("/")
+        if part and not part.startswith(("{", ":"))
+    ]
+    hints.extend(reversed(literal_path_parts))
+    if transport.get("type") == "database":
+        hints.append(f"database_{transport.get('table', capability.resource)}")
+    hints.extend(capability.input_schema.get("required", []))
+
+    base_parts = set(base.split("_"))
+    for hint in hints:
+        if not str(hint).strip():
+            continue
+        hint_parts = [part for part in snake_case(hint).split("_") if part not in base_parts]
+        if not hint_parts:
+            continue
+        candidate = snake_case(f"{base}_{'_'.join(hint_parts)}")
+        if candidate not in used_names:
+            return candidate
+
+    source_hint = snake_case(capability.source.location)
+    candidate = snake_case(f"{base}_{source_hint}")
+    if candidate not in used_names:
+        return candidate
+    raise ValueError(f"Could not generate a unique semantic name for capability {base}")

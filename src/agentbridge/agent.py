@@ -601,6 +601,7 @@ class AgentRunner:
 
         self._capabilities: dict[str, dict[str, Any]] = {}
         self._system_prompt = ""
+        self.last_usage: dict[str, Any] = {}
         self._load_kit()
         from agentbridge.mcp_server import AgentBridgeMCPServer, MCPServerConfig
 
@@ -658,7 +659,11 @@ class AgentRunner:
     async def _query_text_async(self, prompt: str) -> str:
         content_chunks: list[str] = []
         result_chunks: list[str] = []
+        usage: dict[str, Any] = {}
         async for msg in self.query(prompt):
+            message_usage = _extract_agent_usage(msg)
+            if message_usage:
+                usage = message_usage
             result_text = _extract_agent_result_text(msg)
             if result_text:
                 result_chunks.append(result_text)
@@ -666,6 +671,7 @@ class AgentRunner:
             text = _extract_agent_message_text(msg)
             if text:
                 content_chunks.append(text)
+        self.last_usage = usage
         return "\n".join(result_chunks or content_chunks).strip()
 
     def _build_kit_tools(self, tool_decorator: Any) -> list[Any]:
@@ -731,6 +737,52 @@ def _extract_agent_message_text(message: Any) -> str:
 def _extract_agent_result_text(message: Any) -> str:
     result = message.get("result") if isinstance(message, dict) else getattr(message, "result", None)
     return str(result).strip() if result else ""
+
+
+def _extract_agent_usage(message: Any) -> dict[str, Any]:
+    def get_value(name: str, default: Any = None) -> Any:
+        if isinstance(message, dict):
+            return message.get(name, default)
+        return getattr(message, name, default)
+
+    raw_usage = get_value("usage", {})
+    if not isinstance(raw_usage, dict):
+        raw_usage = {
+            key: getattr(raw_usage, key)
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_input_tokens",
+                "cache_creation_input_tokens",
+            )
+            if hasattr(raw_usage, key)
+        }
+    input_tokens = int(raw_usage.get("input_tokens", 0) or 0)
+    output_tokens = int(raw_usage.get("output_tokens", 0) or 0)
+    if not raw_usage and not any(
+        get_value(name) is not None
+        for name in ("total_cost_usd", "duration_ms", "num_turns")
+    ):
+        return {}
+    usage: dict[str, Any] = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+    for key in ("cache_read_input_tokens", "cache_creation_input_tokens"):
+        value = int(raw_usage.get(key, 0) or 0)
+        if value:
+            usage[key] = value
+    cost = get_value("total_cost_usd")
+    if cost is not None:
+        usage["cost_usd"] = float(cost)
+    duration = get_value("duration_ms")
+    if duration is not None:
+        usage["duration_ms"] = int(duration)
+    turns = get_value("num_turns")
+    if turns is not None:
+        usage["turns"] = int(turns)
+    return usage
 
 
 PROMPT_GENERATE_ALL_SYSTEM = (

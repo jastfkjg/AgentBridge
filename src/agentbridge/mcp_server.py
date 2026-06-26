@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-from agentbridge.runtime import DryRunError, dry_run, load_capabilities, validate_args
+from agentbridge.runtime import DryRunError, dry_run, load_runtime_kit, validate_args
 
 _PATH_PARAM_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}|:([A-Za-z_][A-Za-z0-9_]*)")
 _SENSITIVE_HEADER_NAMES = {"authorization", "cookie", "proxy-authorization", "x-api-key", "api-key"}
@@ -37,9 +37,7 @@ class MCPServerError(ValueError):
 class AgentBridgeMCPServer:
     def __init__(self, config: MCPServerConfig) -> None:
         self.config = config
-        self.capabilities = load_capabilities(config.kit_dir)
-        guardrail_path = config.kit_dir / "guardrails" / "permissions.json"
-        self.guardrails = json.loads(guardrail_path.read_text(encoding="utf-8"))
+        self.capabilities, self.guardrails = load_runtime_kit(config.kit_dir)
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any] | None:
         request_id = request.get("id")

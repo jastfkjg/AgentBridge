@@ -5,7 +5,7 @@ import os
 import re
 import shlex
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +56,7 @@ class ChatResponse:
     pending: dict[str, Any] | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)
     history: list[dict[str, str]] = field(default_factory=list)
+    usage: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +66,7 @@ class ChatResponse:
             "pending": self.pending,
             "tools": self.tools,
             "history": self.history,
+            "usage": self.usage,
         }
 
 
@@ -93,7 +95,11 @@ class ChatMemory:
             except (OSError, json.JSONDecodeError):
                 data = {}
         history = state.get("history", [])[-self.max_history :]
-        data[key] = {"history": history, "pending": state.get("pending")}
+        data[key] = {
+            "history": history,
+            "pending": state.get("pending"),
+            "usage": state.get("usage", {}),
+        }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -102,7 +108,23 @@ class ChatSession:
     def __init__(self, config: ChatConfig) -> None:
         self.config = config
         self.capabilities = load_capabilities(config.kit_dir)
-        self.server = AgentBridgeMCPServer(
+        self.server = self._build_server(config)
+        memory_file = config.memory_file
+        if memory_file is None and config.memory_enabled:
+            memory_file = config.kit_dir / ".agentbridge-chat-memory.json"
+        self.memory = ChatMemory(memory_file, enabled=config.memory_enabled, max_history=config.max_history)
+        self.memory_key = f"{config.user}:{config.session_id}:{config.kit_dir.resolve()}"
+        state = self.memory.load(self.memory_key)
+        self.history: list[dict[str, str]] = list(state.get("history", []))
+        self.usage: dict[str, Any] = dict(state.get("usage", {}))
+        pending_data = state.get("pending")
+        self.pending: PendingCall | None = PendingCall.from_dict(pending_data) if isinstance(pending_data, dict) else None
+        self.agent_runner = config.agent_runner
+        self._agent_runner_supplied = config.agent_runner is not None
+
+    @staticmethod
+    def _build_server(config: ChatConfig) -> AgentBridgeMCPServer:
+        return AgentBridgeMCPServer(
             MCPServerConfig(
                 kit_dir=config.kit_dir,
                 base_url=config.base_url,
@@ -115,16 +137,16 @@ class ChatSession:
                 audit_log=config.audit_log,
             )
         )
-        memory_file = config.memory_file
-        if memory_file is None and config.memory_enabled:
-            memory_file = config.kit_dir / ".agentbridge-chat-memory.json"
-        self.memory = ChatMemory(memory_file, enabled=config.memory_enabled, max_history=config.max_history)
-        self.memory_key = f"{config.user}:{config.session_id}:{config.kit_dir.resolve()}"
-        state = self.memory.load(self.memory_key)
-        self.history: list[dict[str, str]] = list(state.get("history", []))
-        pending_data = state.get("pending")
-        self.pending: PendingCall | None = PendingCall.from_dict(pending_data) if isinstance(pending_data, dict) else None
-        self.agent_runner = config.agent_runner
+
+    def update_runtime(self, base_url: str, execute: bool) -> None:
+        if self.config.base_url == base_url and self.config.execute == execute:
+            return
+        self.pending = None
+        self.config = replace(self.config, base_url=base_url, execute=execute)
+        self.server = self._build_server(self.config)
+        if not self._agent_runner_supplied:
+            self.agent_runner = None
+        self._save()
 
     def process(self, message: str) -> ChatResponse:
         text = message.strip()
@@ -200,14 +222,17 @@ class ChatSession:
         rules = self.server.guardrails.get("tools", {})
         for name, cap in sorted(self.capabilities.items()):
             rule = rules.get(name, {})
+            input_schema = cap.get("input_schema", {})
+            property_schemas = input_schema.get("properties", {})
             result.append(
                 {
                     "name": name,
                     "description": cap.get("description", name),
                     "risk": rule.get("risk", cap.get("risk", "read")),
                     "confirm_required": bool(rule.get("confirm_required", False)),
-                    "required": cap.get("input_schema", {}).get("required", []),
-                    "properties": sorted(cap.get("input_schema", {}).get("properties", {}).keys()),
+                    "required": input_schema.get("required", []),
+                    "properties": sorted(property_schemas),
+                    "property_schemas": property_schemas,
                     "transport": rule.get("transport", cap.get("transport", {})),
                 }
             )
@@ -268,6 +293,9 @@ class ChatSession:
                 message = str(runner.query_text(text)).strip()
             else:
                 message = ""
+            current_usage = getattr(runner, "last_usage", {})
+            if isinstance(current_usage, dict) and current_usage:
+                self._record_usage(current_usage)
             if not message:
                 message = "The AI agent did not return a response."
             return self._reply("agent_response", message)
@@ -314,6 +342,7 @@ class ChatSession:
             pending=pending,
             tools=tools or [],
             history=self.history[-self.config.max_history :],
+            usage=dict(self.usage),
         )
 
     def _remember(self, role: str, content: str) -> None:
@@ -323,7 +352,29 @@ class ChatSession:
 
     def _save(self) -> None:
         pending = self.pending.to_dict() if self.pending else None
-        self.memory.save(self.memory_key, {"history": self.history, "pending": pending})
+        self.memory.save(
+            self.memory_key,
+            {"history": self.history, "pending": pending, "usage": self.usage},
+        )
+
+    def _record_usage(self, usage: dict[str, Any]) -> None:
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ):
+            value = int(usage.get(key, 0) or 0)
+            if value:
+                session_key = f"session_{key}"
+                self.usage[session_key] = int(self.usage.get(session_key, 0) or 0) + value
+                self.usage[key] = value
+        for key in ("cost_usd", "duration_ms", "turns"):
+            if key in usage:
+                self.usage[key] = usage[key]
+        if "cost_usd" in usage:
+            self.usage["session_cost_usd"] = float(self.usage.get("session_cost_usd", 0) or 0) + float(usage["cost_usd"])
 
 
 def parse_tool_request(text: str, capabilities: dict[str, dict[str, Any]]) -> tuple[str, dict[str, Any]] | None:

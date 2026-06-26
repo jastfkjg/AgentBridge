@@ -1,650 +1,185 @@
-<div align="center">
+# AgentBridge
 
-# 🌉 AgentBridge
+AgentBridge analyzes an existing project and generates a versioned Agent Integration Kit containing tools, prompts, skills, schemas, guardrails, dry-run plans, and tests.
 
-**Turn your existing system into an AI-agent-ready platform — in seconds.**
+[中文](README.zh-CN.md)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen.svg)](CONTRIBUTING.md)
+## What It Provides
 
-[English](README.md) · [中文](README.zh-CN.md)
+- AI-first project analysis with Claude Agent SDK.
+- Candidate discovery from OpenAPI, GraphQL, SQL, and source routes.
+- MCP, Claude, OpenAI, and Vercel AI tool definitions.
+- Browser and terminal chat over the generated kit.
+- Dry-run by default, runtime policy controls, and explicit authorization for high-risk operations.
+- Session history, clickable tool invocation, required-parameter guidance, file attachments, and AI token usage.
+- In-place re-analysis of an existing kit when the project changes.
 
-</div>
-
----
-
-AgentBridge uses an AI analysis agent to understand your project code, then generates a complete **Agent Integration Kit** that works with MCP, Claude, OpenAI, and Vercel AI SDK out of the box.
-
-Deterministic scanners still collect candidate evidence from OpenAPI, GraphQL, SQL, and source routes, but they are not the source of truth. The AI agent reads the project context, reasons about business objects and side effects, then creates tools, skills, prompts, guardrails, tests, and protocol metadata.
-
-## 📑 Table of Contents
-
-- [✨ Features](#-features)
-- [🚀 Quick Start](#-quick-start)
-- [📖 CLI Reference](#-cli-reference)
-- [🔍 How AgentBridge Analyzes Projects](#-how-agentbridge-analyzes-projects)
-- [🔍 Candidate Evidence Sources](#-candidate-evidence-sources)
-- [📁 Stable Kit Protocol](#-stable-kit-protocol)
-- [🤖 AI Agent Generation](#-ai-agent-generation)
-- [🛡️ Safety Model](#-safety-model)
-- [🏗️ Architecture](#-architecture)
-- [📚 Documentation](#-documentation)
-- [🧩 Extending AgentBridge](#-extending-agentbridge)
-- [📦 Publishing & Installation](#-publishing--installation)
-- [🤝 Contributing](#-contributing)
-- [📄 License](#-license)
-
----
-
-## ✨ Features
-
-<table>
-<tr><td width="50%">
-
-🔍 **AI-first code analysis**
-Uses an AI agent to interpret business objects, workflows, permissions, and side effects from project code
-
-</td><td width="50%">
-
-🔧 **Multi-format Generation**
-Outputs MCP, Claude, OpenAI, and Vercel AI SDK tool definitions simultaneously
-
-</td></tr>
-<tr><td>
-
-🤖 **AI-Powered Generation**
-Uses Claude Agent SDK (primary) or Anthropic API (fallback) to dynamically generate tools, skills, and prompts
-
-</td><td>
-
-🧠 **Agent as a Service**
-Runs as an interactive agent for your existing project via Claude Agent SDK
-
-</td></tr>
-<tr><td>
-
-🛡️ **Safety-first**
-Classifies operations by risk level with human-in-the-loop confirmation for dangerous actions
-
-</td><td>
-
-🧪 **Dry-run Validation**
-Test tool invocations against generated guardrails before executing
-
-</td></tr>
-<tr><td>
-
-🌐 **Custom LLM Providers**
-Supports DeepSeek, OpenRouter, and any Anthropic-compatible endpoint
-
-</td><td>
-
-🪶 **Rules as evidence**
-OpenAPI, GraphQL, SQL, and route scanners provide candidate signals for the AI agent to verify or override
-
-</td></tr>
-</table>
-
----
-
-## 🚀 Quick Start
-
-### Installation
-
-```bash
-pip install agbr
-```
-
-For project-directory analysis, install the Agent SDK extra. This is the recommended path because it lets AgentBridge use the Claude Agent SDK to explore the project incrementally and stream tool/progress events:
+## Install
 
 ```bash
 pip install "agbr[agent]"
 ```
 
-<details>
-<summary>📦 Install with optional features</summary>
+Project analysis and `agentbridge enhance` require:
 
 ```bash
-# AI-powered generation + agent sessions (recommended)
-pip install "agbr[agent]"
-
-# Lightweight AI generation (no Claude Agent SDK)
-pip install "agbr[ai]"
-
-# Everything
-pip install "agbr[all]"
-
-# Install from source (for development)
-git clone git@github.com:jastfkjg/AgentBridge.git
-cd AgentBridge
-pip install -e ".[all]"
+export ANTHROPIC_API_KEY="..."
 ```
 
-</details>
-
-### Configure LLM Provider
-
-AgentBridge relies on an AI backend for existing-project understanding. Deterministic scanners and regex/rule signals are used as evidence for the AI agent, not as the final project model. The schema-only OpenAPI-to-MCP path can run with `--no-ai`; directory-level project analysis should use Claude Agent SDK. Anthropic-compatible endpoints such as DeepSeek and OpenRouter can be configured through `ANTHROPIC_BASE_URL`.
+Optional Anthropic-compatible endpoint:
 
 ```bash
-# Required for project directory analysis
-export ANTHROPIC_API_KEY="sk-ant-..."
-
-# Optional: Custom API endpoint
-export ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic"   # DeepSeek
-# export ANTHROPIC_BASE_URL="https://openrouter.ai/api/v1"       # OpenRouter
-
-# Optional: Custom model name
-export ANTHROPIC_MODEL="deepseek-v4-flash"
+export ANTHROPIC_BASE_URL="https://api.example.com/anthropic"
+export ANTHROPIC_MODEL="your-model"
 ```
 
-<details>
-<summary>🔑 Or pass via CLI flags</summary>
+## Generate a Kit
+
+Analyze a project directory with Claude Agent SDK:
 
 ```bash
-agentbridge generate examples/writing_system --output build/kit \
-  --api-key "sk-..." \
-  --base-url "https://api.deepseek.com/anthropic" \
-  --model "deepseek-v4-flash" \
+agentbridge generate ./my-system \
+  --output .agentbridge/my-system-kit \
   --analysis-mode agentic
 ```
 
-> **Note:** `--analysis-mode auto` prefers Claude Agent SDK whenever `claude-agent-sdk` is installed, even when `ANTHROPIC_BASE_URL` points to a compatible endpoint. Use `--analysis-mode prompt` to force the direct Anthropic-compatible prompt route.
-
-</details>
-
-### Generate an Agent Integration Kit
+For schema-only deterministic generation:
 
 ```bash
-# Project directory analysis uses AI. Generated files are written only to --output.
-agentbridge generate examples/writing_system \
-  --output .agentbridge/writing-kit \
-  --analysis-mode agentic \
-  --batch-size 10 \
-  --resume \
-  --progress-interval 5 \
-  --agent-plan-timeout 120 \
-  --agent-batch-timeout 180
+agentbridge generate ./openapi.json \
+  --output .agentbridge/openapi-kit \
+  --no-ai
 ```
 
-For large projects, AgentBridge analyzes the primary capability batch first, then asks whether to continue enhancing the remaining capabilities. If you stop after the first batch, the kit is still generated with local basic project metadata for the rest; rerun with `--resume` to fill in remaining AI-enhanced batches.
-
-The initial Claude Agent SDK project-understanding plan uses compact scanner hints plus high-signal source excerpts and has a shorter timeout than full batch generation. Override it with `--agent-plan-timeout` or `AGENTBRIDGE_AGENT_PLAN_TIMEOUT=120` if your provider needs more time; on timeout AgentBridge falls back to scanner-ranked batches and continues.
-
-Each Claude Agent SDK generation batch has its own timeout as well. Override it with `--agent-batch-timeout` or `AGENTBRIDGE_AGENT_BATCH_TIMEOUT=180`. If SDK initialization or a provider call hangs, AgentBridge switches to local basic project analysis, generates a usable kit, and records batch provenance in `analysis/resume_state.json`. Later `--resume` runs with a working AI backend retry fallback or local-basic checkpoints.
-
-### Run an MCP Server from OpenAPI
+Validate the result:
 
 ```bash
-agentbridge generate openapi.json --output .agentbridge/openapi-kit --no-ai
+agentbridge validate .agentbridge/my-system-kit
+```
 
-# Dry-run by default, with no target-system side effects
-agentbridge serve .agentbridge/openapi-kit
+## Enhance an Existing Kit
 
-# Execute real HTTP calls against the target system
-agentbridge serve .agentbridge/openapi-kit \
+Re-analyze the current project and update the existing kit in place:
+
+```bash
+agentbridge enhance .agentbridge/my-system-kit ./my-system
+```
+
+This command always uses Claude Agent SDK. Existing AI-inferred capabilities are retained as a baseline, current project evidence is rescanned, duplicate operations are consolidated, and changed or new capabilities are regenerated.
+
+Use `--resume` to reuse valid batch checkpoints:
+
+```bash
+agentbridge enhance .agentbridge/my-system-kit ./my-system --resume
+```
+
+## Start the Web Chat
+
+```bash
+agentbridge web .agentbridge/my-system-kit --port 8765
+```
+
+Open the printed URL. The Web UI supports:
+
+- Dry-run and real-system mode switching.
+- Base URL validation and connectivity testing.
+- Clickable tools that insert `/run` commands and required parameters.
+- Visible authorization buttons for high-risk operations.
+- Recent conversations, file attachments, Markdown responses, and Claude Agent SDK token usage.
+
+Real-system mode still enforces generated guardrails and confirmation requirements.
+
+Runtime credentials can be supplied when starting the server:
+
+```bash
+agentbridge web .agentbridge/my-system-kit \
   --base-url http://localhost:8080 \
   --bearer-env API_TOKEN \
   --execute
 ```
 
-Generate MCP client snippets for Claude Desktop, Claude Code, Codex CLI, or generic stdio clients:
+## Start Terminal Chat
 
 ```bash
-agentbridge mcp-config .agentbridge/openapi-kit \
+agentbridge chat .agentbridge/my-system-kit
+```
+
+Useful commands:
+
+```text
+/tools
+/use
+/run <tool> key=value
+/mode dry-run
+/mode execute http://localhost:8080
+/connect http://localhost:8080
+/usage
+/history
+```
+
+`/use` provides numbered tool selection and prompts for required parameters. High-risk operations provide an explicit Authorize/Cancel choice.
+
+## Run as an MCP Server
+
+Dry-run:
+
+```bash
+agentbridge serve .agentbridge/my-system-kit
+```
+
+Real HTTP execution:
+
+```bash
+agentbridge serve .agentbridge/my-system-kit \
   --base-url http://localhost:8080 \
   --bearer-env API_TOKEN \
   --execute
 ```
 
-### Run as an Agent
+Generate client configuration:
 
 ```bash
-agentbridge chat .agentbridge/writing-kit
-
-# Browser chat UI
-agentbridge web .agentbridge/writing-kit --port 8765
+agentbridge mcp-config .agentbridge/my-system-kit --write
 ```
 
-### Run Tests
+## Safety Defaults
+
+- Dry-run never executes the target operation.
+- Destructive and external-side-effect tools require explicit confirmation.
+- Switching runtime mode clears pending authorization.
+- Project analysis is read-only; generated files are written only to the selected kit directory.
+- Secrets are runtime inputs and must not be stored in generated kits.
+
+## Main Commands
+
+| Command | Purpose |
+| --- | --- |
+| `discover <paths>` | Print deterministic candidate capabilities |
+| `generate <paths> -o <kit>` | Generate a new kit |
+| `enhance <kit> <paths>` | Re-analyze and update an existing kit with Claude Agent SDK |
+| `validate <kit>` | Validate kit protocol and safety contracts |
+| `doctor <kit>` | Check runtime readiness |
+| `web <kit>` | Start browser chat |
+| `chat <kit>` | Start terminal chat |
+| `serve <kit>` | Start stdio MCP server |
+| `dry-run <kit> <tool>` | Preview one tool invocation |
+| `mcp-config <kit>` | Generate MCP client configuration |
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Chat and Web UI](docs/chat.md)
+- [MCP runtime](docs/mcp-server.md)
+- [Kit protocol](docs/kit-protocol.md)
+- [Chinese documentation](docs/architecture.zh-CN.md)
+
+## Development
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests
+PYTHONPATH=src python -m compileall src tests
 ```
 
----
+## License
 
-## 📖 CLI Reference
-
-| Command | Description |
-|---|---|
-| `agentbridge discover <paths>` | Discover and print capabilities as JSON |
-| `agentbridge init <paths> -o <dir>` | Generate, validate, and print next steps for a new kit |
-| `agentbridge generate <paths> -o <dir>` | Generate an Agent Integration Kit; uses AI enhancement when configured, with `--analysis-mode`, `--resume`, and batch progress support |
-| `agentbridge validate <kit>` | Validate kit protocol, guardrails, transports, and secret hygiene |
-| `agentbridge doctor <kit>` | Diagnose kit readiness for dry-run or execution mode |
-| `agentbridge mcp-config <kit>` | Print or write Claude/Codex/generic MCP client snippets |
-| `agentbridge serve <kit>` | Run a generated kit as a stdio MCP Server |
-| `agentbridge dry-run <kit> <tool>` | Dry-run a tool invocation |
-| `agentbridge chat <kit>` | Start an interactive CLI chat over the kit runtime |
-| `agentbridge web <kit>` | Start a browser chat UI over the kit runtime |
-
-<details>
-<summary>📝 Full command details</summary>
-
-### `discover`
-
-```bash
-agentbridge discover examples/writing_system
-```
-
-### `generate`
-
-```bash
-agentbridge init examples/writing_system/openapi.json --output build/openapi-kit --no-ai
-agentbridge generate examples/writing_system --output build/agent-kit
-
-# No LLM, useful for schema-only OpenAPI-to-MCP Server kits
-agentbridge generate examples/writing_system/openapi.json --output build/openapi-kit --no-ai
-
-# With custom name
-agentbridge generate examples/writing_system --output build/agent-kit --name my-kit
-
-# With custom LLM provider
-agentbridge generate examples/writing_system --output build/agent-kit \
-  --api-key "sk-..." \
-  --base-url "https://api.deepseek.com/anthropic" \
-  --model "deepseek-v4-flash" \
-  --analysis-mode agentic \
-  --batch-size 10 \
-  --resume \
-  --progress-interval 5
-
-# Force the direct prompt route instead of Claude Agent SDK
-agentbridge generate examples/writing_system --output build/agent-kit \
-  --analysis-mode prompt \
-  --batch-size 10 \
-  --resume
-```
-
-### `dry-run`
-
-```bash
-# Normal invocation
-agentbridge dry-run build/agent-kit create_chapter --args '{"project_id":"p1","title":"Opening"}'
-
-# High-risk operation (requires confirmation)
-agentbridge dry-run build/agent-kit delete_character \
-  --args '{"project_id":"p1","character_id":"c1"}' --confirmed
-```
-
-### `validate` and `doctor`
-
-```bash
-agentbridge validate build/agent-kit
-agentbridge doctor build/agent-kit --execute --base-url http://localhost:8080
-```
-
-### `serve`
-
-```bash
-# stdio MCP Server, dry-run by default
-agentbridge serve build/openapi-kit
-
-# Execute real HTTP calls against the target system
-agentbridge serve build/openapi-kit \
-  --base-url http://localhost:8080 \
-  --header "X-Tenant=demo" \
-  --bearer-env API_TOKEN \
-  --execute \
-  --audit-log .agentbridge/audit.jsonl
-
-# Conservative runtime policy
-agentbridge serve build/openapi-kit --read-only
-agentbridge serve build/openapi-kit --deny-risk destructive --deny-risk external_side_effect
-```
-
-### `chat`
-
-```bash
-agentbridge chat build/agent-kit
-
-# Execute real HTTP calls, with session memory
-agentbridge chat build/agent-kit \
-  --base-url http://localhost:8080 \
-  --bearer-env API_TOKEN \
-  --execute \
-  --audit-log .agentbridge/audit.jsonl \
-  --user alice \
-  --session demo
-```
-
-Inside chat, use `/tools`, `/run <tool> key=value`, `confirm`, `cancel`, and `/history`.
-
-### `web`
-
-```bash
-agentbridge web build/agent-kit --port 8765
-
-# Execute real HTTP calls in the Web UI
-agentbridge web build/agent-kit \
-  --base-url http://localhost:8080 \
-  --bearer-env API_TOKEN \
-  --execute \
-  --read-only
-```
-
-### `mcp-config`
-
-```bash
-agentbridge mcp-config build/openapi-kit \
-  --base-url http://localhost:8080 \
-  --bearer-env API_TOKEN \
-  --execute
-
-# Write snippets back into the kit
-agentbridge mcp-config build/openapi-kit --write
-```
-
-</details>
-
----
-
-## 🔍 How AgentBridge Analyzes Projects
-
-AgentBridge is designed so the AI agent performs the main project understanding step. Rule-based discovery is intentionally conservative and acts as evidence collection.
-
-| Stage | Role |
-|---|---|
-| Candidate scanning | Extract OpenAPI operations, GraphQL fields, SQL tables, and route handlers |
-| AI project analysis | Claude Agent SDK explores project files read-only, then infers business objects, workflows, permission boundaries, side effects, missing operations, and assumptions |
-| Capability normalization | Convert the AI-enhanced analysis into stable tool-ready capabilities |
-| Kit generation | Emit tools, skills, prompts, resource schemas, guardrails, dry-run plans, and tests |
-
-AgentBridge does not modify the target project during discovery or generation. All generated artifacts are written under the caller-provided output directory, preferably outside the project or under a dedicated ignored directory such as `.agentbridge/`.
-
-The generated kit preserves both layers:
-
-- `analysis/rule_signals.json`: deterministic candidate evidence
-- `analysis/agent_analysis.json`: AI agent project analysis and reasoning
-- `analysis/resume_state.json` and `analysis/batches/*.json`: optional batch-enhancement checkpoints used by `--resume`
-
-## 🔍 Candidate Evidence Sources
-
-| Source Type | Formats |
-|---|---|
-| 🌐 API Schemas | OpenAPI JSON/YAML, GraphQL schemas |
-| 🗄️ Database Schemas | SQL `CREATE TABLE` statements |
-| 🐍 Python Routes | FastAPI `@router.get/post/...`, Flask `@app.route` |
-| 📜 JavaScript Routes | Express `app.get/post/...` |
-| ☕ Java Routes | Spring `@GetMapping/@PostMapping/...` |
-
-All sources are normalized into a common capability model with:
-
-| Field | Description |
-|---|---|
-| `domain` + `resource` | Logical grouping |
-| `action` | What the capability does |
-| `input_schema` | JSON Schema parameters |
-| `risk` | `read` / `write` / `destructive` / `external_side_effect` |
-| `confirm_required` | Whether human approval is needed |
-| `source` | Full traceability back to the origin file |
-
----
-
-## 📁 Stable Kit Protocol
-
-Current protocol: `agentbridge-kit/v1`. See [docs/kit-protocol.md](docs/kit-protocol.md).
-
-```text
-agent-kit/
-├── manifest.json                  # Kit metadata and summary
-├── capabilities.json              # AI-enhanced normalized capabilities
-├── analysis/
-│   ├── rule_signals.json          # Scanner evidence used as AI context
-│   └── agent_analysis.json        # AI project analysis and risk reasoning
-├── spec/
-│   └── kit-protocol.md            # Protocol contract copied into the kit
-├── tools/
-│   ├── mcp_tools.json             # MCP tool definitions
-│   ├── openai_tools.json          # OpenAI function calling format
-│   ├── claude_tools.json          # Claude tool use format
-│   └── vercel_ai_tools.ts         # Vercel AI SDK TypeScript tools
-├── skills/
-│   └── writing.md                 # Domain-specific skill definitions
-├── prompts/
-│   └── system.md                  # Agent system prompt
-├── resources/
-│   └── schema.json                # Resource schema summary
-├── guardrails/
-│   └── permissions.json           # Risk policy and confirmation rules
-├── tests/
-│   ├── tool_invocation_tests.json # Auto-generated invocation tests
-│   └── test_generated_tools.py    # Python unit tests for tool contracts
-├── clients/
-│   ├── mcp-client-configs.json    # Claude/Codex/generic MCP config snippets
-│   └── README.md                  # Client setup notes
-└── dry_run_plan.json              # Dry-run execution plan
-```
-
----
-
-## 🤖 AI Agent Generation
-
-AgentBridge uses an AI analysis agent to generate the semantic parts of the kit: project analysis, tool descriptions, skills, system prompts, risk assessments, and inferred tools. Rule-based analysis is passed to the agent as candidate evidence and safety hints, not copied directly as final output.
-
-| What | Description |
-|---|---|
-| 🧭 **Project analysis** | Business objects, workflows, permission boundaries, side effects, and assumptions |
-| 📝 **Enhanced tool descriptions** | Context-aware descriptions that capture business semantics |
-| 🎯 **Domain-specific skills** | Workflow prompts tailored to your domain with best practices |
-| 🧠 **Intelligent system prompts** | Prompts that understand resource relationships and suggest safe sequences |
-| 🔍 **Inferred additional tools** | Tools implied by your schema but not explicitly present |
-| ⚠️ **Improved risk assessments** | LLM evaluates risk with rule-based hints as context |
-
-### AI Backend
-
-| Backend | Package | Use Case |
-|---|---|---|
-| **Claude Agent SDK** (primary) | `claude-agent-sdk` | Agentic project analysis, kit content generation, streamed tool/progress events, and interactive agent sessions |
-| **Anthropic API** (prompt route) | `anthropic` | Direct prompt-based generation, useful when SDK is unavailable or when forcing `--analysis-mode prompt` |
-
-When `claude-agent-sdk` is installed, `--analysis-mode auto` uses it automatically for project directories. `ANTHROPIC_BASE_URL` is passed through for compatible endpoints such as DeepSeek, and `--analysis-mode agentic` can use the same compatible endpoint path as long as the SDK can connect to it. If the SDK is not installed, AgentBridge recommends installing `agbr[agent]` and falls back to the direct prompt route when possible. Use `--analysis-mode agentic` to require SDK analysis; this mode requires `ANTHROPIC_API_KEY` or `--api-key` and will not silently generate a local-only analysis. Use `--analysis-mode prompt` to force prompt-only analysis.
-
-Large projects are enhanced in batches. The first batch is ranked to cover the main capabilities; in an interactive terminal AgentBridge then asks whether to continue. Each Claude Agent SDK batch uses read-only project exploration and streams file reads, searches, and tool results into the progress output. Completed batch results are written under `analysis/batches/`, and `--resume` skips batches that already completed. Batches marked `fallback` or `local_basic` can be retried when a working AI backend is configured.
-
-### Programmatic Usage
-
-```python
-from pathlib import Path
-from agentbridge.generator import AgentKitGenerator
-from agentbridge.agent import AIGenerator, AgentRunner
-
-# Generate with default provider (Anthropic Claude)
-ai = AIGenerator(api_key="sk-ant-...")
-kit = AgentKitGenerator(ai_generator=ai).generate(
-    [Path("examples/writing_system")],
-    Path("build/agent-kit"),
-)
-
-# Custom LLM provider (e.g., DeepSeek)
-ai = AIGenerator(
-    api_key="sk-d831ecabc21842fdae6f30c24dd3b052",
-    base_url="https://api.deepseek.com/anthropic",
-    model="deepseek-v4-flash",
-    analysis_mode="agentic",
-)
-
-# Agent session
-import asyncio
-async def main():
-    runner = AgentRunner(kit_dir="build/agent-kit", api_key="sk-ant-...")
-    async for message in runner.query("List all chapters in project p1"):
-        print(message)
-asyncio.run(main())
-```
-
----
-
-## 🛡️ Safety Model
-
-| Risk Level | Confirmation | Examples |
-|---|---|---|
-| 🟢 `read` | Not required | GET, list, search, find |
-| 🟡 `write` | Optional by policy | POST, create, update, rewrite |
-| 🔴 `destructive` | **Required** | DELETE, remove, destroy, drop, cancel |
-| 🟠 `external_side_effect` | **Required** | publish, send, email, pay, deploy, export |
-
-The safety model is applied consistently. Rule-based risk classification provides initial context, and the LLM may override when justified.
-
----
-
-## 🏗️ Architecture
-
-```text
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│ Rule Signals │────▶│ AI Analysis │────▶│ Kit Generator   │
-│ (schemas,    │     │ Agent       │     │ (protocol v1)   │
-│  routes, SQL)│     │             │     │                 │
-└─────────────┘     └──────┬──────┘     └────────┬────────┘
-                           │                     │
-                    ┌──────▼──────┐       ┌──────▼────────┐
-                    │ Capabilities│       │ Agent Runtime │
-                    │ Skills      │       │ Dry-run +     │
-                    │ Guardrails  │       │ Guardrails    │
-                    └─────────────┘       └───────────────┘
-```
-
----
-
-## 📚 Documentation
-
-- [Architecture](docs/architecture.md)
-- [Kit protocol](docs/kit-protocol.md)
-- [OpenAPI to MCP Server](docs/mcp-server.md)
-- [Chat entrypoints](docs/chat.md)
-- [TODO / Roadmap](TODO.md)
-- [中文 README](README.zh-CN.md)
-- [中文架构说明](docs/architecture.zh-CN.md)
-- [中文套件协议](docs/kit-protocol.zh-CN.md)
-- [中文 OpenAPI 到 MCP Server](docs/mcp-server.zh-CN.md)
-- [中文聊天入口](docs/chat.zh-CN.md)
-
----
-
-## 🧩 Extending AgentBridge
-
-| Extension | How |
-|---|---|
-| New schema parser | Implement a discoverer in `discovery.py` |
-| New tool format | Add a builder function in `generator.py` |
-| Custom AI prompts | Override prompts in `agent.py` |
-| Custom risk policy | Modify `policy.py` |
-| Custom agent tools | Extend `AgentRunner._build_kit_tools()` |
-
----
-
-## 📦 Publishing & Installation
-
-<details>
-<summary>🔧 How does `pip install "agbr"` work?</summary>
-
-AgentBridge is packaged as a standard Python package using **`pyproject.toml`** + **setuptools**. Here's the mechanism:
-
-### 1. Package Structure
-
-```text
-AgentBridge/
-├── pyproject.toml          # Package metadata, dependencies, entry points
-├── src/
-│   └── agentbridge/        # Actual Python package
-│       ├── __init__.py
-│       ├── cli.py          # CLI entry point
-│       ├── agent.py
-│       ├── generator.py
-│       └── ...
-└── tests/
-```
-
-### 2. `pyproject.toml` Key Sections
-
-```toml
-[project]
-name = "agbr"                    # pip install agbr
-version = "0.2.0"
-
-[project.optional-dependencies]         # pip install "agbr[agent]"
-agent = ["claude-agent-sdk>=0.1.0"]
-ai = ["anthropic>=0.30.0"]
-
-[project.scripts]
-agentbridge = "agentbridge.cli:main"    # CLI entry point
-
-[tool.setuptools.packages.find]
-where = ["src"]                         # Code lives in src/
-```
-
-### 3. How `pip install` Works
-
-1. **Build**: `pip` reads `pyproject.toml`, uses `setuptools` to build a wheel (`.whl`)
-2. **Install**: The wheel is installed into your Python environment's `site-packages/`
-3. **CLI**: The `[project.scripts]` section creates a `agentbridge` executable in your PATH that calls `agentbridge.cli:main`
-
-### 4. Publishing to PyPI (so anyone can `pip install`)
-
-```bash
-# Build the package
-pip install build
-python -m build
-
-# Upload to TestPyPI (for testing)
-pip install twine
-twine upload --repository testpypi dist/*
-
-# Upload to PyPI (for real)
-twine upload dist/*
-```
-
-After publishing, anyone can run `pip install "agbr"`.
-
-### 5. Installing Without PyPI
-
-Until the package is published on PyPI, users can install it in these ways:
-
-```bash
-# Install from local source (editable mode, for development)
-pip install -e .
-
-# Install from GitHub repository
-pip install git+ssh://git@github.com/jastfkjg/AgentBridge.git
-
-# Install from a local wheel
-pip install dist/agentbridge-0.2.0-py3-none-any.whl
-```
-
-</details>
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Here's how you can help:
-
-1. **Fork** the repository
-2. **Create** a feature branch (`git checkout -b feature/amazing-feature`)
-3. **Commit** your changes (`git commit -m 'Add amazing feature'`)
-4. **Push** to the branch (`git push origin feature/amazing-feature`)
-5. **Open** a Pull Request
-
-Please make sure tests pass:
-
-```bash
-PYTHONPATH=src python -m unittest discover -s tests -v
-```
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+MIT

@@ -2,18 +2,20 @@ import json
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
 from agentbridge.chat import ChatConfig, ChatSession
-from agentbridge.web import build_handler, render_index
+from agentbridge.web import build_handler, normalize_target_base_url, render_index
 
 
 class _FakeAgentRunner:
-    def __init__(self, reply: str = "这是一个写作系统。") -> None:
+    def __init__(self, reply: str = "这是一个写作系统.", usage: dict[str, object] | None = None) -> None:
         self.reply = reply
         self.prompts: list[str] = []
+        self.last_usage = usage or {}
 
     def query_text(self, prompt: str) -> str:
         self.prompts.append(prompt)
@@ -98,6 +100,17 @@ class _FakeHTTPResponse:
         return b'{"ok": true}'
 
 
+class _ConnectivityResponse:
+    status = 204
+    headers = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
 class ChatSessionTests(unittest.TestCase):
     def test_chat_lists_tools(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,6 +121,9 @@ class ChatSessionTests(unittest.TestCase):
 
             self.assertEqual(response.status, "tools")
             self.assertIn("list_chapter", response.message)
+            list_chapter = next(tool for tool in response.tools if tool["name"] == "list_chapter")
+            self.assertEqual(list_chapter["required"], ["project_id"])
+            self.assertEqual(list_chapter["property_schemas"]["project_id"]["type"], "string")
 
     def test_chat_stores_pending_high_risk_tool_and_confirms(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -162,10 +178,29 @@ class ChatSessionTests(unittest.TestCase):
             confirmed = session.process("confirm")
             self.assertIn("blocked by runtime policy", confirmed.message)
 
+    def test_chat_runtime_switch_clears_pending_and_updates_server(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            session = ChatSession(ChatConfig(kit_dir=kit, memory_enabled=False))
+            session.process("/run delete_character project_id=p1 character_id=c1")
+            session.agent_runner = object()
+
+            session.update_runtime(base_url="http://example.test", execute=True)
+
+            self.assertIsNone(session.pending)
+            self.assertTrue(session.config.execute)
+            self.assertEqual(session.config.base_url, "http://example.test")
+            self.assertTrue(session.server.config.execute)
+            self.assertEqual(session.server.config.base_url, "http://example.test")
+            self.assertIsNone(session.agent_runner)
+
     def test_chat_falls_back_to_agent_for_natural_language(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
-            runner = _FakeAgentRunner("该系统用于管理写作项目、章节和角色。")
+            runner = _FakeAgentRunner(
+                "该系统用于管理写作项目、章节和角色。",
+                {"input_tokens": 80, "output_tokens": 20, "total_tokens": 100},
+            )
             session = ChatSession(ChatConfig(kit_dir=kit, memory_enabled=False, agent_runner=runner))
 
             response = session.process("介绍下该系统")
@@ -174,6 +209,8 @@ class ChatSessionTests(unittest.TestCase):
             self.assertEqual(response.message, "该系统用于管理写作项目、章节和角色。")
             self.assertEqual(runner.prompts, ["介绍下该系统"])
             self.assertNotIn("I could not map that to a tool", response.message)
+            self.assertEqual(response.usage["total_tokens"], 100)
+            self.assertEqual(response.usage["session_total_tokens"], 100)
 
     def test_chat_explains_agent_configuration_when_unavailable(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {}, clear=True):
@@ -320,6 +357,51 @@ class WebChatTests(unittest.TestCase):
             self.assertIn("Choose any generated kit directory for this session.", html)
             self.assertNotIn('id="kit" value="' + str(kit) + '" disabled', html)
 
+    def test_rendered_web_ui_supports_runtime_mode_switch_and_connectivity_test(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, base_url="http://localhost:8080", execute=False, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn('id="runtimeMode"', html)
+            self.assertIn('data-mode="dry-run"', html)
+            self.assertIn('data-mode="execute"', html)
+            self.assertIn('id="baseUrl"', html)
+            self.assertIn('id="testConnectionBtn"', html)
+            self.assertIn('id="connectionStatus"', html)
+            self.assertIn("execute: runtimeExecute", html)
+            self.assertIn("base_url: runtimeExecute ? els.baseUrl.value.trim() : ''", html)
+            self.assertIn("applyRuntimeMode", html)
+            self.assertIn("testConnectivity", html)
+
+    def test_rendered_web_ui_supports_clickable_tools_parameter_templates_and_usage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("tool-button", html)
+            self.assertIn("buildToolCommand", html)
+            self.assertIn("insertToolCommand", html)
+            self.assertIn("Required parameters", html)
+            self.assertIn('id="usageButton"', html)
+            self.assertIn('id="usagePanel"', html)
+            self.assertIn("renderUsage", html)
+            self.assertIn("session_total_tokens", html)
+            self.assertIn("approval-card", html)
+            self.assertIn('id="confirmBtn"', html)
+            self.assertIn('id="cancelBtn"', html)
+
+    def test_target_base_url_requires_http_or_https(self):
+        self.assertEqual(normalize_target_base_url(" http://localhost:8080/ "), "http://localhost:8080")
+        self.assertEqual(normalize_target_base_url("https://example.test/api/"), "https://example.test/api")
+        with self.assertRaisesRegex(ValueError, "http:// or https://"):
+            normalize_target_base_url("file:///tmp/system")
+        with self.assertRaisesRegex(ValueError, "host"):
+            normalize_target_base_url("http:///missing-host")
+
     def test_web_api_chat_and_tools(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
@@ -343,6 +425,61 @@ class WebChatTests(unittest.TestCase):
 
             self.assertEqual(response["status"], "tools")
             self.assertIn("list_chapter", response["message"])
+
+    def test_web_api_rejects_execute_mode_without_base_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            from http.server import ThreadingHTTPServer
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), build_handler(config))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.shutdown)
+            self.addCleanup(server.server_close)
+            base = f"http://127.0.0.1:{server.server_port}"
+
+            body = json.dumps({"message": "/tools", "execute": True, "base_url": ""}).encode("utf-8")
+            req = urllib.request.Request(base + "/api/chat", data=body, headers={"Content-Type": "application/json"}, method="POST")
+
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(req)
+
+            self.assertEqual(raised.exception.code, 400)
+            payload = json.loads(raised.exception.read().decode("utf-8"))
+            self.assertIn("Base URL is required", payload["error"])
+
+    def test_web_api_tests_target_connectivity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            from http.server import ThreadingHTTPServer
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), build_handler(config))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.shutdown)
+            self.addCleanup(server.server_close)
+            base = f"http://127.0.0.1:{server.server_port}"
+            body = json.dumps({"base_url": "http://system.test"}).encode("utf-8")
+            req = urllib.request.Request(
+                base + "/api/connectivity",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            with patch("agentbridge.web.url_open", return_value=_ConnectivityResponse()) as url_open:
+                response = json.loads(urllib.request.urlopen(req).read().decode("utf-8"))
+
+            self.assertTrue(response["reachable"])
+            self.assertEqual(response["status"], 204)
+            self.assertEqual(response["method"], "HEAD")
+            target_request = url_open.call_args.args[0]
+            self.assertEqual(target_request.full_url, "http://system.test")
+            self.assertEqual(target_request.get_method(), "HEAD")
 
     def test_web_serves_local_markdown_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from agentbridge.agent import AIGenerator
-from agentbridge.chat import ChatConfig, ChatSession
+from agentbridge.chat import ChatConfig, ChatSession, parse_scalar
 from agentbridge.client_config import MCPClientConfig, build_mcp_client_configs, format_mcp_client_configs
 from agentbridge.discovery import CapabilityDiscoverer
 from agentbridge.generator import AgentKitGenerator
@@ -52,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(json.dumps(kit.to_manifest(), indent=2, sort_keys=True))
             return 0
+        if args.command == "enhance":
+            return _run_enhance(args)
         if args.command == "init":
             return _run_init(args)
         if args.command == "dry-run":
@@ -127,7 +129,7 @@ def _run_chat(args: argparse.Namespace) -> int:
     session = ChatSession(_chat_config_from_args(args))
 
     print(f"AgentBridge Chat — kit: {kit_dir}")
-    print("Type /tools, /run <tool> key=value, confirm, cancel, or exit.\n")
+    print("Commands: /tools, /use, /run, /mode, /connect, /usage, /history, or exit.\n")
 
     try:
         while True:
@@ -139,11 +141,113 @@ def _run_chat(args: argparse.Namespace) -> int:
             if not user_input or user_input.lower() == "exit":
                 print("Goodbye!")
                 break
+            if user_input.lower().startswith("/use"):
+                response = _interactive_tool_call(session, user_input)
+                if response is None:
+                    continue
+                _print_chat_response(session, response)
+                continue
+            if user_input.lower().startswith("/mode"):
+                _interactive_runtime_mode(session, user_input)
+                continue
+            if user_input.lower().startswith("/connect"):
+                _interactive_connectivity_test(session, user_input)
+                continue
+            if user_input.lower() == "/usage":
+                print(_format_usage(session.usage) + "\n")
+                continue
             response = session.process(user_input)
-            print(f"AgentBridge> {response.message}\n")
+            _print_chat_response(session, response)
     except Exception as exc:
         print(f"\nSession ended: {exc}", file=sys.stderr)
     return 0
+
+
+def _interactive_tool_call(session: ChatSession, command: str) -> Any | None:
+    tools = session.tool_summaries()
+    selector = command[4:].strip()
+    if not selector:
+        for index, tool in enumerate(tools, start=1):
+            required = ", ".join(tool.get("required", [])) or "none"
+            print(f"  {index}. {tool['name']} [{tool['risk']}] required: {required}")
+        selector = input("Select tool number or name> ").strip()
+    tool = _find_tool_selection(tools, selector)
+    if tool is None:
+        print("AgentBridge> Unknown tool selection.\n")
+        return None
+    arguments: dict[str, Any] = {}
+    schemas = tool.get("property_schemas", {})
+    for name in tool.get("required", []):
+        schema = schemas.get(name, {}) if isinstance(schemas, dict) else {}
+        detail = schema.get("description") or schema.get("type") or "value"
+        value = input(f"{name} ({detail})> ").strip()
+        arguments[name] = parse_scalar(value)
+    return session.call_tool(tool["name"], arguments)
+
+
+def _find_tool_selection(tools: list[dict[str, Any]], selector: str) -> dict[str, Any] | None:
+    if selector.isdigit():
+        index = int(selector) - 1
+        return tools[index] if 0 <= index < len(tools) else None
+    return next((tool for tool in tools if tool["name"] == selector), None)
+
+
+def _interactive_runtime_mode(session: ChatSession, command: str) -> None:
+    parts = command.split(maxsplit=2)
+    mode = parts[1].lower() if len(parts) > 1 else ""
+    if mode in {"dry-run", "dry_run", "dry"}:
+        session.update_runtime(base_url="", execute=False)
+        print("AgentBridge> Runtime switched to dry-run. Pending authorization cleared.\n")
+        return
+    if mode in {"execute", "real"}:
+        base_url = parts[2].strip() if len(parts) > 2 else input("Base URL> ").strip()
+        from agentbridge.web import normalize_target_base_url
+
+        base_url = normalize_target_base_url(base_url)
+        session.update_runtime(base_url=base_url, execute=True)
+        print(f"AgentBridge> Runtime switched to real system: {base_url}\n")
+        return
+    print("AgentBridge> Usage: /mode dry-run or /mode execute <base-url>\n")
+
+
+def _interactive_connectivity_test(session: ChatSession, command: str) -> None:
+    base_url = command[len("/connect") :].strip() or session.config.base_url
+    if not base_url:
+        base_url = input("Base URL> ").strip()
+    from agentbridge.web import test_target_connectivity
+
+    result = test_target_connectivity(base_url, timeout=session.config.timeout)
+    if result["reachable"]:
+        print(
+            f"AgentBridge> Reachable: HTTP {result['status']} via {result['method']} "
+            f"in {result['elapsed_ms']} ms.\n"
+        )
+    else:
+        print(f"AgentBridge> Unreachable: {result.get('error', 'Connection failed')}.\n")
+
+
+def _print_chat_response(session: ChatSession, response: Any) -> None:
+    print(f"AgentBridge> {response.message}")
+    if response.usage.get("total_tokens"):
+        print(_format_usage(response.usage))
+    if response.status == "needs_confirmation":
+        print("Authorization required: [1] Authorize  [2] Cancel")
+        choice = input("Select> ").strip().lower()
+        follow_up = session.confirm() if choice in {"1", "y", "yes", "authorize", "confirm"} else session.process("cancel")
+        print(f"AgentBridge> {follow_up.message}")
+    print()
+
+
+def _format_usage(usage: dict[str, Any]) -> str:
+    if not usage:
+        return "AI usage: no Claude Agent SDK usage recorded in this session."
+    return (
+        "AI usage: "
+        f"last {int(usage.get('input_tokens', 0)):,} input + "
+        f"{int(usage.get('output_tokens', 0)):,} output = "
+        f"{int(usage.get('total_tokens', 0)):,} tokens; "
+        f"session {int(usage.get('session_total_tokens', 0)):,} tokens."
+    )
 
 
 def _run_init(args: argparse.Namespace) -> int:
@@ -179,6 +283,63 @@ def _run_init(args: argparse.Namespace) -> int:
         print(f"  agentbridge mcp-config {output} --base-url {args.target_base_url} --execute --bearer-env API_TOKEN")
         print(f"  agentbridge serve {output} --base-url {args.target_base_url} --execute --read-only")
     print(f"\nKit manifest: {json.dumps(kit.to_manifest(), sort_keys=True)}")
+    return 0
+
+
+def _run_enhance(args: argparse.Namespace) -> int:
+    kit_dir = Path(args.kit)
+    capabilities_path = kit_dir / "capabilities.json"
+    if not capabilities_path.exists():
+        raise ValueError(f"Existing kit is missing capabilities.json: {kit_dir}")
+    if not _claude_agent_sdk_installed():
+        raise ValueError(
+            "Enhancing an existing kit requires Claude Agent SDK. "
+            "Install it with: pip install agbr[agent]"
+        )
+    if not (getattr(args, "api_key", None) or os.environ.get("ANTHROPIC_API_KEY")):
+        raise ValueError(
+            "Enhancing an existing kit requires ANTHROPIC_API_KEY or --api-key."
+        )
+    raw_capabilities = json.loads(capabilities_path.read_text(encoding="utf-8"))
+    existing_capabilities = [
+        Capability.from_dict(item)
+        for item in raw_capabilities
+        if isinstance(item, dict)
+    ]
+    manifest_path = kit_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    paths = [Path(path) for path in args.paths]
+    generator = AIGenerator(
+        api_key=getattr(args, "api_key", None),
+        base_url=getattr(args, "base_url", None),
+        model=getattr(args, "model", None),
+        timeout=getattr(args, "llm_timeout", None),
+        analysis_mode="agentic",
+        agent_plan_timeout=getattr(args, "agent_plan_timeout", None),
+        agent_batch_timeout=getattr(args, "agent_batch_timeout", None),
+        progress=_print_progress,
+    )
+    kit = AgentKitGenerator(
+        ai_generator=generator,
+        progress=_print_progress,
+        progress_interval=getattr(args, "progress_interval", None),
+        analysis_batch_size=getattr(args, "batch_size", None),
+        resume=bool(getattr(args, "resume", False)),
+        existing_capabilities=existing_capabilities,
+    ).generate(
+        paths,
+        kit_dir,
+        args.name or manifest.get("name") or kit_dir.name,
+    )
+    report = validate_kit(kit_dir)
+    print(format_report(report))
+    if not report.ok:
+        return 2
+    print(
+        f"\nEnhanced {kit_dir} with Claude Agent SDK using "
+        f"{len(existing_capabilities)} existing capabilities as baseline."
+    )
+    print(json.dumps(kit.to_manifest(), indent=2, sort_keys=True))
     return 0
 
 
@@ -480,6 +641,15 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--name", help="Kit name. Defaults to the input directory name.")
     generate.add_argument("--no-ai", action="store_true", help="Generate deterministically without LLM enrichment; intended for schema-only kits such as OpenAPI-to-MCP.")
     _add_llm_options(generate)
+
+    enhance = subparsers.add_parser(
+        "enhance",
+        help="Re-analyze a project with Claude Agent SDK and update an existing kit in place.",
+    )
+    enhance.add_argument("kit", help="Existing generated kit directory to update.")
+    enhance.add_argument("paths", nargs="+", help="Current project files or directories to re-analyze.")
+    enhance.add_argument("--name", help="Optional replacement kit name.")
+    _add_llm_options(enhance)
 
     init = subparsers.add_parser("init", help="Generate, validate, and print next steps for a new AgentBridge kit.")
     init.add_argument("paths", nargs="+", help="Files or directories to inspect.")

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
+
+from agentbridge.discovery import dedupe_capabilities
+from agentbridge.models import Capability
 
 
 class DryRunError(ValueError):
@@ -10,8 +14,7 @@ class DryRunError(ValueError):
 
 
 def dry_run(kit_dir: Path, tool_name: str, args: dict[str, Any], confirmed: bool = False) -> dict[str, Any]:
-    capabilities = load_capabilities(kit_dir)
-    guardrails = json.loads((kit_dir / "guardrails" / "permissions.json").read_text(encoding="utf-8"))
+    capabilities, guardrails = load_runtime_kit(kit_dir)
     capability = capabilities.get(tool_name)
     if not capability:
         raise DryRunError(f"Unknown tool: {tool_name}")
@@ -39,8 +42,62 @@ def dry_run(kit_dir: Path, tool_name: str, args: dict[str, Any], confirmed: bool
 
 
 def load_capabilities(kit_dir: Path) -> dict[str, dict[str, Any]]:
+    capabilities, _guardrails = load_runtime_kit(kit_dir)
+    return capabilities
+
+
+def load_runtime_kit(kit_dir: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     data = json.loads((kit_dir / "capabilities.json").read_text(encoding="utf-8"))
-    return {item["name"]: item for item in data}
+    raw_items = [item for item in data if isinstance(item, dict) and item.get("name")]
+    raw_names = {str(item["name"]) for item in raw_items}
+    raw_items = [
+        item
+        for item in raw_items
+        if not has_available_duplicate_replacement(item, raw_names)
+    ]
+    capabilities: list[Capability] = []
+    original_names: dict[int, str] = {}
+    for item in raw_items:
+        capability = Capability.from_dict(item)
+        original_name = capability.name
+        legacy_match = re.fullmatch(r"(.+)_([2-9][0-9]*)", original_name)
+        if legacy_match and legacy_match.group(1) in raw_names:
+            capability.name = legacy_match.group(1)
+        capabilities.append(capability)
+        original_names[id(capability)] = original_name
+
+    normalized = dedupe_capabilities(capabilities)
+    raw_guardrails = json.loads(
+        (kit_dir / "guardrails" / "permissions.json").read_text(encoding="utf-8")
+    )
+    raw_rules = raw_guardrails.get("tools", {})
+    normalized_rules: dict[str, Any] = {}
+    normalized_capabilities: dict[str, dict[str, Any]] = {}
+    for capability in normalized:
+        normalized_capabilities[capability.name] = capability.to_dict()
+        original_name = original_names[id(capability)]
+        rule = raw_rules.get(original_name)
+        if not isinstance(rule, dict):
+            rule = {
+                "risk": capability.risk,
+                "confirm_required": capability.confirm_required,
+                "transport": capability.transport,
+                "resource": capability.resource,
+                "action": capability.action,
+            }
+        normalized_rules[capability.name] = rule
+
+    guardrails = dict(raw_guardrails)
+    guardrails["tools"] = normalized_rules
+    return normalized_capabilities, guardrails
+
+
+def has_available_duplicate_replacement(item: dict[str, Any], raw_names: set[str]) -> bool:
+    description = str(item.get("description", ""))
+    if "scanner-generated duplicate" not in description.lower():
+        return False
+    match = re.search(r"\buse\s+`?([a-z][a-z0-9_]*)`?\s+instead\b", description, re.IGNORECASE)
+    return bool(match and match.group(1) in raw_names)
 
 
 def validate_args(schema: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:

@@ -31,6 +31,10 @@ agentbridge serve .agentbridge/openapi-kit --base-url http://localhost:8080 --ex
 
 AgentBridge 会将大型项目分析拆成按优先级排序的批次。第一批优先覆盖主能力，然后 CLI 可以询问是否继续增强剩余批次。Claude Agent SDK 批次会把只读工具调用、文件读取、代码搜索和工具返回实时输出到 CLI 进度与 `generation_status.json`。批次进度记录在 `analysis/resume_state.json` 和 `analysis/batches/*.json` 下，`--resume` 会跳过已经完成的批次。如果 Claude Agent SDK 计划或批次卡住，AgentBridge 会按超时切换到本地基础项目分析，先生成可用 kit，并在之后 AI 后端可用时重试 fallback 或 local-basic 检查点。
 
+`agentbridge enhance <kit> <paths>` 会原地更新已有 Kit。该命令强制使用 Claude Agent SDK，将当前扫描证据与已有 AI 推断能力合并，合并重复 transport 操作，并重新生成协议文件。
+
+运行时加载旧 Kit 时也会兼容处理 `_2`、`_3` 等历史数字后缀：相同 transport 操作会合并，不同操作会获得语义化名称，并同步重映射 Guardrail。
+
 `--analysis-mode auto` 会在安装了 `claude-agent-sdk` 时优先使用 Claude Agent SDK，包括 `ANTHROPIC_BASE_URL` 指向 DeepSeek 等 Anthropic 兼容端点的情况。`--analysis-mode agentic` 要求走 SDK 路线，并会把兼容端点继续传给 SDK；`--analysis-mode prompt` 则强制使用直接 prompt 生成。
 
 ## 项目写入边界

@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from agentbridge.agent import AIGenerator
 from agentbridge.client_config import MCPClientConfig, build_clients_readme, build_mcp_client_configs
-from agentbridge.discovery import CapabilityDiscoverer
+from agentbridge.discovery import CapabilityDiscoverer, dedupe_capabilities
 from agentbridge.io import write_json, write_text
 from agentbridge.models import Capability, IntegrationKit, KIT_PROTOCOL_VERSION
 from agentbridge.naming import humanize
@@ -37,6 +37,7 @@ class AgentKitGenerator:
         analysis_batch_size: int | None = None,
         resume: bool = False,
         analysis_capability_limit: int | None = None,
+        existing_capabilities: list[Capability] | None = None,
     ) -> None:
         if not isinstance(ai_generator, AIGenerator):
             raise TypeError(
@@ -54,6 +55,7 @@ class AgentKitGenerator:
         default_batch_size = 10 if getattr(ai_generator, "analysis_mode", "") == "agentic" else 30
         self.analysis_batch_size = configured_batch_size if configured_batch_size is not None else _env_int("AGENTBRIDGE_AI_BATCH_SIZE", default_batch_size)
         self.resume = resume
+        self.existing_capabilities = list(existing_capabilities or [])
 
     def generate(self, input_paths: list[Path], output_dir: Path, name: str | None = None) -> IntegrationKit:
         status_lock = threading.Lock()
@@ -62,7 +64,8 @@ class AgentKitGenerator:
         output_dir.mkdir(parents=True, exist_ok=True)
         self._write_status(output_dir, "discovering", "Discovering candidate capabilities.", lock=status_lock)
         self._progress("Discovering candidate capabilities...")
-        rule_capabilities = self.discoverer.discover(input_paths)
+        discovered_capabilities = self.discoverer.discover(input_paths)
+        rule_capabilities = dedupe_capabilities(discovered_capabilities + self.existing_capabilities)
         kit_name = name or infer_kit_name(input_paths)
         self._progress(f"Discovered {len(rule_capabilities)} candidate capabilities for kit {kit_name!r}.")
         write_json(output_dir / "analysis" / "rule_signals.json", {
@@ -105,7 +108,7 @@ class AgentKitGenerator:
         analyzed_capabilities = ai_result["enhanced_capabilities"]
         existing_names = {cap.name for cap in rule_capabilities}
         extra_capabilities = [cap for cap in analyzed_capabilities if cap.name not in existing_names]
-        capabilities = list(rule_capabilities) + extra_capabilities
+        capabilities = dedupe_capabilities(list(rule_capabilities) + extra_capabilities)
         analysis_capability_count = sum(len(batch) for batch in analysis_batches)
         batch_result_summaries = ai_result.get("rule_signals", {}).get("batch_results", [])
         fallback_batch_count = sum(1 for item in batch_result_summaries if item.get("status") == "fallback")

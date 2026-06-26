@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -8,12 +9,75 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen as url_open
 
 from agentbridge.chat import ChatConfig, ChatSession
 
 
 class ChatWebError(ValueError):
     pass
+
+
+def normalize_target_base_url(value: str) -> str:
+    base_url = value.strip().rstrip("/")
+    if not base_url:
+        raise ChatWebError("Base URL is required in real system mode.")
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ChatWebError("Base URL must start with http:// or https://.")
+    if not parsed.netloc:
+        raise ChatWebError("Base URL must include a host.")
+    return base_url
+
+
+def test_target_connectivity(
+    base_url: str,
+    headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    target = normalize_target_base_url(base_url)
+    started = time.monotonic()
+    request_headers = dict(headers or {})
+    for method in ("HEAD", "GET"):
+        request = Request(target, headers=request_headers, method=method)
+        try:
+            with url_open(request, timeout=timeout) as response:
+                return {
+                    "reachable": True,
+                    "base_url": target,
+                    "method": method,
+                    "status": response.status,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000),
+                }
+        except HTTPError as exc:
+            if exc.code == HTTPStatus.METHOD_NOT_ALLOWED and method == "HEAD":
+                exc.close()
+                continue
+            result = {
+                "reachable": True,
+                "base_url": target,
+                "method": method,
+                "status": exc.code,
+                "elapsed_ms": round((time.monotonic() - started) * 1000),
+            }
+            exc.close()
+            return result
+        except URLError as exc:
+            return {
+                "reachable": False,
+                "base_url": target,
+                "method": method,
+                "error": str(exc.reason),
+                "elapsed_ms": round((time.monotonic() - started) * 1000),
+            }
+    return {
+        "reachable": False,
+        "base_url": target,
+        "method": "GET",
+        "error": "The target did not accept HEAD or GET.",
+        "elapsed_ms": round((time.monotonic() - started) * 1000),
+    }
 
 
 def run_web_chat(config: ChatConfig, host: str = "127.0.0.1", port: int = 8765, allow_kit_switch: bool = False) -> int:
@@ -65,6 +129,10 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                         "pending": session.pending.to_dict() if session.pending else None,
                         "tools": session.tool_summaries(),
                         "conversations": conversation_summaries(session.config, session.config.user, session.config.kit_dir),
+                        "runtime": {
+                            "execute": session.config.execute,
+                            "base_url": session.config.base_url,
+                        },
                     }
                 )
                 return
@@ -72,11 +140,18 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path not in {"/api/chat", "/api/tool"}:
+            if parsed.path not in {"/api/chat", "/api/tool", "/api/connectivity"}:
                 self._send_error(HTTPStatus.NOT_FOUND, "Not found")
                 return
             try:
                 body = self._read_json()
+                if parsed.path == "/api/connectivity":
+                    result = test_target_connectivity(
+                        str(body.get("base_url", "")),
+                        timeout=base_config.timeout,
+                    )
+                    self._send_json(result)
+                    return
                 session = self._session_from_body(body)
                 if parsed.path == "/api/chat":
                     message = format_chat_message_with_attachments(
@@ -99,13 +174,40 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
             user = values.get("user", [base_config.user])[0] or base_config.user
             session_id = values.get("session", [base_config.session_id])[0] or base_config.session_id
             kit_dir = values.get("kit", [str(base_config.kit_dir)])[0] if allow_kit_switch else str(base_config.kit_dir)
-            return get_session(user=user, session_id=session_id, kit_dir=Path(kit_dir))
+            execute, base_url = self._runtime_from_values(values)
+            return get_session(
+                user=user,
+                session_id=session_id,
+                kit_dir=Path(kit_dir),
+                execute=execute,
+                base_url=base_url,
+            )
 
         def _session_from_body(self, body: dict[str, Any]) -> ChatSession:
             user = str(body.get("user") or base_config.user)
             session_id = str(body.get("session_id") or base_config.session_id)
             kit_dir = Path(str(body.get("kit_dir") or base_config.kit_dir)) if allow_kit_switch else base_config.kit_dir
-            return get_session(user=user, session_id=session_id, kit_dir=kit_dir)
+            execute, base_url = self._runtime_from_values(body)
+            return get_session(
+                user=user,
+                session_id=session_id,
+                kit_dir=kit_dir,
+                execute=execute,
+                base_url=base_url,
+            )
+
+        def _runtime_from_values(self, values: dict[str, Any]) -> tuple[bool, str]:
+            raw_execute = values.get("execute", base_config.execute)
+            if isinstance(raw_execute, list):
+                raw_execute = raw_execute[0] if raw_execute else base_config.execute
+            execute = raw_execute is True or str(raw_execute).lower() in {"1", "true", "yes", "on", "execute"}
+            raw_base_url = values.get("base_url", base_config.base_url)
+            if isinstance(raw_base_url, list):
+                raw_base_url = raw_base_url[0] if raw_base_url else base_config.base_url
+            base_url = str(raw_base_url or "").strip()
+            if execute:
+                base_url = normalize_target_base_url(base_url)
+            return execute, base_url
 
         def _read_json(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0"))
@@ -146,11 +248,28 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
         def log_message(self, format: str, *args: Any) -> None:
             return
 
-    def get_session(user: str, session_id: str, kit_dir: Path) -> ChatSession:
+    def get_session(
+        user: str,
+        session_id: str,
+        kit_dir: Path,
+        execute: bool,
+        base_url: str,
+    ) -> ChatSession:
         key = f"{user}:{session_id}:{kit_dir}"
         if key not in sessions:
-            sessions[key] = ChatSession(replace(base_config, user=user, session_id=session_id, kit_dir=kit_dir))
-        return sessions[key]
+            sessions[key] = ChatSession(
+                replace(
+                    base_config,
+                    user=user,
+                    session_id=session_id,
+                    kit_dir=kit_dir,
+                    execute=execute,
+                    base_url=base_url,
+                )
+            )
+        session = sessions[key]
+        session.update_runtime(base_url=base_url, execute=execute)
+        return session
 
     return ChatHandler
 
@@ -629,6 +748,37 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       font-size: 13px;
       overflow-wrap: anywhere;
     }}
+    .tool-button {{
+      width: 100%;
+      padding: 10px 8px;
+      border-top: 1px solid var(--line);
+      border-radius: 0;
+      background: transparent;
+      color: var(--ink);
+      text-align: left;
+    }}
+    .tool-button:hover {{
+      background: #eef3f0;
+      transform: none;
+    }}
+    .tool-button strong {{
+      display: block;
+      overflow-wrap: anywhere;
+      font-size: 13px;
+    }}
+    .tool-params {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 6px;
+    }}
+    .param-chip {{
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: #e9eeea;
+      color: #536058;
+      font-size: 11px;
+    }}
     .pending {{
       margin-top: 18px;
       border-left: 3px solid var(--danger);
@@ -637,6 +787,53 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     }}
     .pending.show {{
       display: block;
+    }}
+    .approval-card {{
+      display: none;
+      max-width: 820px;
+      margin: 0 auto 10px;
+      padding: 12px 14px;
+      border: 1px solid #e2c8a8;
+      border-radius: 12px;
+      background: #fff9f0;
+      color: #3c2e20;
+      box-shadow: 0 8px 22px rgba(58, 42, 24, .08);
+    }}
+    .approval-card.show {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+    }}
+    .approval-copy {{
+      min-width: 0;
+    }}
+    .approval-title {{
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    .approval-actions {{
+      display: flex;
+      flex: 0 0 auto;
+      gap: 8px;
+    }}
+    .usage-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 14px;
+    }}
+    .usage-stat {{
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }}
+    .usage-stat strong {{
+      display: block;
+      margin-top: 3px;
+      font-size: 18px;
+      font-variant-numeric: tabular-nums;
     }}
     .actions {{
       display: flex;
@@ -726,6 +923,84 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       margin-top: 1px;
       color: var(--muted);
       font-size: 12px;
+    }}
+    .runtime-controls {{
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      min-width: 0;
+    }}
+    .runtime-mode {{
+      display: inline-flex;
+      padding: 3px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #f1f3f0;
+    }}
+    .runtime-mode button {{
+      min-height: 34px;
+      padding: 6px 10px;
+      border-radius: 7px;
+      background: transparent;
+      color: #59645d;
+      font-size: 12px;
+      font-weight: 650;
+    }}
+    .runtime-mode button:hover {{
+      transform: none;
+      color: var(--ink);
+    }}
+    .runtime-mode button.active {{
+      background: #fff;
+      color: var(--ink);
+      box-shadow: 0 1px 4px rgba(30, 38, 33, .12);
+    }}
+    .runtime-target {{
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }}
+    .runtime-target[hidden] {{
+      display: none;
+    }}
+    .runtime-target input {{
+      width: min(32vw, 310px);
+      min-width: 180px;
+      height: 36px;
+      margin: 0;
+      padding: 7px 9px;
+      border-radius: 8px;
+      font-size: 13px;
+    }}
+    .connection-button {{
+      min-width: 92px;
+      height: 36px;
+      padding: 7px 10px;
+      border-radius: 8px;
+      background: #e5ebe7;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 650;
+    }}
+    .connection-button:hover {{
+      transform: none;
+      background: #dbe4de;
+    }}
+    .connection-status {{
+      max-width: 220px;
+      color: var(--muted);
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .connection-status.success {{
+      color: #08705a;
+    }}
+    .connection-status.error {{
+      color: var(--danger);
     }}
     .mobile-menu {{
       display: none;
@@ -984,9 +1259,30 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       }}
       .top, .chat-header {{
         padding: 9px 12px;
+        align-items: flex-start;
+        flex-wrap: wrap;
       }}
       .header-meta {{
         display: none;
+      }}
+      .runtime-controls {{
+        width: 100%;
+        justify-content: flex-start;
+        flex-wrap: wrap;
+        padding-left: 54px;
+      }}
+      .runtime-target {{
+        width: 100%;
+      }}
+      .runtime-target input {{
+        width: 100%;
+        min-width: 0;
+        flex: 1;
+      }}
+      .connection-status {{
+        width: 100%;
+        max-width: none;
+        padding-left: 2px;
       }}
       .messages, .message-stream {{
         padding: 24px 16px 30px;
@@ -1000,6 +1296,13 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       }}
       .composer, .composer-dock {{
         padding: 10px 12px max(12px, env(safe-area-inset-bottom));
+      }}
+      .approval-card.show {{
+        align-items: stretch;
+        flex-direction: column;
+      }}
+      .approval-actions button {{
+        flex: 1;
       }}
       .composer-hint {{
         display: none;
@@ -1048,6 +1351,9 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       <button class="rail-button" type="button" data-drawer="tools" title="Available tools" aria-label="Available tools">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.7 6.3 3-3a4.2 4.2 0 0 1-5.4 5.4l-7.6 7.6a2.1 2.1 0 0 0 3 3l7.6-7.6a4.2 4.2 0 0 0 5.4-5.4l-3 3"></path></svg>
       </button>
+      <button class="rail-button" id="usageButton" type="button" data-drawer="usage" title="AI usage" aria-label="AI usage">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V9m7 10V5m7 14v-7"></path></svg>
+      </button>
       <div class="rail-spacer"></div>
       <button class="rail-button" id="newChatBtn" type="button" title="New chat" aria-label="New chat">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
@@ -1064,10 +1370,36 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
             <div class="header-meta">Chat with the active integration kit</div>
           </div>
         </div>
-        <div class="mode">{'Execute' if config.execute else 'Dry-run'} mode</div>
+        <div class="runtime-controls">
+          <div class="runtime-mode" id="runtimeMode" role="group" aria-label="Runtime mode">
+            <button type="button" data-mode="dry-run" aria-pressed="false">Dry-run</button>
+            <button type="button" data-mode="execute" aria-pressed="false">Real system</button>
+          </div>
+          <div class="runtime-target" id="runtimeTarget" hidden>
+            <input
+              id="baseUrl"
+              type="url"
+              value="{escape_attr(config.base_url)}"
+              placeholder="http://localhost:8080"
+              aria-label="Target system base URL"
+            >
+            <button class="connection-button" id="testConnectionBtn" type="button">Test connection</button>
+            <span class="connection-status" id="connectionStatus" aria-live="polite"></span>
+          </div>
+        </div>
       </div>
       <div class="messages message-stream reading-column" id="messages" aria-live="polite"></div>
       <div class="composer composer-dock">
+        <div class="approval-card" id="pending">
+          <div class="approval-copy">
+            <div class="approval-title">Authorization required</div>
+            <div class="subtle" id="pendingText"></div>
+          </div>
+          <div class="approval-actions">
+            <button id="confirmBtn" type="button">Authorize</button>
+            <button class="secondary" id="cancelBtn" type="button">Cancel</button>
+          </div>
+        </div>
         <div class="composer-shell composer-card">
           <div class="command-menu" id="commandMenu">
             <button class="suggestion" data-command="/tools"><strong>/tools</strong><span class="subtle">List tools in the active kit</span></button>
@@ -1120,17 +1452,19 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
           <div class="field-help">{kit_help}</div>
         </section>
         <section class="drawer-pane" data-pane="tools">
-          <div class="subtle">Tools loaded from the active kit.</div>
+          <div class="subtle">Select a tool to insert a runnable command and its required parameters.</div>
           <div class="tools" id="tools"></div>
         </section>
-        <div class="pending" id="pending">
-          <strong>Confirmation required</strong>
-          <div class="subtle" id="pendingText"></div>
-          <div class="actions">
-            <button id="confirmBtn">Confirm</button>
-            <button class="secondary" id="cancelBtn">Cancel</button>
+        <section class="drawer-pane" data-pane="usage" id="usagePanel">
+          <div class="subtle">Claude Agent SDK token usage for the current session.</div>
+          <div class="usage-grid">
+            <div class="usage-stat"><span class="subtle">Last input</span><strong id="usageInput">0</strong></div>
+            <div class="usage-stat"><span class="subtle">Last output</span><strong id="usageOutput">0</strong></div>
+            <div class="usage-stat"><span class="subtle">Last total</span><strong id="usageTotal">0</strong></div>
+            <div class="usage-stat"><span class="subtle">Session total</span><strong id="usageSessionTotal">0</strong></div>
           </div>
-        </div>
+          <div class="field-help" id="usageMeta">Usage appears after an AI response.</div>
+        </section>
       </div>
     </aside>
     <button class="drawer-backdrop" id="drawerBackdrop" type="button" aria-label="Close navigation"></button>
@@ -1138,7 +1472,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
   <script src="/assets/markdown-it.min.js"></script>
   <script>
     const allowKitSwitch = {allow_switch};
-    const executeMode = {execute};
+    const initialExecuteMode = {execute};
     const els = {{
       user: document.getElementById('user'),
       session: document.getElementById('session'),
@@ -1155,11 +1489,22 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       pendingText: document.getElementById('pendingText'),
       contextDrawer: document.getElementById('contextDrawer'),
       drawerTitle: document.getElementById('drawerTitle'),
-      drawerBackdrop: document.getElementById('drawerBackdrop')
+      drawerBackdrop: document.getElementById('drawerBackdrop'),
+      runtimeMode: document.getElementById('runtimeMode'),
+      runtimeTarget: document.getElementById('runtimeTarget'),
+      baseUrl: document.getElementById('baseUrl'),
+      testConnection: document.getElementById('testConnectionBtn'),
+      connectionStatus: document.getElementById('connectionStatus'),
+      usageInput: document.getElementById('usageInput'),
+      usageOutput: document.getElementById('usageOutput'),
+      usageTotal: document.getElementById('usageTotal'),
+      usageSessionTotal: document.getElementById('usageSessionTotal'),
+      usageMeta: document.getElementById('usageMeta')
     }};
     let toolsCache = [];
     let attachments = [];
     let sendInFlight = false;
+    let runtimeExecute = initialExecuteMode;
     const markdownRenderer = window.markdownit ? window.markdownit({{
       html: false,
       linkify: true,
@@ -1174,19 +1519,75 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     const drawerTitles = {{
       conversations: 'Recent conversations',
       context: 'Chat context',
-      tools: 'Available tools'
+      tools: 'Available tools',
+      usage: 'AI usage'
     }};
     function payload(extra = {{}}) {{
       return Object.assign({{
         user: els.user.value,
         session_id: els.session.value,
-        kit_dir: allowKitSwitch ? els.kit.value : undefined
+        kit_dir: allowKitSwitch ? els.kit.value : undefined,
+        execute: runtimeExecute,
+        base_url: runtimeExecute ? els.baseUrl.value.trim() : ''
       }}, extra);
     }}
     function stateQuery() {{
       const qs = new URLSearchParams({{ user: els.user.value, session: els.session.value }});
       if (allowKitSwitch) qs.set('kit', els.kit.value);
+      qs.set('execute', runtimeExecute ? 'true' : 'false');
+      if (runtimeExecute) qs.set('base_url', els.baseUrl.value.trim());
       return qs;
+    }}
+    function setConnectionStatus(message = '', state = '') {{
+      els.connectionStatus.textContent = message;
+      els.connectionStatus.className = 'connection-status' + (state ? ' ' + state : '');
+    }}
+    function validRuntimeBaseUrl(showError = true) {{
+      if (!runtimeExecute) return true;
+      const value = els.baseUrl.value.trim();
+      try {{
+        const parsed = new URL(value);
+        if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.host) throw new Error();
+        return true;
+      }} catch (error) {{
+        if (showError) setConnectionStatus('Enter a valid http(s) Base URL.', 'error');
+        return false;
+      }}
+    }}
+    function applyRuntimeMode(mode, reload = true) {{
+      runtimeExecute = mode === 'execute';
+      els.runtimeMode.querySelectorAll('[data-mode]').forEach(button => {{
+        const active = button.dataset.mode === mode;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      }});
+      els.runtimeTarget.hidden = !runtimeExecute;
+      renderPending(null);
+      setConnectionStatus();
+      if (reload && validRuntimeBaseUrl(false)) loadState();
+      if (runtimeExecute && !els.baseUrl.value.trim()) {{
+        setConnectionStatus('Base URL is required for real system mode.', 'error');
+        els.baseUrl.focus();
+      }}
+    }}
+    async function testConnectivity() {{
+      if (!validRuntimeBaseUrl(true)) return;
+      els.testConnection.disabled = true;
+      setConnectionStatus('Testing...');
+      try {{
+        const data = await post('/api/connectivity', {{ base_url: els.baseUrl.value.trim() }});
+        if (data.error) {{
+          setConnectionStatus(data.error, 'error');
+        }} else if (data.reachable) {{
+          setConnectionStatus('Reachable · HTTP ' + data.status + ' · ' + data.elapsed_ms + ' ms', 'success');
+        }} else {{
+          setConnectionStatus('Unreachable · ' + (data.error || 'Connection failed'), 'error');
+        }}
+      }} catch (error) {{
+        setConnectionStatus('Connection test failed.', 'error');
+      }} finally {{
+        els.testConnection.disabled = false;
+      }}
     }}
     function isSafeLink(value) {{
       const href = String(value || '').trim();
@@ -1294,6 +1695,10 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     async function sendMessage(text) {{
       if (sendInFlight) return;
       if (!text.trim() && !attachments.length) return;
+      if (!validRuntimeBaseUrl(true)) {{
+        els.baseUrl.focus();
+        return;
+      }}
       setSending(true);
       try {{
         addMessage('user', displayTextWithAttachments(text));
@@ -1309,6 +1714,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         }}
         addMessage('assistant', data.message);
         renderPending(data.pending);
+        renderUsage(data.usage || {{}});
         if (data.tools && data.tools.length) renderTools(data.tools);
         if (data.conversations) renderConversations(data.conversations);
       }} catch (error) {{
@@ -1327,15 +1733,60 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       const transport = plan.transport || {{}};
       els.pendingText.textContent = pending.tool + ' · ' + plan.risk + ' · ' + (transport.method || transport.type || '') + ' ' + (transport.path || '');
     }}
+    function formatNumber(value) {{
+      return new Intl.NumberFormat().format(Number(value || 0));
+    }}
+    function renderUsage(usage = {{}}) {{
+      els.usageInput.textContent = formatNumber(usage.input_tokens);
+      els.usageOutput.textContent = formatNumber(usage.output_tokens);
+      els.usageTotal.textContent = formatNumber(usage.total_tokens);
+      els.usageSessionTotal.textContent = formatNumber(usage.session_total_tokens);
+      const meta = [];
+      if (usage.turns) meta.push(usage.turns + ' turns');
+      if (usage.duration_ms) meta.push(formatNumber(usage.duration_ms) + ' ms');
+      if (usage.session_cost_usd) meta.push('$' + Number(usage.session_cost_usd).toFixed(4));
+      els.usageMeta.textContent = meta.join(' · ') || 'Usage appears after an AI response.';
+    }}
+    function buildToolCommand(tool) {{
+      const params = (tool.required || []).map(name => name + '=');
+      return '/run ' + tool.name + (params.length ? ' ' + params.join(' ') : '');
+    }}
+    function insertToolCommand(tool) {{
+      els.message.value = buildToolCommand(tool);
+      els.message.dispatchEvent(new Event('input'));
+      closeDrawer();
+      els.message.focus();
+      const firstValue = els.message.value.indexOf('=');
+      if (firstValue >= 0) els.message.setSelectionRange(firstValue + 1, firstValue + 1);
+    }}
     function renderTools(tools) {{
       toolsCache = tools;
       els.tools.innerHTML = '';
       tools.forEach(tool => {{
-        const node = document.createElement('div');
-        node.className = 'tool';
-        node.innerHTML = '<strong></strong><div class="subtle"></div>';
+        const node = document.createElement('button');
+        node.type = 'button';
+        node.className = 'tool-button';
+        node.innerHTML = '<strong></strong><div class="subtle"></div><div class="tool-params"></div>';
         node.querySelector('strong').textContent = tool.name + ' [' + tool.risk + ']';
-        node.querySelector('.subtle').textContent = 'Required: ' + ((tool.required || []).join(', ') || 'none');
+        node.querySelector('.subtle').textContent = tool.description || '';
+        const params = node.querySelector('.tool-params');
+        const required = tool.required || [];
+        if (!required.length) {{
+          const chip = document.createElement('span');
+          chip.className = 'param-chip';
+          chip.textContent = 'No required parameters';
+          params.appendChild(chip);
+        }} else {{
+          required.forEach(name => {{
+            const schema = (tool.property_schemas || {{}})[name] || {{}};
+            const chip = document.createElement('span');
+            chip.className = 'param-chip';
+            chip.textContent = name + (schema.type ? ' · ' + schema.type : '');
+            chip.title = schema.description || name;
+            params.appendChild(chip);
+          }});
+        }}
+        node.onclick = () => insertToolCommand(tool);
         els.tools.appendChild(node);
       }});
       renderCommandMenu();
@@ -1352,9 +1803,11 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       ];
       if (text.startsWith('/run')) {{
         toolsCache.slice(0, 12).forEach(tool => items.push({{
-          command: '/run ' + tool.name + ' ',
+          command: buildToolCommand(tool),
           title: tool.name,
-          detail: 'Required: ' + ((tool.required || []).join(', ') || 'none')
+          detail: (tool.required || []).length
+            ? 'Required parameters: ' + tool.required.join(', ')
+            : 'No required parameters'
         }}));
       }} else if (text.startsWith('/')) {{
         baseCommands
@@ -1431,15 +1884,29 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       );
     }}
     async function loadState() {{
+      if (!validRuntimeBaseUrl(false)) return;
       const data = await fetch('/api/state?' + stateQuery().toString()).then(r => r.json());
+      if (data.error) {{
+        setConnectionStatus(data.error, 'error');
+        return;
+      }}
       els.messages.innerHTML = '';
       (data.history || []).forEach(item => addMessage(item.role, item.content));
       renderPending(data.pending);
       renderTools(data.tools || []);
       renderConversations(data.conversations || []);
+      renderUsage(data.usage || {{}});
     }}
     document.getElementById('send').onclick = () => sendMessage(els.message.value);
     document.getElementById('attachBtn').onclick = () => els.fileInput.click();
+    els.runtimeMode.querySelectorAll('[data-mode]').forEach(button => {{
+      button.addEventListener('click', () => applyRuntimeMode(button.dataset.mode));
+    }});
+    els.testConnection.onclick = testConnectivity;
+    els.baseUrl.addEventListener('input', () => setConnectionStatus());
+    els.baseUrl.addEventListener('change', () => {{
+      if (runtimeExecute && validRuntimeBaseUrl(true)) loadState();
+    }});
     document.querySelectorAll('[data-drawer]').forEach(button => {{
       button.addEventListener('click', () => {{
         const isSameOpenDrawer = els.contextDrawer.classList.contains('open') &&
@@ -1502,6 +1969,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       loadState();
       loadConversations();
     }}));
+    applyRuntimeMode(initialExecuteMode ? 'execute' : 'dry-run', false);
     loadState();
     loadConversations();
   </script>
