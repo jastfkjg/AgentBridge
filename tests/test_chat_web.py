@@ -368,7 +368,7 @@ class WebChatTests(unittest.TestCase):
 
             html = render_index(config, allow_kit_switch=True)
 
-            self.assertIn("Choose any generated kit directory for this session.", html)
+            self.assertIn("Choose any generated Agent Integration Kit directory for this session.", html)
             self.assertNotIn('id="kit" value="' + str(kit) + '" disabled', html)
 
     def test_rendered_web_ui_supports_runtime_mode_switch_and_connectivity_test(self):

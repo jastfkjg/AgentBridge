@@ -1,27 +1,38 @@
 # 架构
 
-AgentBridge 采用 AI agent 优先的生成流水线，同时保留确定性扫描器作为候选证据收集层。
+AgentBridge 将现有项目或系统转换为可被 Claude 控制的工具层。生成流水线以 AI agent 分析为主，同时保留确定性扫描器作为 API、Schema、路由、数据库定义和其他系统信号的低成本证据层。
 
-## 流程
+## 标准流程
 
-1. 候选发现器扫描 OpenAPI、GraphQL、SQL、路由和数据库定义。
+```text
+现有项目/系统
+  -> 解析项目 / API / 数据库 / GraphQL / 后台任务证据
+  -> 标准化能力 capabilities
+  -> Agent Integration Kit
+  -> Claude Agent SDK / MCP / Web Chat
+  -> 受控操作 API / 数据库 / GraphQL / 后台任务
+```
+
+1. 候选发现器扫描 OpenAPI、GraphQL、SQL、源码路由、数据库定义和其他系统证据。
 2. 对项目目录，AI 分析 agent 优先使用 Claude Agent SDK 进行 agentic 探索，读取项目代码和候选证据，并可通过分批检查点支持 resume；对 schema-only 输入，`--no-ai` 可以产出确定性可运行 kit。
 3. AI agent 产出项目分析、风险推理、增强能力、skills、prompts，以及大型项目的可选分批检查点。
-4. 生成器写入 `agentbridge-kit/v1` 协议目录。
-5. `agentbridge serve` 将套件作为 stdio MCP Server 暴露给 Claude、Codex 或其他 MCP client。
-6. `agentbridge chat` 和 `agentbridge web` 在同一套 kit runtime 上提供面向用户的聊天入口。
+4. 生成器写入 `agentbridge-kit/v1` 协议目录。这个 kit 是已解析系统能力与 agent-facing 工具入口之间的版本化契约。
+5. `agentbridge serve` 将 kit 作为 stdio MCP Server 暴露给 Claude、Codex 或其他 MCP client。
+6. `agentbridge chat` 和 `agentbridge web` 在同一套 kit runtime 上提供 Claude Agent Chat 控制入口。
 7. 运行时工具在执行宿主系统 adapter 前，先执行 guardrails 和 dry-run 校验。
 
-## 第一阶段 MVP
+## 当前 MVP
 
-当前 MVP 聚焦一条最短闭环：
+当前最短闭环是 OpenAPI/HTTP 到可运行的 MCP 或 Chat 控制入口：
 
 ```bash
 agentbridge generate openapi.json --output .agentbridge/openapi-kit --no-ai
 agentbridge serve .agentbridge/openapi-kit --base-url http://localhost:8080 --execute
 ```
 
-这条 schema-only 路径不依赖 LLM。OpenAPI 操作会被标准化为能力，套件会生成 MCP 工具定义、guardrails、dry-run plan、skills 和 system prompt。`serve` 默认 dry-run；只有显式 `--execute` 才会通过 HTTP adapter 调用目标系统。
+这条 schema-only 路径不依赖 LLM。OpenAPI 操作会被标准化为能力，kit 会生成 MCP 工具定义、guardrails、dry-run plan、skills 和 system prompt。`serve` 默认 dry-run；只有显式 `--execute` 才会通过 HTTP adapter 调用目标系统。
+
+GraphQL、数据库和后台任务证据目前可以被发现并表示为能力。真实执行当前主要覆盖 HTTP/OpenAPI transport；后续会扩展更多执行 adapter。
 
 ## 为什么仍然保留规则
 
@@ -45,7 +56,7 @@ AgentBridge 在发现和生成阶段不得修改目标项目。所有生成产�
 
 执行边界分两层：
 
-- 默认模式：MCP tool call 返回计划调用，不触发目标系统副作用。
+- 默认模式：MCP 和 Chat tool call 返回计划调用，不触发目标系统副作用。
 - 执行模式：`--execute` 开启真实 HTTP 调用，但高风险工具仍必须传入 `confirmed: true`。
 
 聊天入口额外提供会话记忆和 human-in-the-loop 确认。高风险操作会作为 pending call 保存，直到用户确认或取消。

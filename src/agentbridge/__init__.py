@@ -1,4 +1,4 @@
-"""AgentBridge generates Agent Integration Kits for existing systems using LLM-powered generation."""
+"""AgentBridge parses existing systems into Claude-controllable Agent Integration Kits."""
 
 from agentbridge.agent import AIGenerator
 from agentbridge.generator import AgentKitGenerator

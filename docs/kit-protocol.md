@@ -2,7 +2,15 @@
 
 Current protocol: `agentbridge-kit/v1`
 
-An AgentBridge kit is a stable directory generated for an existing system. Agent runtimes, MCP servers, SDK adapters, CI checks, and dry-run tools should read `manifest.json` first, then resolve files through its `outputs` field.
+An AgentBridge kit is the versioned contract between parsed existing-system capabilities and Claude-facing tool surfaces. Agent runtimes, MCP servers, SDK adapters, CI checks, and dry-run tools should read `manifest.json` first, then resolve files through its `outputs` field.
+
+```text
+Existing system evidence
+  -> capabilities.json
+  -> Agent Integration Kit files
+  -> Claude Agent SDK / MCP / Web Chat tools
+  -> guarded target-system operations
+```
 
 ## Required Structure
 
@@ -43,6 +51,7 @@ agent-kit/
 - `analysis/agent_analysis.json` stores project understanding, workflows, assumptions, side effects, and risk reasoning from the AI agent or static generator.
 - `capabilities.json` is the normalized capability list used for tool generation and runtime execution.
 - `tools/mcp_tools.json` can be exposed as stdio MCP tools by `agentbridge serve`.
+- `tools/claude_tools.json` and generated prompts describe the same capabilities for Claude-facing integrations.
 - `guardrails/permissions.json` is the authority for runtime safety decisions.
 - `clients/mcp-client-configs.json` contains Claude/Codex/generic MCP setup snippets.
 - `dry_run_plan.json` describes planned calls without real side effects.
@@ -58,16 +67,16 @@ These files are additive and are not required for `agentbridge-kit/v1` consumers
 
 ## MCP Server Runtime
 
-`agentbridge serve <kit>` reads `manifest.json`, `capabilities.json`, and `guardrails/permissions.json`, then exposes MCP `tools/list` and `tools/call` over stdio JSON-RPC.
+`agentbridge serve <kit>` reads `manifest.json`, `capabilities.json`, and `guardrails/permissions.json`, then exposes the generated tool layer as MCP `tools/list` and `tools/call` over stdio JSON-RPC.
 
 - By default it does not execute real requests and returns dry-run plans only.
 - With `--execute`, HTTP transport tools call the target system pointed to by `--base-url`.
 - `destructive` and `external_side_effect` tools require callers to pass `confirmed: true`.
-- The current execution adapter focuses on OpenAPI/HTTP transports; GraphQL, database, and additional SDK adapters are planned.
+- The current execution adapter focuses on OpenAPI/HTTP transports; GraphQL, database, background-job, and additional SDK adapters are planned.
 
 ## Chat Runtime
 
-`agentbridge chat <kit>` and `agentbridge web <kit>` consume the same kit files and runtime guardrails. Chat memory stores recent transcript and pending confirmations outside the stable protocol files, by default at `<kit>/.agentbridge-chat-memory.json`.
+`agentbridge chat <kit>` and `agentbridge web <kit>` consume the same kit files and runtime guardrails to provide Claude Agent chat control surfaces over parsed system capabilities. Chat memory stores recent transcript and pending confirmations outside the stable protocol files, by default at `<kit>/.agentbridge-chat-memory.json`.
 
 ## Target Project Boundary
 

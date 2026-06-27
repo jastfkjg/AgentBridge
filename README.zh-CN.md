@@ -1,18 +1,30 @@
 # AgentBridge
 
-AgentBridge 用于分析已有项目，并生成版本化的 Agent Integration Kit，其中包含工具、提示词、技能、资源 Schema、Guardrail、Dry-run 计划和测试。
+AgentBridge 将现有项目和系统自动解析为可通过 Claude Agent Chat 控制的版本化工具层。它会收集系统证据，标准化为能力模型，打包成 Agent Integration Kit，并通过 Claude Agent SDK、MCP、终端 Chat 和 Web Chat 暴露出来。
+
+```text
+现有项目/系统
+  -> 解析项目 / API / 数据库 / GraphQL / 后台任务证据
+  -> 标准化能力 capabilities
+  -> Agent Integration Kit
+  -> Claude Agent SDK / MCP / Web Chat
+  -> 受控操作 API / 数据库 / GraphQL / 后台任务
+```
 
 [English](README.md)
 
 ## 核心能力
 
 - 使用 Claude Agent SDK 进行 AI 优先的项目分析。
-- 从 OpenAPI、GraphQL、SQL 和源码路由收集候选能力。
-- 同时生成 MCP、Claude、OpenAI 和 Vercel AI 工具定义。
-- 通过 Web 或终端 Chat 操作生成的 Kit。
+- 从 OpenAPI、GraphQL、SQL、数据库 Schema 和源码路由收集候选能力。
+- 生成稳定的 `agentbridge-kit/v1` 协议目录，包含能力、工具、提示词、技能、资源 Schema、Guardrail、Dry-run 计划、客户端配置和测试。
+- 从同一套能力模型生成 Claude Agent SDK、MCP、Claude、OpenAI 和 Vercel AI 工具定义。
+- 通过 Web 或终端 Chat 在生成的工具层上控制系统能力。
 - 默认 Dry-run，高风险操作需要用户明确授权。
 - 支持会话历史、点击调用工具、必填参数提示、文件上传和 AI Token 用量。
 - 项目变化后可在已有 Kit 基础上继续分析。
+
+当前真实执行主要覆盖 HTTP/OpenAPI transport。GraphQL、数据库和后台任务目前可作为能力证据被发现，后续会扩展为执行 adapter。
 
 ## 安装
 
@@ -79,7 +91,7 @@ agentbridge enhance .agentbridge/my-system-kit ./my-system --resume
 agentbridge web .agentbridge/my-system-kit --port 8765
 ```
 
-打开命令输出的 URL。Web 页面支持：
+打开命令输出的 URL。Web 页面是面向已解析系统能力的 Claude Agent Chat 控制入口，支持：
 
 - 切换 Dry-run 和真实系统模式。
 - Base URL 校验和连通测试。
@@ -121,6 +133,8 @@ agentbridge chat .agentbridge/my-system-kit
 
 ## 启动 MCP Server
 
+将生成的 Agent Integration Kit 暴露为 MCP tools。
+
 Dry-run：
 
 ```bash
@@ -155,13 +169,13 @@ agentbridge mcp-config .agentbridge/my-system-kit --write
 | 命令 | 作用 |
 | --- | --- |
 | `discover <paths>` | 输出确定性候选能力 |
-| `generate <paths> -o <kit>` | 生成新 Kit |
+| `generate <paths> -o <kit>` | 生成可被 Claude 控制的 Agent Integration Kit |
 | `enhance <kit> <paths>` | 使用 Claude Agent SDK 更新已有 Kit |
 | `validate <kit>` | 验证 Kit 协议和安全约束 |
 | `doctor <kit>` | 检查运行配置 |
-| `web <kit>` | 启动浏览器 Chat |
-| `chat <kit>` | 启动终端 Chat |
-| `serve <kit>` | 启动 stdio MCP Server |
+| `web <kit>` | 在工具层上启动浏览器 Chat |
+| `chat <kit>` | 在工具层上启动终端 Chat |
+| `serve <kit>` | 将 Kit 暴露为 stdio MCP Server |
 | `dry-run <kit> <tool>` | 预览单次工具调用 |
 | `mcp-config <kit>` | 生成 MCP 客户端配置 |
 

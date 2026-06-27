@@ -1,6 +1,6 @@
-# OpenAPI to Runnable MCP Server
+# MCP Runtime
 
-AgentBridge's first MVP path turns an existing OpenAPI schema into an MCP environment that Claude, Codex, or any MCP client can operate.
+MCP is one exposure path for the AgentBridge tool layer. A generated Agent Integration Kit can be served as stdio MCP tools so Claude, Codex, or any MCP-compatible client can inspect, dry-run, and safely operate parsed system capabilities.
 
 ## Quick Start
 
@@ -93,9 +93,9 @@ OpenAPI HTTP transports are mapped into requests:
 
 `tools/list` converts `capabilities.json` into MCP tools. High-risk tools include an extra `confirmed` parameter so clients can express explicit human confirmation.
 
-## MVP Boundary
+## Current Boundary
 
-Current focus:
+Current execution support:
 
 - Implemented: OpenAPI discovery, kit generation, stdio MCP server, HTTP execution, dry-run, confirmation parameter.
-- Planned: GraphQL adapter, database adapter, and richer agent planning.
+- Planned: GraphQL adapter, database adapter, background-job adapter, and richer agent planning.

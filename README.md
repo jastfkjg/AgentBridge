@@ -1,18 +1,30 @@
 # AgentBridge
 
-AgentBridge analyzes an existing project and generates a versioned Agent Integration Kit containing tools, prompts, skills, schemas, guardrails, dry-run plans, and tests.
+AgentBridge automatically parses existing projects and systems into a versioned tool layer controllable by Claude Agent chat. It discovers system evidence, normalizes it into capabilities, packages those capabilities as an Agent Integration Kit, and exposes the kit through Claude Agent SDK, MCP, terminal chat, and Web Chat.
+
+```text
+Existing project/system
+  -> parse project/API/DB/GraphQL/job evidence
+  -> normalized capabilities
+  -> Agent Integration Kit
+  -> Claude Agent SDK / MCP / Web Chat
+  -> controlled APIs / DB / GraphQL / background jobs
+```
 
 [中文](README.zh-CN.md)
 
 ## What It Provides
 
 - AI-first project analysis with Claude Agent SDK.
-- Candidate discovery from OpenAPI, GraphQL, SQL, and source routes.
-- MCP, Claude, OpenAI, and Vercel AI tool definitions.
-- Browser and terminal chat over the generated kit.
+- Candidate discovery from OpenAPI, GraphQL, SQL, database schemas, and source routes.
+- A stable `agentbridge-kit/v1` contract containing capabilities, tools, prompts, skills, schemas, guardrails, dry-run plans, client configs, and tests.
+- Claude Agent SDK, MCP, Claude, OpenAI, and Vercel AI tool definitions generated from the same capability model.
+- Browser and terminal chat control surfaces over the generated tool layer.
 - Dry-run by default, runtime policy controls, and explicit authorization for high-risk operations.
 - Session history, clickable tool invocation, required-parameter guidance, file attachments, and AI token usage.
-- In-place re-analysis of an existing kit when the project changes.
+- In-place re-analysis of an existing kit when the source system changes.
+
+Current real execution focuses on HTTP/OpenAPI transports. GraphQL, database, and background-job surfaces are discovered as capability evidence today and are planned execution-adapter targets.
 
 ## Install
 
@@ -79,7 +91,7 @@ agentbridge enhance .agentbridge/my-system-kit ./my-system --resume
 agentbridge web .agentbridge/my-system-kit --port 8765
 ```
 
-Open the printed URL. The Web UI supports:
+Open the printed URL. The Web UI acts as a Claude Agent chat control surface over the parsed system capabilities and supports:
 
 - Dry-run and real-system mode switching.
 - Base URL validation and connectivity testing.
@@ -121,6 +133,8 @@ Useful commands:
 
 ## Run as an MCP Server
 
+Expose the generated Agent Integration Kit as MCP tools.
+
 Dry-run:
 
 ```bash
@@ -155,13 +169,13 @@ agentbridge mcp-config .agentbridge/my-system-kit --write
 | Command | Purpose |
 | --- | --- |
 | `discover <paths>` | Print deterministic candidate capabilities |
-| `generate <paths> -o <kit>` | Generate a new kit |
+| `generate <paths> -o <kit>` | Generate a Claude-controllable Agent Integration Kit |
 | `enhance <kit> <paths>` | Re-analyze and update an existing kit with Claude Agent SDK |
 | `validate <kit>` | Validate kit protocol and safety contracts |
 | `doctor <kit>` | Check runtime readiness |
-| `web <kit>` | Start browser chat |
-| `chat <kit>` | Start terminal chat |
-| `serve <kit>` | Start stdio MCP server |
+| `web <kit>` | Start browser chat over the tool layer |
+| `chat <kit>` | Start terminal chat over the tool layer |
+| `serve <kit>` | Expose the kit as a stdio MCP server |
 | `dry-run <kit> <tool>` | Preview one tool invocation |
 | `mcp-config <kit>` | Generate MCP client configuration |
 

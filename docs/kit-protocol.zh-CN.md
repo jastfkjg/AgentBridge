@@ -2,7 +2,15 @@
 
 当前协议：`agentbridge-kit/v1`
 
-AgentBridge 套件是为已有系统生成的稳定目录。Agent 运行时、MCP Server、SDK Adapter、CI 检查和 dry-run 工具都应该先读取 `manifest.json`，再通过 `outputs` 字段定位其他文件。
+AgentBridge Kit 是已解析现有系统能力与 Claude-facing 工具入口之间的版本化契约。Agent 运行时、MCP Server、SDK Adapter、CI 检查和 dry-run 工具都应该先读取 `manifest.json`，再通过 `outputs` 字段定位其他文件。
+
+```text
+现有系统证据
+  -> capabilities.json
+  -> Agent Integration Kit 文件
+  -> Claude Agent SDK / MCP / Web Chat tools
+  -> 受 Guardrail 保护的目标系统操作
+```
 
 ## 必需目录结构
 
@@ -43,6 +51,7 @@ agent-kit/
 - `analysis/agent_analysis.json` 保存 AI agent 或确定性生成器对项目的理解、工作流、假设、副作用和风险推理。
 - `capabilities.json` 是标准能力列表，用于生成工具和运行时执行。
 - `tools/mcp_tools.json` 可被 `agentbridge serve` 暴露为 stdio MCP tools。
+- `tools/claude_tools.json` 和生成的 prompts 用于向 Claude-facing 集成描述同一组能力。
 - `guardrails/permissions.json` 是运行时安全判断的权威来源。
 - `clients/mcp-client-configs.json` 保存 Claude/Codex/通用 MCP 接入配置片段。
 - `dry_run_plan.json` 描述计划调用，不执行真实副作用。
@@ -58,16 +67,16 @@ agent-kit/
 
 ## MCP Server 运行时
 
-`agentbridge serve <kit>` 会读取 `manifest.json`、`capabilities.json` 和 `guardrails/permissions.json`，并通过 stdio JSON-RPC 暴露 MCP `tools/list` 与 `tools/call`。
+`agentbridge serve <kit>` 会读取 `manifest.json`、`capabilities.json` 和 `guardrails/permissions.json`，并通过 stdio JSON-RPC 将生成的工具层暴露为 MCP `tools/list` 与 `tools/call`。
 
 - 默认不执行真实请求，只返回 dry-run 计划。
 - 传入 `--execute` 后，HTTP transport 工具会调用 `--base-url` 指向的目标系统。
 - `destructive` 和 `external_side_effect` 工具必须由调用方传入 `confirmed: true`。
-- 当前执行 adapter 以 OpenAPI/HTTP transport 为主；GraphQL、数据库和更多 SDK adapter 后续扩展。
+- 当前执行 adapter 以 OpenAPI/HTTP transport 为主；GraphQL、数据库、后台任务和更多 SDK adapter 后续扩展。
 
 ## Chat 运行时
 
-`agentbridge chat <kit>` 和 `agentbridge web <kit>` 消费同一套 kit 文件和运行时 guardrails。聊天记忆保存最近对话和待确认操作，不属于稳定协议必需文件，默认位于 `<kit>/.agentbridge-chat-memory.json`。
+`agentbridge chat <kit>` 和 `agentbridge web <kit>` 消费同一套 kit 文件和运行时 guardrails，在已解析系统能力之上提供 Claude Agent Chat 控制入口。聊天记忆保存最近对话和待确认操作，不属于稳定协议必需文件，默认位于 `<kit>/.agentbridge-chat-memory.json`。
 
 ## 目标项目边界
 

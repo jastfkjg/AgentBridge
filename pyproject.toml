@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agbr"
 dynamic = ["version"]
-description = "Generate Agent Integration Kits for existing systems with AI-powered dynamic generation via Claude Agent SDK."
+description = "Parse existing systems into Agent Integration Kits: a Claude-controllable tool layer for APIs, databases, GraphQL, and jobs."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "AgentBridge contributors" }]
-keywords = ["agents", "mcp", "tools", "ai-assistant", "openapi", "graphql", "claude", "anthropic", "claude-agent-sdk"]
+keywords = ["agents", "mcp", "tool-layer", "agent-integration-kit", "openapi", "graphql", "database", "claude", "anthropic", "claude-agent-sdk"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",

@@ -139,7 +139,7 @@ def build_static_system_prompt(kit_name: str, capabilities: list[Capability]) ->
     lines = [
         f"# {kit_name} Assistant",
         "",
-        "You operate an existing system through AgentBridge-generated tools.",
+        "You operate an existing system through an AgentBridge-generated Claude-controllable tool layer.",
         "Validate tool arguments before calling tools. Use dry-run output to explain planned changes.",
         "Do not perform destructive or external-side-effect operations unless the user explicitly confirms them.",
         "",
@@ -251,7 +251,7 @@ def build_local_system_prompt(kit_name: str, capabilities: list[Capability], inp
     lines = [
         f"# {kit_name} Assistant",
         "",
-        "You operate an existing system through AgentBridge-generated tools.",
+        "You operate an existing system through an AgentBridge-generated Claude-controllable tool layer.",
         "This kit was produced with local basic project analysis. Treat tool metadata as grounded in discovered project evidence, and ask for clarification when business semantics are ambiguous.",
         "Validate tool arguments before calling tools. Use dry-run output to explain planned changes.",
         "Do not perform destructive or external-side-effect operations unless the user explicitly confirms them.",

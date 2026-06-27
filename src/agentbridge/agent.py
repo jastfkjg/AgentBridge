@@ -873,14 +873,15 @@ def _extract_agent_usage(message: Any) -> dict[str, Any]:
 
 PROMPT_GENERATE_ALL_SYSTEM = (
     "You are a senior AI integration architect acting as an autonomous code-analysis agent. "
-    "Your primary job is to understand the target project from source code and infer the "
-    "business capabilities an AI assistant should safely operate. Rule-based discovery is "
-    "provided only as candidate evidence, not as the source of truth. Prefer conclusions "
-    "that are grounded in source code semantics, schemas, service/controller behavior, "
-    "naming, validation paths, and side effects. The target project is strictly read-only: "
-    "never modify, create, delete, format, or move files in the target project. "
-    "All generated integration artifacts belong only in the requested AgentBridge output directory. "
-    "Always respond with valid JSON only, no markdown fences."
+    "Your primary job is to parse the target project into a Claude-controllable tool layer: "
+    "discover system evidence, normalize it into business capabilities, and package those "
+    "capabilities as an Agent Integration Kit. Rule-based discovery is provided only as "
+    "candidate evidence, not as the source of truth. Prefer conclusions that are grounded "
+    "in source code semantics, schemas, service/controller behavior, naming, validation paths, "
+    "and side effects. The target project is strictly read-only: never modify, create, delete, "
+    "format, or move files in the target project. All generated integration artifacts belong "
+    "only in the requested AgentBridge output directory. Always respond with valid JSON only, "
+    "no markdown fences."
 )
 
 PROMPT_GENERATE_ALL_USER = (
@@ -894,7 +895,8 @@ PROMPT_GENERATE_ALL_USER = (
     "Do not propose or perform modifications to the target project. Produce integration metadata only.\n\n"
     "Analyze the project as an agent would: inspect business objects, workflows, permission boundaries, "
     "side effects, validation constraints, and missing operations implied by services/controllers/routes. "
-    "Then generate a complete agent integration kit. Respond with a JSON object containing:\n\n"
+    "Then generate a complete Agent Integration Kit: a Claude-controllable tool layer for the parsed system. "
+    "Respond with a JSON object containing:\n\n"
     '"project_analysis": An object with:\n'
     '  - "summary": concise system summary\n'
     '  - "business_objects": array of objects with "name", "description", "evidence"\n'
@@ -916,7 +918,7 @@ PROMPT_GENERATE_ALL_USER = (
     '"additional_tools": A JSON array of inferred tools not in the schema but implied by the code. Each item:\n'
     '  - "name", "description", "input_schema", "risk", "domain", "resource", "action", "rationale"\n\n'
     '"system_prompt": A string containing the agent system prompt in Markdown. It should:\n'
-    "  1. Define the agent's role and personality for THIS specific system\n"
+    "  1. Define the agent's role as a Claude chat operator for THIS parsed system tool layer\n"
     "  2. Explain available capabilities in user-friendly terms based on the actual code semantics\n"
     "  3. Define safety rules based on the risk assessments\n"
     "  4. Guide the agent on when to ask for clarification vs. proceed\n"
@@ -975,7 +977,8 @@ PROMPT_GENERATE_ALL_AGENTIC_USER = (
 
 PROMPT_AGENTIC_ANALYSIS_PLAN_SYSTEM = (
     "You are the lead project-understanding agent for AgentBridge. Inspect the target project "
-    "read-only and return concise JSON only. Do not modify files."
+    "read-only and plan how to parse it into Claude-controllable system capabilities. "
+    "Return concise JSON only. Do not modify files."
 )
 
 PROMPT_AGENTIC_ANALYSIS_PLAN_USER = (

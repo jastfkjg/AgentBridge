@@ -1,20 +1,29 @@
 # Architecture
 
-AgentBridge uses an AI-agent-first generation pipeline while keeping deterministic scanners as a candidate evidence layer.
+AgentBridge turns an existing project or system into a Claude-controllable tool layer. The generation pipeline is AI-agent-first, while deterministic scanners remain the cheap evidence layer for APIs, schemas, routes, database definitions, and other system signals.
 
-## Flow
+## Canonical Flow
 
-1. Candidate discoverers scan OpenAPI, GraphQL, SQL, routes, and database definitions.
+```text
+Existing project/system
+  -> parse project/API/DB/GraphQL/job evidence
+  -> normalized capabilities
+  -> Agent Integration Kit
+  -> Claude Agent SDK / MCP / Web Chat
+  -> controlled APIs / DB / GraphQL / background jobs
+```
+
+1. Candidate discoverers scan OpenAPI, GraphQL, SQL, source routes, database definitions, and other system evidence.
 2. For project directories, the AI analysis agent prefers Claude Agent SDK agentic exploration, reads project code and candidate evidence, and can work in batches with resume checkpoints. For schema-only inputs, `--no-ai` can emit a runnable deterministic kit.
 3. The AI agent produces project analysis, risk reasoning, enhanced capabilities, skills, prompts, and optional batch checkpoints for large projects.
-4. The generator writes the `agentbridge-kit/v1` protocol directory.
+4. The generator writes the `agentbridge-kit/v1` protocol directory. This kit is the versioned contract between parsed system capabilities and agent-facing tool surfaces.
 5. `agentbridge serve` exposes the kit as a stdio MCP Server for Claude, Codex, or other MCP clients.
-6. `agentbridge chat` and `agentbridge web` provide user-facing chat entrypoints over the same kit runtime.
+6. `agentbridge chat` and `agentbridge web` provide Claude Agent chat control surfaces over the same kit runtime.
 7. Runtime tools enforce guardrails and dry-run checks before calling host-system adapters.
 
-## Phase 1 MVP
+## Current MVP
 
-The current MVP focuses on the shortest useful loop:
+The current shortest useful loop is OpenAPI/HTTP to a runnable MCP or chat control surface:
 
 ```bash
 agentbridge generate openapi.json --output .agentbridge/openapi-kit --no-ai
@@ -22,6 +31,8 @@ agentbridge serve .agentbridge/openapi-kit --base-url http://localhost:8080 --ex
 ```
 
 This schema-only path does not require an LLM. OpenAPI operations are normalized into capabilities, and the kit contains MCP tool definitions, guardrails, dry-run plans, skills, and a system prompt. `serve` defaults to dry-run; only `--execute` enables the HTTP adapter to call the target system.
+
+GraphQL, database, and background-job evidence can be discovered and represented as capabilities today. Real execution currently focuses on HTTP/OpenAPI transports; additional execution adapters are planned.
 
 ## Why Keep Rules
 
@@ -45,7 +56,7 @@ AgentBridge must not modify the target project during discovery or generation. A
 
 Execution has two layers:
 
-- Default mode: MCP tool calls return planned calls only, with no target-system side effects.
+- Default mode: MCP and chat tool calls return planned calls only, with no target-system side effects.
 - Execute mode: `--execute` enables real HTTP calls, but high-risk tools still require `confirmed: true`.
 
 Chat entrypoints add session memory and human-in-the-loop confirmation. High-risk operations are stored as pending calls until the user confirms or cancels them.

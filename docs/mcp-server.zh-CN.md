@@ -1,6 +1,6 @@
-# OpenAPI 到可运行 MCP Server
+# MCP 运行时
 
-AgentBridge 第一阶段 MVP 的目标是：从现有 OpenAPI schema 快速生成一个可被 Claude、Codex 或其他 MCP client 使用的操作环境。
+MCP 是 AgentBridge 工具层的一种暴露方式。生成的 Agent Integration Kit 可以作为 stdio MCP tools 对外提供，让 Claude、Codex 或任何 MCP-compatible client 能够检查、dry-run，并在安全策略保护下操作已解析系统能力。
 
 ## 快速开始
 
@@ -93,9 +93,9 @@ OpenAPI 中的 HTTP transport 会被映射为真实请求：
 
 `tools/list` 会把 `capabilities.json` 中的能力转换为 MCP tools。高风险工具会额外暴露 `confirmed` 参数，方便 client 在调用时表达人工确认。
 
-## 第一阶段边界
+## 当前边界
 
-当前 MVP 重点覆盖 OpenAPI/HTTP：
+当前执行支持：
 
 - 已支持：OpenAPI discovery、kit 生成、stdio MCP server、HTTP GET/POST/PUT/PATCH/DELETE 执行、dry-run、确认参数。
-- 后续扩展：GraphQL adapter、数据库 adapter 和更强的 agent planning。
+- 后续扩展：GraphQL adapter、数据库 adapter、后台任务 adapter 和更强的 agent planning。

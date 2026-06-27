@@ -1,12 +1,14 @@
 # Chat Entrypoints
 
-AgentBridge can expose a generated kit through interactive chat. Both CLI and Web chat use the same local runtime:
+AgentBridge chat entrypoints are Claude Agent control surfaces over a generated Agent Integration Kit. CLI chat and Web Chat use the same local runtime:
 
-- kit capabilities from `capabilities.json`
+- parsed system capabilities from `capabilities.json`
 - guardrails from `guardrails/permissions.json`
-- MCP tool calls through the AgentBridge runtime
+- tool calls through the AgentBridge runtime
 - optional HTTP execution through `--execute`
 - session memory and pending high-risk confirmations
+
+The goal is to let users talk to a Claude-powered agent that can inspect, plan, dry-run, and safely operate the existing system through the generated tool layer.
 
 ## CLI Chat
 
@@ -46,7 +48,7 @@ High-risk operations pause before execution and show the planned call, risk reas
 agentbridge web .agentbridge/openapi-kit --port 8765
 ```
 
-Open the printed URL in a browser. The UI includes:
+Open the printed URL in a browser. The UI exposes the parsed system capabilities as a browser-based Claude Agent chat control surface and includes:
 
 - user and session selectors
 - active kit display

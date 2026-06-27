@@ -241,7 +241,7 @@ class ChatSession:
 
     def help_text(self) -> str:
         return (
-            "Commands:\n"
+            "Commands for controlling the parsed system tool layer:\n"
             "  /tools                         List available tools\n"
             "  /run <tool> key=value          Plan or run a tool\n"
             "  <tool> {\"arg\":\"value\"}        Run with JSON arguments\n"

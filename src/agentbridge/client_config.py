@@ -99,9 +99,9 @@ def build_clients_readme(kit_name: str, config: MCPClientConfig | None = None) -
     snippet = format_mcp_client_configs(default_config)
     return f"""# MCP Client Setup
 
-This directory contains ready-to-copy MCP client snippets for the `{kit_name}` kit.
+This directory contains ready-to-copy MCP client snippets for the `{kit_name}` Agent Integration Kit.
 
-AgentBridge runs as a local stdio MCP server. The generated command starts:
+AgentBridge serves the parsed system tool layer as a local stdio MCP server. The generated command starts:
 
 ```bash
 agentbridge serve <kit>

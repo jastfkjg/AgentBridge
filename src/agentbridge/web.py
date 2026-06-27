@@ -83,7 +83,7 @@ def test_target_connectivity(
 def run_web_chat(config: ChatConfig, host: str = "127.0.0.1", port: int = 8765, allow_kit_switch: bool = False) -> int:
     handler = build_handler(config, allow_kit_switch=allow_kit_switch)
     server = ThreadingHTTPServer((host, port), handler)
-    print(f"AgentBridge Web Chat: http://{host}:{server.server_port}", flush=True)
+    print(f"AgentBridge Web Chat control surface: http://{host}:{server.server_port}", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
     try:
         server.serve_forever()
@@ -362,7 +362,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     execute = "true" if config.execute else "false"
     allow_switch = "true" if allow_kit_switch else "false"
     kit_help = (
-        "Choose any generated kit directory for this session."
+        "Choose any generated Agent Integration Kit directory for this session."
         if allow_kit_switch
         else "Start with --allow-kit-switch to edit this path."
     )
@@ -1367,7 +1367,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
           </button>
           <div class="header-copy">
             <strong class="header-title">AgentBridge</strong>
-            <div class="header-meta">Chat with the active integration kit</div>
+            <div class="header-meta">Control parsed system capabilities through Claude Agent chat</div>
           </div>
         </div>
         <div class="runtime-controls">
@@ -1402,15 +1402,15 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         </div>
         <div class="composer-shell composer-card">
           <div class="command-menu" id="commandMenu">
-            <button class="suggestion" data-command="/tools"><strong>/tools</strong><span class="subtle">List tools in the active kit</span></button>
-            <button class="suggestion" data-command="/run"><strong>/run</strong><span class="subtle">Run a generated tool with key=value arguments</span></button>
+            <button class="suggestion" data-command="/tools"><strong>/tools</strong><span class="subtle">List tools in the parsed system layer</span></button>
+            <button class="suggestion" data-command="/run"><strong>/run</strong><span class="subtle">Run a generated system tool with key=value arguments</span></button>
             <button class="suggestion" data-command="confirm"><strong>confirm</strong><span class="subtle">Approve the pending high-risk operation</span></button>
             <button class="suggestion" data-command="cancel"><strong>cancel</strong><span class="subtle">Clear the pending operation</span></button>
           </div>
           <div class="attachments" id="attachments"></div>
           <div class="composer-row">
             <input id="fileInput" type="file" multiple hidden>
-            <textarea id="message" placeholder="Ask the agent to operate the system..."></textarea>
+            <textarea id="message" placeholder="Ask Claude to inspect, dry-run, or operate the parsed system..."></textarea>
             <div class="composer-actions">
               <div class="composer-tools">
                 <button class="icon" id="attachBtn" title="Attach files" aria-label="Attach files" type="button">
@@ -1796,7 +1796,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       const text = raw.trimStart().toLowerCase();
       const items = [];
       const baseCommands = [
-        {{ command: '/tools', title: '/tools', detail: 'List tools in the active kit' }},
+        {{ command: '/tools', title: '/tools', detail: 'List tools in the parsed system layer' }},
         {{ command: '/run ', title: '/run', detail: 'Run a generated tool with key=value arguments' }},
         {{ command: 'confirm', title: 'confirm', detail: 'Approve the pending high-risk operation' }},
         {{ command: 'cancel', title: 'cancel', detail: 'Clear the pending operation' }}

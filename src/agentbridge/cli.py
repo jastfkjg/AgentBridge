@@ -128,7 +128,7 @@ def _run_chat(args: argparse.Namespace) -> int:
 
     session = ChatSession(_chat_config_from_args(args))
 
-    print(f"AgentBridge Chat — kit: {kit_dir}")
+    print(f"AgentBridge Chat — Claude-controllable tool layer: {kit_dir}")
     print("Commands: /tools, /use, /run, /mode, /connect, /usage, /history, or exit.\n")
 
     try:
@@ -616,7 +616,7 @@ def _claude_agent_sdk_installed() -> bool:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentbridge",
-        description="Generate Agent Integration Kits and run MCP/chat entrypoints for existing systems.",
+        description="Parse existing systems into Claude-controllable Agent Integration Kits and expose them through MCP/chat.",
         epilog=(
             "Examples:\n"
             "  agentbridge discover examples/writing_system\n"
@@ -635,7 +635,7 @@ def build_parser() -> argparse.ArgumentParser:
     discover = subparsers.add_parser("discover", help="Discover system capabilities (no API key needed).")
     discover.add_argument("paths", nargs="+", help="Files or directories to inspect.")
 
-    generate = subparsers.add_parser("generate", help="Generate an Agent Integration Kit. Uses AI when an API key is configured.")
+    generate = subparsers.add_parser("generate", help="Generate a Claude-controllable Agent Integration Kit from system evidence. Uses AI when an API key is configured.")
     generate.add_argument("paths", nargs="+", help="Files or directories to inspect.")
     generate.add_argument("--output", "-o", required=True, help="Output directory for the generated kit.")
     generate.add_argument("--name", help="Kit name. Defaults to the input directory name.")
@@ -683,16 +683,16 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_config.add_argument("--write", action="store_true", help="Write snippets to <kit>/clients/mcp-client-configs.json.")
     _add_runtime_options(mcp_config)
 
-    chat = subparsers.add_parser("chat", help="Start an interactive chat over a generated kit and MCP runtime.")
+    chat = subparsers.add_parser("chat", help="Start Claude Agent chat over a generated tool layer and runtime.")
     chat.add_argument("kit", help="Generated kit directory.")
     _add_runtime_options(chat)
     _add_chat_options(chat)
 
-    serve = subparsers.add_parser("serve", help="Run a generated kit as a stdio MCP server.")
+    serve = subparsers.add_parser("serve", help="Expose a generated tool layer as a stdio MCP server.")
     serve.add_argument("kit", help="Generated kit directory.")
     _add_runtime_options(serve)
 
-    web = subparsers.add_parser("web", help="Run a browser chat UI over a generated kit and MCP runtime.")
+    web = subparsers.add_parser("web", help="Run a browser Claude Agent chat UI over a generated tool layer.")
     web.add_argument("kit", help="Generated kit directory.")
     web.add_argument("--host", default="127.0.0.1", help="Host for the Web chat server.")
     web.add_argument("--port", type=int, default=8765, help="Port for the Web chat server. Use 0 for an available port.")

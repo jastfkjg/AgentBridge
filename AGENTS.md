@@ -4,14 +4,16 @@ This file gives coding agents the project context needed to work safely on Agent
 
 ## Project Goal
 
-AgentBridge helps developers add AI assistants to existing systems. It analyzes a target project, discovers business capabilities, and generates a versioned Agent Integration Kit containing tools, skills, prompts, resource schemas, guardrails, dry-run plans, and tests.
+AgentBridge automatically parses existing projects and systems into a versioned tool layer controllable by Claude Agent chat. It discovers system evidence, normalizes it into capabilities, writes an Agent Integration Kit, and exposes that kit through Claude Agent SDK, MCP, terminal chat, and Web Chat so users can safely control existing APIs, databases, GraphQL operations, and background jobs.
 
 The intended workflow is AI-agent-first:
 
-1. Deterministic scanners collect candidate evidence from OpenAPI, GraphQL, SQL, routes, controllers, and services.
+1. Deterministic scanners collect candidate evidence from OpenAPI, GraphQL, SQL, routes, controllers, services, database schemas, and job definitions.
 2. An AI analysis agent reads the project code and treats scanner output as hints, not final truth.
-3. The generator writes a stable `agentbridge-kit/v1` directory protocol.
-4. Runtime and dry-run layers enforce guardrails before any host-system side effect.
+3. Capabilities are normalized into a stable control contract for the existing system.
+4. The generator writes a stable `agentbridge-kit/v1` directory protocol.
+5. Claude Agent SDK, MCP, and chat surfaces expose the generated tool layer.
+6. Runtime and dry-run layers enforce guardrails before any host-system side effect.
 
 ## Important Files
 
@@ -84,7 +86,7 @@ python -m unittest discover -s .agentbridge/writing-kit/tests
 
 - Keep deterministic discovery conservative. It should produce evidence, not pretend to understand the whole project.
 - Put semantic business inference in `agent.py` prompts and analysis normalization.
+- Frame new features around the canonical flow: existing system evidence -> capabilities -> Agent Integration Kit -> Claude/MCP/chat control surface -> guarded system operation.
 - Preserve backward compatibility in `runtime.py` where practical.
 - Keep tests offline by mocking `AIGenerator`; do not require network or real API keys in unit tests.
 - Use standard library features where possible. Optional AI packages belong in `pyproject.toml` extras.
-

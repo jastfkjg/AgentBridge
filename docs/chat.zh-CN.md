@@ -1,12 +1,14 @@
 # 聊天入口
 
-AgentBridge 可以把生成的 kit 暴露成可交互聊天入口。CLI chat 和 Web chat 复用同一套本地运行时：
+AgentBridge 的聊天入口是在生成的 Agent Integration Kit 之上提供的 Claude Agent 控制界面。CLI Chat 和 Web Chat 复用同一套本地运行时：
 
-- 从 `capabilities.json` 读取系统能力
+- 从 `capabilities.json` 读取已解析系统能力
 - 从 `guardrails/permissions.json` 读取安全策略
-- 通过 AgentBridge MCP runtime 调用工具
+- 通过 AgentBridge runtime 调用工具
 - 通过 `--execute` 选择是否真实调用 HTTP 系统
 - 支持会话记忆和高风险操作确认
+
+目标是让用户通过 Claude 驱动的 Agent 对话，检查、规划、dry-run，并在 Guardrail 保护下安全操作已有系统。
 
 ## CLI Chat
 
@@ -46,7 +48,7 @@ cancel
 agentbridge web .agentbridge/openapi-kit --port 8765
 ```
 
-打开命令输出的 URL。界面包含：
+打开命令输出的 URL。Web UI 将已解析系统能力暴露为浏览器中的 Claude Agent Chat 控制入口，包含：
 
 - 用户和会话选择
 - 当前 kit 展示

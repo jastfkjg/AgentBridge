@@ -1273,7 +1273,15 @@ def build_kit_protocol_doc() -> str:
 
 Protocol: `{KIT_PROTOCOL_VERSION}`
 
-An AgentBridge kit is a stable, versioned directory that can be consumed by MCP servers, Claude Agent SDK, OpenAI tool callers, Vercel AI SDK applications, CI checks, and local dry-run tools.
+An AgentBridge kit is the stable, versioned contract between parsed existing-system capabilities and Claude-facing tool surfaces. It can be consumed by MCP servers, Claude Agent SDK, OpenAI tool callers, Vercel AI SDK applications, CI checks, and local dry-run tools.
+
+```text
+Existing system evidence
+  -> normalized capabilities
+  -> Agent Integration Kit
+  -> Claude Agent SDK / MCP / Web Chat tools
+  -> guarded target-system operations
+```
 
 ## Required Files
 
