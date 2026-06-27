@@ -5,7 +5,7 @@ AgentBridge chat entrypoints are Claude Agent control surfaces over a generated 
 - parsed system capabilities from `capabilities.json`
 - guardrails from `guardrails/permissions.json`
 - tool calls through the AgentBridge runtime
-- optional HTTP execution through `--execute`
+- optional runtime execution through `--execute`
 - session memory and pending high-risk confirmations
 
 The goal is to let users talk to a Claude-powered agent that can inspect, plan, dry-run, and safely operate the existing system through the generated tool layer.
@@ -57,7 +57,10 @@ Open the printed URL in a browser. The UI exposes the parsed system capabilities
 - clickable tool list that inserts `/run` commands and required parameters
 - chat transcript
 - visible Authorize/Cancel controls for pending operations
-- Claude Agent SDK token usage for the last response and current session
+- SSE streaming for Agent replies and tool events
+- tool call timeline for tool use, tool results, confirmation waits, and interrupts
+- interrupt control for the current Agent request
+- Claude Agent SDK model, token, and cost usage for the last response and current session
 
 Run in execution mode:
 
@@ -72,6 +75,15 @@ agentbridge web .agentbridge/openapi-kit \
 The mode can also be changed directly in the Web UI. Real system mode requires an `http://` or `https://` Base URL. The connectivity test sends `HEAD` to the Base URL and falls back to `GET` when `HEAD` is not supported; any HTTP response means the system is reachable. Switching modes clears any pending confirmation before rebuilding the runtime, while guardrails and human confirmation remain enforced.
 
 Terminal chat exposes the same core workflows through `/use`, `/mode`, `/connect`, and `/usage`. `/use` lists numbered tools and prompts for required parameters. High-risk calls present an explicit Authorize/Cancel selection.
+
+GraphQL, SQL, and gRPC runtime targets can be supplied when starting CLI or Web Chat:
+
+```bash
+agentbridge chat .agentbridge/my-system-kit \
+  --graphql-endpoint http://localhost:8080/graphql \
+  --database-url sqlite:///tmp/app.db \
+  --grpc-target 127.0.0.1:50051
+```
 
 Allow the browser UI to switch kit directories:
 

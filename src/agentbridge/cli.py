@@ -420,6 +420,13 @@ def _chat_config_from_args(args: argparse.Namespace) -> ChatConfig:
         session_id=getattr(args, "session", None) or "default",
         memory_file=Path(args.memory_file) if getattr(args, "memory_file", None) else None,
         memory_enabled=not bool(getattr(args, "no_memory", False)),
+        llm_api_key=getattr(args, "api_key", None) or "",
+        llm_base_url=getattr(args, "llm_base_url", None) or "",
+        llm_model=getattr(args, "model", None) or "",
+        llm_timeout=getattr(args, "llm_timeout", None),
+        graphql_endpoint=getattr(args, "graphql_endpoint", None) or "",
+        database_url=getattr(args, "database_url", None) or "",
+        grpc_target=getattr(args, "grpc_target", None) or "",
     )
 
 
@@ -434,6 +441,9 @@ def _run_mcp_server(args: argparse.Namespace) -> int:
         deny_risks=set(args.deny_risk or []),
         allow_tools=set(args.allow_tool or []),
         audit_log=Path(args.audit_log) if args.audit_log else None,
+        graphql_endpoint=getattr(args, "graphql_endpoint", None) or "",
+        database_url=getattr(args, "database_url", None) or "",
+        grpc_target=getattr(args, "grpc_target", None) or "",
     )
     return run_stdio_server(config)
 
@@ -450,8 +460,11 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--header", action="append", help="HTTP header for executed calls, as NAME=VALUE. May be repeated.")
     parser.add_argument("--bearer-token", help="Bearer token for executed HTTP calls.")
     parser.add_argument("--bearer-env", help="Read the bearer token from this environment variable at runtime.")
-    parser.add_argument("--execute", action="store_true", help="Execute HTTP tools against --base-url. Without this, calls return dry-run plans only.")
-    parser.add_argument("--timeout", type=float, default=30.0, help="HTTP timeout in seconds when --execute is enabled.")
+    parser.add_argument("--graphql-endpoint", help="GraphQL endpoint URL for GraphQL tools. Defaults to --base-url when omitted.")
+    parser.add_argument("--database-url", help="Database URL for read-only SQL tools. SQLite paths and sqlite:// URLs are supported.")
+    parser.add_argument("--grpc-target", help="gRPC target host:port for gRPC tools. Defaults to --base-url when omitted.")
+    parser.add_argument("--execute", action="store_true", help="Execute runtime tools. Without this, calls return dry-run plans only.")
+    parser.add_argument("--timeout", type=float, default=30.0, help="Runtime timeout in seconds when --execute is enabled.")
     parser.add_argument("--read-only", action="store_true", help="Block write, destructive, and external-side-effect tools at runtime.")
     parser.add_argument("--deny-risk", action="append", choices=["read", "write", "destructive", "external_side_effect"], help="Disable a risk level at runtime. May be repeated.")
     parser.add_argument("--allow-tool", action="append", help="Allow only this tool name at runtime. May be repeated.")
@@ -582,6 +595,10 @@ def _add_chat_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--session", default="default", help="Session id used to load and save chat memory.")
     parser.add_argument("--memory-file", help="JSON file for chat memory. Defaults to <kit>/.agentbridge-chat-memory.json.")
     parser.add_argument("--no-memory", action="store_true", help="Disable chat memory persistence.")
+    parser.add_argument("--api-key", help="LLM API key. Defaults to ANTHROPIC_API_KEY env var.")
+    parser.add_argument("--llm-base-url", help="Custom Anthropic-compatible LLM API endpoint for chat sessions.")
+    parser.add_argument("--model", help="LLM model name for chat sessions. Defaults to ANTHROPIC_MODEL or AgentBridge's default.")
+    parser.add_argument("--llm-timeout", type=float, help="LLM request timeout in seconds for chat sessions.")
 
 
 def _add_llm_options(parser: argparse.ArgumentParser) -> None:

@@ -5,7 +5,7 @@ AgentBridge 的聊天入口是在生成的 Agent Integration Kit 之上提供的
 - 从 `capabilities.json` 读取已解析系统能力
 - 从 `guardrails/permissions.json` 读取安全策略
 - 通过 AgentBridge runtime 调用工具
-- 通过 `--execute` 选择是否真实调用 HTTP 系统
+- 通过 `--execute` 选择是否真实调用运行时 adapter
 - 支持会话记忆和高风险操作确认
 
 目标是让用户通过 Claude 驱动的 Agent 对话，检查、规划、dry-run，并在 Guardrail 保护下安全操作已有系统。
@@ -57,7 +57,10 @@ agentbridge web .agentbridge/openapi-kit --port 8765
 - 可点击的工具列表，自动填入 `/run` 命令和必填参数
 - 聊天记录
 - 高风险操作的 Authorize/Cancel 控件
-- 最近一次响应和当前会话的 Claude Agent SDK Token 用量
+- Agent 回复和工具事件的 SSE 流式响应
+- 展示 tool use、tool result、确认等待和中断状态的工具调用时间线
+- 中断当前 Agent 请求的控制按钮
+- 最近一次响应和当前会话的 Claude Agent SDK model/token/cost 用量
 
 执行模式：
 
@@ -72,6 +75,15 @@ agentbridge web .agentbridge/openapi-kit \
 也可以直接在 Web 页面切换运行模式。真实系统模式必须填写 `http://` 或 `https://` Base URL。连通测试先向 Base URL 发送 `HEAD`，目标不支持时回退到 `GET`；只要收到 HTTP 响应，就判定系统网络可达。切换模式会先清除待确认操作并重建运行时，原有 guardrail 和高风险人工确认仍然生效。
 
 终端 Chat 通过 `/use`、`/mode`、`/connect` 和 `/usage` 提供同样的核心流程。`/use` 会显示编号工具并逐项询问必填参数；高风险调用会给出明确的 Authorize/Cancel 选择。
+
+启动 CLI 或 Web Chat 时可以传入 GraphQL、SQL 和 gRPC 的运行目标：
+
+```bash
+agentbridge chat .agentbridge/my-system-kit \
+  --graphql-endpoint http://localhost:8080/graphql \
+  --database-url sqlite:///tmp/app.db \
+  --grpc-target 127.0.0.1:50051
+```
 
 允许浏览器界面切换 kit 目录：
 

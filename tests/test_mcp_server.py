@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,6 +69,56 @@ def _make_kit(root: Path) -> Path:
             "confirm_required": True,
             "source": {"kind": "openapi", "path": "openapi.json", "location": "DELETE /projects/{project_id}/characters/{character_id}"},
             "transport": {"type": "http", "method": "DELETE", "path": "/projects/{project_id}/characters/{character_id}"},
+            "dry_run_supported": True,
+        },
+        {
+            "name": "get_project",
+            "domain": "writing",
+            "resource": "project",
+            "action": "get",
+            "description": "Fetch a project through GraphQL",
+            "input_schema": {
+                "type": "object",
+                "properties": {"project_id": {"type": "string"}},
+                "required": ["project_id"],
+                "additionalProperties": False,
+            },
+            "risk": "read",
+            "confirm_required": False,
+            "source": {"kind": "graphql", "path": "schema.graphql", "location": "Query.project"},
+            "transport": {
+                "type": "graphql",
+                "operation": "query",
+                "field": "project",
+                "variables": [{"name": "id", "arg": "project_id", "type": "ID!", "required": True}],
+                "return_type": "Project",
+            },
+            "dry_run_supported": True,
+        },
+        {
+            "name": "list_project_database",
+            "domain": "writing",
+            "resource": "project",
+            "action": "list",
+            "description": "List project rows from SQL",
+            "input_schema": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "limit": {"type": "number"}},
+                "required": [],
+                "additionalProperties": False,
+            },
+            "risk": "read",
+            "confirm_required": False,
+            "source": {"kind": "database_schema", "path": "schema.sql", "location": "table projects"},
+            "transport": {
+                "type": "database",
+                "operation": "list",
+                "table": "projects",
+                "columns": ["id", "title"],
+                "read_only": True,
+                "default_limit": 100,
+                "max_limit": 100,
+            },
             "dry_run_supported": True,
         },
     ]
@@ -185,6 +236,67 @@ class MCPServerTests(unittest.TestCase):
             self.assertEqual(request.get_method(), "GET")
             self.assertEqual(request.full_url, "http://example.test/projects/p1/chapters?page=2")
 
+    def test_graphql_tool_preview_and_execute_uses_endpoint_and_variables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            server = AgentBridgeMCPServer(
+                MCPServerConfig(
+                    kit_dir=kit,
+                    graphql_endpoint="http://example.test/graphql",
+                    execute=True,
+                )
+            )
+
+            with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse()) as urlopen:
+                response = server.handle(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 40,
+                        "method": "tools/call",
+                        "params": {"name": "get_project", "arguments": {"project_id": "p1"}},
+                    }
+                )
+
+            payload = json.loads(response["result"]["content"][0]["text"])
+            request = urlopen.call_args.args[0]
+            body = json.loads(request.data.decode("utf-8"))
+            self.assertEqual(payload["status"], "executed")
+            self.assertEqual(request.get_method(), "POST")
+            self.assertEqual(request.full_url, "http://example.test/graphql")
+            self.assertEqual(body["variables"], {"id": "p1"})
+            self.assertIn("query AgentBridgeProject($id: ID!)", body["query"])
+
+    def test_sql_read_only_tool_selects_rows_with_capped_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "app.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("CREATE TABLE projects (id TEXT PRIMARY KEY, title TEXT)")
+                conn.executemany("INSERT INTO projects (id, title) VALUES (?, ?)", [("p1", "One"), ("p2", "Two")])
+            kit = _make_kit(root)
+            server = AgentBridgeMCPServer(
+                MCPServerConfig(
+                    kit_dir=kit,
+                    database_url=f"sqlite://{db_path}",
+                    execute=True,
+                )
+            )
+
+            response = server.handle(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 41,
+                    "method": "tools/call",
+                    "params": {"name": "list_project_database", "arguments": {"limit": 1000}},
+                }
+            )
+
+            payload = json.loads(response["result"]["content"][0]["text"])
+            self.assertEqual(payload["status"], "executed")
+            self.assertEqual(payload["request"]["query"], 'SELECT "id", "title" FROM "projects" LIMIT ?')
+            self.assertEqual(payload["request"]["params"], [100])
+            self.assertEqual(payload["response"]["row_count"], 2)
+
     def test_read_only_policy_blocks_write_tool_and_audits(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -224,7 +336,7 @@ class MCPServerTests(unittest.TestCase):
             report = validate_kit(kit)
 
             self.assertTrue(report.ok)
-            self.assertEqual(report.summary["capability_count"], 3)
+            self.assertEqual(report.summary["capability_count"], 5)
 
 
 if __name__ == "__main__":

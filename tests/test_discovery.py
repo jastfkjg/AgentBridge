@@ -209,6 +209,153 @@ class DiscoveryTests(unittest.TestCase):
 
         self.assertEqual([item.name for item in result], ["create_character", "create_character_database"])
 
+    def test_openapi_records_auth_and_parameter_locations(self):
+        spec = {
+            "security": [{"BearerAuth": []}],
+            "components": {
+                "securitySchemes": {
+                    "BearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"},
+                    "ApiKey": {"type": "apiKey", "in": "header", "name": "X-API-Key"},
+                }
+            },
+            "paths": {
+                "/projects/{projectId}": {
+                    "parameters": [{"name": "projectId", "in": "path", "required": True, "schema": {"type": "string"}}],
+                    "get": {
+                        "operationId": "getProject",
+                        "security": [{"ApiKey": []}],
+                        "parameters": [
+                            {"name": "includeDrafts", "in": "query", "schema": {"type": "boolean"}},
+                            {"name": "X-Tenant", "in": "header", "schema": {"type": "string"}},
+                        ],
+                    },
+                }
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "openapi.json"
+            path.write_text(json.dumps(spec), encoding="utf-8")
+            capabilities = CapabilityDiscoverer().discover([path])
+
+        cap = capabilities[0]
+        self.assertEqual(cap.input_schema["properties"]["project_id"]["type"], "string")
+        self.assertIn("project_id", cap.transport["parameters"]["path"])
+        self.assertIn("include_drafts", cap.transport["parameters"]["query"])
+        self.assertEqual(cap.transport["parameters"]["header"], {"x_tenant": "X-Tenant"})
+        self.assertEqual(cap.transport["auth"][0]["runtime_header"], "X-API-Key")
+
+    def test_graphql_variables_and_return_type_are_recorded(self):
+        schema = """
+        type Query {
+          project(id: ID!, includeDrafts: Boolean): Project
+        }
+        type Mutation {
+          publishProject(id: ID!): PublishPayload
+        }
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "schema.graphql"
+            path.write_text(schema, encoding="utf-8")
+            capabilities = CapabilityDiscoverer().discover([path])
+
+        by_field = {cap.transport["field"]: cap for cap in capabilities}
+        project = by_field["project"]
+        self.assertEqual(project.transport["operation"], "query")
+        self.assertEqual(project.transport["return_type"], "Project")
+        self.assertEqual(project.transport["variables"][0], {"name": "id", "arg": "id", "type": "ID!", "required": True})
+        self.assertEqual(project.input_schema["properties"]["include_drafts"]["type"], "boolean")
+        self.assertEqual(by_field["publishProject"].transport["operation"], "mutation")
+        self.assertTrue(by_field["publishProject"].confirm_required)
+
+    def test_sql_discovery_generates_read_only_list_tools_only(self):
+        schema = """
+        CREATE TABLE projects (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL
+        );
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "schema.sql"
+            path.write_text(schema, encoding="utf-8")
+            capabilities = CapabilityDiscoverer().discover([path])
+
+        self.assertEqual([cap.name for cap in capabilities], ["list_project"])
+        cap = capabilities[0]
+        self.assertEqual(cap.risk, "read")
+        self.assertFalse(cap.confirm_required)
+        self.assertTrue(cap.transport["read_only"])
+        self.assertEqual(cap.transport["columns"], ["id", "title"])
+
+    def test_grpc_proto_discovery_generates_method_capability(self):
+        proto = """
+        syntax = "proto3";
+        service ProjectService {
+          rpc GetProject (GetProjectRequest) returns (ProjectReply);
+        }
+        message GetProjectRequest {
+          string project_id = 1;
+          bool include_drafts = 2;
+        }
+        message ProjectReply {
+          string title = 1;
+        }
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "project.proto"
+            path.write_text(proto, encoding="utf-8")
+            capabilities = CapabilityDiscoverer().discover([path])
+
+        self.assertEqual(len(capabilities), 1)
+        cap = capabilities[0]
+        self.assertEqual(cap.transport["type"], "grpc")
+        self.assertEqual(cap.transport["service"], "ProjectService")
+        self.assertEqual(cap.transport["method"], "GetProject")
+        self.assertEqual(cap.input_schema["properties"]["project_id"]["type"], "string")
+        self.assertEqual(cap.input_schema["properties"]["include_drafts"]["type"], "boolean")
+
+    def test_custom_python_plugin_discovery_uses_explicit_plugin_marker(self):
+        plugin = """
+AGENTBRIDGE_PLUGIN = True
+
+def agentbridge_discover():
+    return [
+        {
+            "name": "sync_index",
+            "domain": "search",
+            "resource": "index",
+            "action": "sync",
+            "description": "Synchronize a search index through a custom plugin.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"force": {"type": "boolean"}},
+                "required": [],
+                "additionalProperties": False,
+            },
+            "risk": "external_side_effect",
+            "confirm_required": True,
+            "source": {"kind": "custom_python_plugin", "path": "plugin.py", "location": "agentbridge_discover"},
+            "transport": {"type": "python_plugin"},
+            "dry_run_supported": True,
+        }
+    ]
+"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "plugin.py"
+            path.write_text(plugin, encoding="utf-8")
+            capabilities = CapabilityDiscoverer().discover([path])
+
+        self.assertEqual(len(capabilities), 1)
+        cap = capabilities[0]
+        self.assertEqual(cap.name, "sync_index")
+        self.assertEqual(cap.source.kind, "custom_python_plugin")
+        self.assertEqual(cap.transport["type"], "python_plugin")
+        self.assertEqual(cap.transport["module"], str(path))
+
 
 if __name__ == "__main__":
     unittest.main()

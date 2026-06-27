@@ -16,15 +16,15 @@ Existing project/system
 ## What It Provides
 
 - AI-first project analysis with Claude Agent SDK.
-- Candidate discovery from OpenAPI, GraphQL, SQL, database schemas, and source routes.
+- Candidate discovery from OpenAPI, GraphQL, SQL, gRPC proto files, explicit Python plugins, and source routes.
 - A stable `agentbridge-kit/v1` contract containing capabilities, tools, prompts, skills, schemas, guardrails, dry-run plans, client configs, and tests.
 - Claude Agent SDK, MCP, Claude, OpenAI, and Vercel AI tool definitions generated from the same capability model.
 - Browser and terminal chat control surfaces over the generated tool layer.
 - Dry-run by default, runtime policy controls, and explicit authorization for high-risk operations.
-- Session history, clickable tool invocation, required-parameter guidance, file attachments, and AI token usage.
+- Session history, streaming Web Chat responses, tool timelines, clickable tool invocation, required-parameter guidance, file attachments, and AI token usage/cost metadata.
 - In-place re-analysis of an existing kit when the source system changes.
 
-Current real execution focuses on HTTP/OpenAPI transports. GraphQL, database, and background-job surfaces are discovered as capability evidence today and are planned execution-adapter targets.
+Runtime adapters now cover HTTP/OpenAPI, GraphQL POST operations, SQLite read-only SQL SELECT tools, gRPC via `grpcurl`, and explicit Python plugin dry-run/execute hooks. Dry-run remains the default for every transport.
 
 ## Install
 
@@ -97,7 +97,7 @@ Open the printed URL. The Web UI acts as a Claude Agent chat control surface ove
 - Base URL validation and connectivity testing.
 - Clickable tools that insert `/run` commands and required parameters.
 - Visible authorization buttons for high-risk operations.
-- Recent conversations, file attachments, Markdown responses, and Claude Agent SDK token usage.
+- Real-time SSE streaming, tool call timeline, interrupt control, recent conversations, file attachments, Markdown responses, and Claude Agent SDK model/token/cost usage.
 
 Real-system mode still enforces generated guardrails and confirmation requirements.
 
@@ -147,6 +147,16 @@ Real HTTP execution:
 agentbridge serve .agentbridge/my-system-kit \
   --base-url http://localhost:8080 \
   --bearer-env API_TOKEN \
+  --execute
+```
+
+GraphQL, SQL, and gRPC tools use transport-specific runtime targets:
+
+```bash
+agentbridge serve .agentbridge/my-system-kit \
+  --graphql-endpoint http://localhost:8080/graphql \
+  --database-url sqlite:///tmp/app.db \
+  --grpc-target 127.0.0.1:50051 \
   --execute
 ```
 

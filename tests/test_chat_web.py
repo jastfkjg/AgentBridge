@@ -4,6 +4,8 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from io import BytesIO
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +22,28 @@ class _FakeAgentRunner:
     def query_text(self, prompt: str) -> str:
         self.prompts.append(prompt)
         return self.reply
+
+
+class _StreamingAgentRunner:
+    model = "claude-test"
+
+    def __init__(self) -> None:
+        self.last_usage = {"input_tokens": 4, "output_tokens": 6, "total_tokens": 10}
+
+    def query_messages(self, prompt: str) -> list[object]:
+        return [
+            SimpleNamespace(
+                content=[
+                    {"type": "tool_use", "id": "tu_1", "name": "list_chapter", "input": {"project_id": "p1"}},
+                    {"type": "text", "text": "Inspecting chapters."},
+                ],
+                usage={"input_tokens": 4, "output_tokens": 2},
+            ),
+            SimpleNamespace(
+                content=[{"type": "tool_result", "tool_use_id": "tu_1", "content": [{"type": "text", "text": "ok"}]}],
+            ),
+            SimpleNamespace(result="Done.", usage={"input_tokens": 0, "output_tokens": 4}),
+        ]
 
 
 def _write_json(path: Path, data: object) -> None:
@@ -237,6 +261,20 @@ class ChatSessionTests(unittest.TestCase):
             self.assertIn("ANTHROPIC_API_KEY", response.message)
             self.assertNotIn("I could not map that to a tool", response.message)
 
+    def test_chat_stream_process_emits_tool_timeline_usage_and_done(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            session = ChatSession(ChatConfig(kit_dir=kit, memory_enabled=False, agent_runner=_StreamingAgentRunner()))
+
+            events = [event.to_dict() for event in session.stream_process("summarize chapters")]
+
+            self.assertEqual(events[0]["type"], "message_start")
+            self.assertIn({"type": "tool_use", "id": "tu_1", "name": "list_chapter", "input": {"project_id": "p1"}}, events)
+            self.assertTrue(any(event["type"] == "tool_result" and event["tool_use_id"] == "tu_1" for event in events))
+            self.assertTrue(any(event["type"] == "usage" and event["usage"]["session_total_tokens"] == 10 for event in events))
+            self.assertEqual(events[-1]["type"], "done")
+            self.assertEqual(events[-1]["status"], "agent_response")
+
 
 class WebChatTests(unittest.TestCase):
     def test_rendered_web_ui_has_command_suggestions_upload_and_conversation_controls(self):
@@ -320,6 +358,46 @@ class WebChatTests(unittest.TestCase):
             self.assertIn("drawer-panel", html)
             self.assertNotIn("tool-rail", html)
             self.assertIn("@media (max-width: 760px)", html)
+
+    def test_rendered_web_ui_uses_sse_streaming_and_interrupt_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("/api/chat/stream", html)
+            self.assertIn("/api/chat/interrupt", html)
+            self.assertIn("readStreamResponse", html)
+            self.assertIn("renderTimelineEvent", html)
+            self.assertIn('id="interruptBtn"', html)
+
+    def test_handler_writes_server_sent_events(self):
+        handler_cls = build_handler(ChatConfig(kit_dir=Path("/tmp/kit"), memory_enabled=False))
+
+        class FakeHandler:
+            def __init__(self) -> None:
+                self.headers: list[tuple[str, str]] = []
+                self.wfile = BytesIO()
+                self.status = None
+
+            def send_response(self, status: int) -> None:
+                self.status = status
+
+            def send_header(self, key: str, value: str) -> None:
+                self.headers.append((key, value))
+
+            def end_headers(self) -> None:
+                return
+
+        fake = FakeHandler()
+
+        handler_cls._send_sse(fake, [SimpleNamespace(type="assistant_text", to_dict=lambda: {"type": "assistant_text", "text": "hi"})])
+
+        self.assertEqual(fake.status, 200)
+        self.assertIn(("Content-Type", "text/event-stream; charset=utf-8"), fake.headers)
+        self.assertIn(b"event: assistant_text\n", fake.wfile.getvalue())
+        self.assertIn(b'data: {"text": "hi", "type": "assistant_text"}\n\n', fake.wfile.getvalue())
 
     def test_rendered_web_ui_blocks_duplicate_send_while_request_is_in_flight(self):
         with tempfile.TemporaryDirectory() as tmp:

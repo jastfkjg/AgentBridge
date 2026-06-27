@@ -586,6 +586,10 @@ class AgentRunner:
         allow_tools: set[str] | None = None,
         audit_log: Path | None = None,
         session_id: str = "default",
+        llm_timeout: float | None = None,
+        graphql_endpoint: str = "",
+        database_url: str = "",
+        grpc_target: str = "",
     ) -> None:
         self.kit_dir = Path(kit_dir)
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
@@ -598,6 +602,7 @@ class AgentRunner:
         self.model = model or os.environ.get("ANTHROPIC_MODEL", "") or _DEFAULT_MODEL
         self.session_id = session_id or "default"
         self.sdk_session_id = _agent_sdk_session_id(self.kit_dir, self.session_id)
+        self.llm_timeout = llm_timeout
 
         os.environ.setdefault("ANTHROPIC_API_KEY", self.api_key)
         if self.base_url:
@@ -620,6 +625,9 @@ class AgentRunner:
                 deny_risks=deny_risks or set(),
                 allow_tools=allow_tools or set(),
                 audit_log=audit_log,
+                graphql_endpoint=graphql_endpoint,
+                database_url=database_url,
+                grpc_target=grpc_target,
             )
         )
         self._client: Any | None = None
@@ -646,7 +654,7 @@ class AgentRunner:
         with self._query_lock:
             loop = self._ensure_client_loop()
             future = asyncio.run_coroutine_threadsafe(self._query_messages_async(prompt), loop)
-            return future.result()
+            return future.result(timeout=self.llm_timeout)
 
     def query_text(self, prompt: str) -> str:
         if "query" in self.__dict__:

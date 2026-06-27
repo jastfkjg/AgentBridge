@@ -4,12 +4,14 @@ import json
 import os
 import re
 import shlex
+import threading
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from agentbridge.mcp_server import AgentBridgeMCPServer, MCPServerConfig, build_http_request_preview
+from agentbridge.adapters import AdapterRuntimeConfig, build_request_preview
+from agentbridge.mcp_server import AgentBridgeMCPServer, MCPServerConfig
 from agentbridge.runtime import dry_run, load_capabilities, validate_args
 
 
@@ -31,6 +33,13 @@ class ChatConfig:
     audit_log: Path | None = None
     agent_enabled: bool = True
     agent_runner: Any | None = field(default=None, repr=False)
+    llm_api_key: str = ""
+    llm_base_url: str = ""
+    llm_model: str = ""
+    llm_timeout: float | None = None
+    graphql_endpoint: str = ""
+    database_url: str = ""
+    grpc_target: str = ""
 
 
 @dataclass
@@ -46,6 +55,15 @@ class PendingCall:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PendingCall":
         return cls(id=data["id"], tool=data["tool"], args=data.get("args", {}), plan=data.get("plan", {}))
+
+
+@dataclass
+class ChatEvent:
+    type: str
+    data: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": self.type, **self.data}
 
 
 @dataclass
@@ -121,6 +139,8 @@ class ChatSession:
         self.pending: PendingCall | None = PendingCall.from_dict(pending_data) if isinstance(pending_data, dict) else None
         self.agent_runner = config.agent_runner
         self._agent_runner_supplied = config.agent_runner is not None
+        self._active_request_id = ""
+        self._active_cancel = threading.Event()
 
     @staticmethod
     def _build_server(config: ChatConfig) -> AgentBridgeMCPServer:
@@ -135,6 +155,9 @@ class ChatSession:
                 deny_risks=config.deny_risks,
                 allow_tools=config.allow_tools,
                 audit_log=config.audit_log,
+                graphql_endpoint=config.graphql_endpoint,
+                database_url=config.database_url,
+                grpc_target=config.grpc_target,
             )
         )
 
@@ -179,6 +202,43 @@ class ChatSession:
         tool_name, args = parsed
         return self.call_tool(tool_name, args, confirmed=False)
 
+    def stream_process(self, message: str) -> Any:
+        text = message.strip()
+        if not text:
+            yield ChatEvent("error", {"message": "Enter a message, /tools, /run <tool> key=value, confirm, or cancel."})
+            return
+        lowered = text.lower()
+        parsed = parse_tool_request(text, self.capabilities)
+        should_stream_agent = (
+            not parsed
+            and not text.startswith("/")
+            and lowered not in {"/help", "help", "?", "/tools", "tools", "list tools", "/history", "history", "cancel", "/cancel", "confirm", "/confirm"}
+            and not lowered.startswith("confirm")
+        )
+        if should_stream_agent:
+            yield from self._stream_agent_reply(text)
+            return
+        response = self.process(message)
+        yield from self._events_from_response(response)
+
+    def interrupt(self) -> ChatResponse:
+        self._active_cancel.set()
+        runner = self.agent_runner
+        interrupt = getattr(runner, "interrupt", None)
+        if callable(interrupt):
+            try:
+                interrupt()
+            except Exception:
+                pass
+        close = getattr(runner, "close", None)
+        if callable(close) and not self._agent_runner_supplied:
+            try:
+                close()
+            except Exception:
+                pass
+            self.agent_runner = None
+        return self._reply("interrupted", "Current Agent request interrupted.")
+
     def call_tool(self, tool_name: str, args: dict[str, Any], confirmed: bool = False) -> ChatResponse:
         if tool_name not in self.capabilities:
             return self._reply("unknown_tool", f"Unknown tool: {tool_name}. Try /tools.")
@@ -190,13 +250,21 @@ class ChatSession:
             return self._reply("invalid_arguments", message)
 
         plan = dry_run(self.config.kit_dir, tool_name, args, confirmed=confirmed)
-        if plan.get("transport", {}).get("type") == "http":
-            plan["request_preview"] = build_http_request_preview(
+        try:
+            plan["request_preview"] = build_request_preview(
                 capability=self.capabilities[tool_name],
                 args=args,
-                base_url=self.config.base_url,
-                headers=self.config.headers,
+                config=AdapterRuntimeConfig(
+                    base_url=self.config.base_url,
+                    headers=self.config.headers,
+                    timeout=self.config.timeout,
+                    graphql_endpoint=self.config.graphql_endpoint,
+                    database_url=self.config.database_url,
+                    grpc_target=self.config.grpc_target,
+                ),
             )
+        except Exception as exc:
+            plan["request_preview"] = {"error": str(exc)}
         if plan["requires_confirmation"] and not confirmed:
             self.pending = PendingCall(id=str(uuid.uuid4())[:8], tool=tool_name, args=args, plan=plan)
             self._save()
@@ -290,10 +358,14 @@ class ChatSession:
         if runner is None:
             return self._reply("agent_unavailable", agent_unavailable_message())
         try:
+            self._active_request_id = str(uuid.uuid4())
+            self._active_cancel.clear()
             if hasattr(runner, "query_text"):
                 message = str(runner.query_text(text)).strip()
             else:
                 message = ""
+            if self._active_cancel.is_set():
+                return self._reply("interrupted", "Current Agent request interrupted.")
             current_usage = getattr(runner, "last_usage", {})
             if isinstance(current_usage, dict) and current_usage:
                 self._record_usage(current_usage)
@@ -302,17 +374,75 @@ class ChatSession:
             return self._reply("agent_response", message)
         except Exception as exc:
             return self._reply("agent_error", f"AI agent request failed: {exc}")
+        finally:
+            self._active_request_id = ""
+
+    def _stream_agent_reply(self, text: str) -> Any:
+        self._remember("user", text)
+        if not self.config.agent_enabled:
+            response = self._reply("agent_unavailable", agent_unavailable_message())
+            yield from self._events_from_response(response)
+            return
+        runner = self._get_agent_runner()
+        if runner is None:
+            response = self._reply("agent_unavailable", agent_unavailable_message())
+            yield from self._events_from_response(response)
+            return
+        request_id = str(uuid.uuid4())
+        self._active_request_id = request_id
+        self._active_cancel.clear()
+        yield ChatEvent("message_start", {"request_id": request_id, "model": getattr(runner, "model", self.config.llm_model or "")})
+        chunks: list[str] = []
+        try:
+            if hasattr(runner, "query_messages"):
+                messages = runner.query_messages(text)
+            elif hasattr(runner, "query_text"):
+                messages = [str(runner.query_text(text))]
+            else:
+                messages = []
+            saw_message_usage = False
+            for message in messages:
+                if self._active_cancel.is_set():
+                    yield ChatEvent("interrupted", {"message": "Current Agent request interrupted."})
+                    return
+                for event in self._events_from_agent_message(message):
+                    if event.type == "usage":
+                        saw_message_usage = True
+                    if event.type in {"assistant_text", "assistant_text_delta"}:
+                        content = str(event.data.get("text", ""))
+                        if content:
+                            chunks.append(content)
+                    yield event
+            current_usage = getattr(runner, "last_usage", {})
+            if isinstance(current_usage, dict) and current_usage and not saw_message_usage:
+                self._record_usage(current_usage)
+            final = "\n".join(chunk for chunk in chunks if chunk).strip() or "The AI agent did not return a response."
+            self._remember("assistant", final)
+            self._save()
+            yield ChatEvent("usage", {"usage": dict(self.usage)})
+            yield ChatEvent("done", {"status": "agent_response", "message": final, "usage": dict(self.usage)})
+        except Exception as exc:
+            message = f"AI agent request failed: {exc}"
+            self._remember("assistant", message)
+            self._save()
+            yield ChatEvent("error", {"message": message})
+        finally:
+            self._active_request_id = ""
 
     def _get_agent_runner(self) -> Any | None:
         if self.agent_runner is not None:
             return self.agent_runner
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        api_key = self.config.llm_api_key or os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
             return None
         try:
             from agentbridge.agent import AgentRunner
 
             self.agent_runner = AgentRunner(
                 self.config.kit_dir,
+                api_key=api_key,
+                base_url=self.config.llm_base_url or None,
+                model=self.config.llm_model or None,
                 target_base_url=self.config.base_url,
                 headers=self.config.headers,
                 execute=self.config.execute,
@@ -322,6 +452,10 @@ class ChatSession:
                 allow_tools=self.config.allow_tools,
                 audit_log=self.config.audit_log,
                 session_id=self.config.session_id,
+                llm_timeout=self.config.llm_timeout,
+                graphql_endpoint=self.config.graphql_endpoint,
+                database_url=self.config.database_url,
+                grpc_target=self.config.grpc_target,
             )
             return self.agent_runner
         except Exception:
@@ -383,6 +517,96 @@ class ChatSession:
                 self.usage[key] = usage[key]
         if "cost_usd" in usage:
             self.usage["session_cost_usd"] = float(self.usage.get("session_cost_usd", 0) or 0) + float(usage["cost_usd"])
+
+    def _events_from_response(self, response: ChatResponse) -> list[ChatEvent]:
+        events: list[ChatEvent] = [ChatEvent("message_start", {"status": response.status})]
+        if response.status == "needs_confirmation":
+            events.append(ChatEvent("confirmation_required", {"pending": response.pending, "message": response.message}))
+        elif response.status == "tool_result":
+            events.append(ChatEvent("tool_result", {"result": response.tool_result, "message": response.message}))
+        elif response.tools:
+            events.append(ChatEvent("tools", {"tools": response.tools, "message": response.message}))
+        else:
+            events.append(ChatEvent("assistant_text", {"text": response.message}))
+        if response.usage:
+            events.append(ChatEvent("usage", {"usage": response.usage}))
+        events.append(ChatEvent("done", response.to_dict()))
+        return events
+
+    def _events_from_agent_message(self, message: Any) -> list[ChatEvent]:
+        from agentbridge.agent import _agent_sdk_progress_events, _extract_agent_message_text, _extract_agent_result_text, _extract_agent_usage
+
+        events: list[ChatEvent] = []
+        for block in _message_content_blocks(message):
+            block_type = _content_block_type(block)
+            if block_type == "tool_use" or block_type.endswith("ToolUseBlock"):
+                events.append(
+                    ChatEvent(
+                        "tool_use",
+                        {
+                            "id": _content_block_value(block, "id") or _content_block_value(block, "tool_use_id"),
+                            "name": _content_block_value(block, "name") or _content_block_value(block, "tool_name") or "tool",
+                            "input": _content_block_value(block, "input") or {},
+                        },
+                    )
+                )
+            elif block_type == "tool_result" or block_type.endswith("ToolResultBlock"):
+                events.append(
+                    ChatEvent(
+                        "tool_result",
+                        {
+                            "tool_use_id": _content_block_value(block, "tool_use_id"),
+                            "content": _content_block_value(block, "content") or _content_block_value(block, "result") or _content_block_value(block, "text"),
+                            "is_error": bool(_content_block_value(block, "is_error") or _content_block_value(block, "isError")),
+                        },
+                    )
+                )
+            elif "thinking" in block_type.lower() or "reasoning" in block_type.lower():
+                events.append(ChatEvent("thinking", {"message": "Claude Agent SDK internal reasoning step completed."}))
+        result_text = _extract_agent_result_text(message)
+        text = result_text or _extract_agent_message_text(message)
+        if text:
+            events.append(ChatEvent("assistant_text", {"text": text}))
+        usage = _extract_agent_usage(message)
+        if usage:
+            self._record_usage(usage)
+            events.append(ChatEvent("usage", {"usage": dict(self.usage)}))
+        for progress in _agent_sdk_progress_events(message):
+            events.append(ChatEvent("timeline", {"message": progress}))
+        return events
+
+
+def _message_content_blocks(message: Any) -> list[Any]:
+    if isinstance(message, str):
+        return []
+    if isinstance(message, dict):
+        content = message.get("content", [])
+    else:
+        content = getattr(message, "content", [])
+    if content is None:
+        return []
+    if isinstance(content, list):
+        return content
+    if isinstance(content, tuple):
+        return list(content)
+    if isinstance(content, str):
+        return []
+    return [content]
+
+
+def _content_block_type(block: Any) -> str:
+    if isinstance(block, dict):
+        return str(block.get("type", ""))
+    value = getattr(block, "type", None)
+    if isinstance(value, str):
+        return value
+    return block.__class__.__name__
+
+
+def _content_block_value(block: Any, key: str) -> Any:
+    if isinstance(block, dict):
+        return block.get(key)
+    return getattr(block, key, None)
 
 
 def parse_tool_request(text: str, capabilities: dict[str, dict[str, Any]]) -> tuple[str, dict[str, Any]] | None:

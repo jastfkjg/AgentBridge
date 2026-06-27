@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ from agentbridge.policy import classify_risk, confirmation_required, infer_actio
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 SOURCE_SUFFIXES = {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".kt", ".go", ".rb", ".php"}
-SCHEMA_SUFFIXES = {".json", ".yaml", ".yml", ".graphql", ".gql", ".sql"}
+SCHEMA_SUFFIXES = {".json", ".yaml", ".yml", ".graphql", ".gql", ".sql", ".proto"}
 
 
 class CapabilityDiscoverer:
@@ -51,7 +52,11 @@ class CapabilityDiscoverer:
             return discover_graphql(file, read_text(file))
         if suffix == ".sql":
             return discover_sql(file, read_text(file))
-        return discover_source_routes(file, read_text(file))
+        if suffix == ".proto":
+            return discover_grpc(file, read_text(file))
+        text = read_text(file)
+        plugin_capabilities = discover_python_plugin(file, text) if suffix == ".py" else []
+        return plugin_capabilities or discover_source_routes(file, text)
 
 
 def discover_openapi(file: Path, spec: dict[str, Any]) -> list[Capability]:
@@ -59,9 +64,12 @@ def discover_openapi(file: Path, spec: dict[str, Any]) -> list[Capability]:
     paths = spec.get("paths", {})
     if not isinstance(paths, dict):
         return capabilities
+    global_security = spec.get("security", [])
+    security_schemes = ((spec.get("components") or {}).get("securitySchemes") or {})
     for route, methods in paths.items():
         if not isinstance(methods, dict):
             continue
+        path_parameters = methods.get("parameters", []) if isinstance(methods.get("parameters", []), list) else []
         for method, operation in methods.items():
             if method.lower() not in HTTP_METHODS or not isinstance(operation, dict):
                 continue
@@ -69,7 +77,18 @@ def discover_openapi(file: Path, spec: dict[str, Any]) -> list[Capability]:
             resource = resource_from_path(route)
             action = infer_action(method, operation_id, route)
             risk = classify_risk(action, method, route, operation_id)
-            params = schema_from_openapi_operation(operation)
+            operation_parameters = list(path_parameters) + list(operation.get("parameters", []) or [])
+            params = schema_from_openapi_operation(operation, operation_parameters)
+            transport = {
+                "type": "http",
+                "method": method.upper(),
+                "path": route,
+                "operation_id": operation_id,
+                "parameters": openapi_parameter_locations(operation_parameters),
+            }
+            auth = openapi_auth_requirements(operation, global_security, security_schemes)
+            if auth:
+                transport["auth"] = auth
             capabilities.append(
                 Capability(
                     name=capability_name(action, resource),
@@ -81,17 +100,17 @@ def discover_openapi(file: Path, spec: dict[str, Any]) -> list[Capability]:
                     risk=risk,
                     confirm_required=confirmation_required(risk),
                     source=SourceRef("openapi", str(file), f"{method.upper()} {route}"),
-                    transport={"type": "http", "method": method.upper(), "path": route, "operation_id": operation_id},
+                    transport=transport,
                     dry_run_supported=method.upper() != "GET",
                 )
             )
     return capabilities
 
 
-def schema_from_openapi_operation(operation: dict[str, Any]) -> dict[str, Any]:
+def schema_from_openapi_operation(operation: dict[str, Any], parameters: list[Any] | None = None) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     required: list[str] = []
-    for param in operation.get("parameters", []) or []:
+    for param in parameters if parameters is not None else operation.get("parameters", []) or []:
         if not isinstance(param, dict):
             continue
         name = param.get("name")
@@ -121,10 +140,10 @@ def discover_graphql(file: Path, text: str) -> list[Capability]:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(([^)]*)\))?\s*:", line)
+            match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(([^)]*)\))?\s*:\s*([^#]+)", line)
             if not match:
                 continue
-            field_name, args = match.group(1), match.group(2) or ""
+            field_name, args, return_type = match.group(1), match.group(2) or "", match.group(3).strip()
             action = infer_action(None, field_name, "")
             if block_name == "Query" and action == "run":
                 action = "list"
@@ -132,6 +151,7 @@ def discover_graphql(file: Path, text: str) -> list[Capability]:
             risk = classify_risk(action, None, "", field_name)
             if block_name == "Mutation" and risk == "read":
                 risk = "write"
+            variables = graphql_variables(args)
             capabilities.append(
                 Capability(
                     name=capability_name(action, resource),
@@ -143,7 +163,13 @@ def discover_graphql(file: Path, text: str) -> list[Capability]:
                     risk=risk,
                     confirm_required=confirmation_required(risk),
                     source=SourceRef("graphql", str(file), f"{block_name}.{field_name}"),
-                    transport={"type": "graphql", "operation": block_name.lower(), "field": field_name},
+                    transport={
+                        "type": "graphql",
+                        "operation": block_name.lower(),
+                        "field": field_name,
+                        "variables": variables,
+                        "return_type": return_type,
+                    },
                     dry_run_supported=block_name == "Mutation",
                 )
             )
@@ -153,39 +179,205 @@ def discover_graphql(file: Path, text: str) -> list[Capability]:
 def schema_from_graphql_args(args: str) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     required: list[str] = []
-    for name, typ, bang in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_\[\]!][A-Za-z0-9_\[\]!]*)\s*(!?)", args):
-        clean_type = typ.replace("[", "").replace("]", "").replace("!", "")
-        properties[snake_case(name)] = {"type": graphql_type_to_json_type(clean_type)}
-        if "!" in typ or bang:
-            required.append(snake_case(name))
+    for item in graphql_variables(args):
+        properties[item["arg"]] = {"type": graphql_type_to_json_type(str(item["type"]).replace("!", ""))}
+        if item["required"]:
+            required.append(item["arg"])
     return object_schema(properties, required)
+
+
+def graphql_variables(args: str) -> list[dict[str, Any]]:
+    variables: list[dict[str, Any]] = []
+    for name, typ in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([A-Za-z_\[\]!][A-Za-z0-9_\[\]!]*)", args):
+        clean_type = typ.replace("[", "").replace("]", "")
+        variables.append(
+            {
+                "name": name,
+                "arg": snake_case(name),
+                "type": clean_type,
+                "required": clean_type.endswith("!"),
+            }
+        )
+    return variables
 
 
 def discover_sql(file: Path, text: str) -> list[Capability]:
     capabilities: list[Capability] = []
     for match in re.finditer(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\"]?([A-Za-z_][A-Za-z0-9_]*)[`\"]?\s*\((.*?)\);", text, re.I | re.S):
-        table = singular(snake_case(match.group(1)))
+        table_name = match.group(1)
+        table = singular(snake_case(table_name))
         columns = parse_sql_columns(match.group(2))
-        for action in ["list", "create", "update", "delete"]:
-            risk = classify_risk(action)
-            properties = columns if action in {"create", "update"} else {"id": {"type": "string"}}
-            required = [] if action == "list" else ["id"] if action in {"update", "delete"} else []
+        properties = {
+            "id": {"type": "string", "description": "Optional primary-key filter."},
+            "limit": {"type": "number", "description": "Maximum rows to return. Defaults to 100 and is capped at 100."},
+        }
+        capabilities.append(
+            Capability(
+                name=capability_name("list", table),
+                domain=domain_from_resource(table),
+                resource=table,
+                action="list",
+                description=f"List {table} records from database table {table_name} with a read-only SELECT.",
+                input_schema=object_schema(properties, []),
+                risk="read",
+                confirm_required=False,
+                source=SourceRef("database_schema", str(file), f"table {table_name}"),
+                transport={
+                    "type": "database",
+                    "operation": "list",
+                    "table": table_name,
+                    "columns": list(columns),
+                    "read_only": True,
+                    "default_limit": 100,
+                    "max_limit": 100,
+                },
+                dry_run_supported=True,
+            )
+        )
+    return capabilities
+
+
+def discover_grpc(file: Path, text: str) -> list[Capability]:
+    capabilities: list[Capability] = []
+    messages = parse_proto_messages(text)
+    for service_match in re.finditer(r"service\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{(.*?)\}", text, re.S):
+        service_name, body = service_match.group(1), service_match.group(2)
+        for rpc_name, request_type, response_type in re.findall(
+            r"rpc\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\)\s*returns\s*\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\)",
+            body,
+        ):
+            action = infer_action(None, rpc_name, "")
+            resource = infer_resource_from_name(rpc_name, action)
+            risk = classify_risk(action, None, "", rpc_name)
             capabilities.append(
                 Capability(
-                    name=capability_name(action, table),
-                    domain=domain_from_resource(table),
-                    resource=table,
+                    name=capability_name(action, resource),
+                    domain=domain_from_resource(resource),
+                    resource=resource,
                     action=action,
-                    description=f"{action} {table} records from database table {match.group(1)}",
-                    input_schema=object_schema(properties, required),
+                    description=f"gRPC {service_name}/{rpc_name} method from proto service {service_name}",
+                    input_schema=object_schema(messages.get(request_type.split(".")[-1], {}), []),
                     risk=risk,
                     confirm_required=confirmation_required(risk),
-                    source=SourceRef("database_schema", str(file), f"table {match.group(1)}"),
-                    transport={"type": "database", "table": match.group(1)},
+                    source=SourceRef("grpc_proto", str(file), f"{service_name}/{rpc_name}"),
+                    transport={
+                        "type": "grpc",
+                        "service": service_name,
+                        "method": rpc_name,
+                        "request_type": request_type,
+                        "response_type": response_type,
+                    },
                     dry_run_supported=True,
                 )
             )
     return capabilities
+
+
+def discover_python_plugin(file: Path, text: str) -> list[Capability]:
+    if "agentbridge_discover" not in text and "AGENTBRIDGE_PLUGIN" not in text:
+        return []
+    module_name = f"agentbridge_discovery_plugin_{abs(hash(str(file.resolve())))}"
+    spec = importlib.util.spec_from_file_location(module_name, file)
+    if spec is None or spec.loader is None:
+        return []
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not bool(getattr(module, "AGENTBRIDGE_PLUGIN", False)) and not hasattr(module, "agentbridge_discover"):
+        return []
+    discover = getattr(module, "agentbridge_discover", None) or getattr(module, "discover", None)
+    if not callable(discover):
+        return []
+    raw = discover()
+    if not isinstance(raw, list):
+        return []
+    capabilities: list[Capability] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        data = dict(item)
+        source = dict(data.get("source", {}) or {})
+        source.setdefault("kind", "custom_python_plugin")
+        source["path"] = str(file)
+        source.setdefault("location", getattr(discover, "__name__", "agentbridge_discover"))
+        data["source"] = source
+        transport = dict(data.get("transport", {}) or {})
+        transport.setdefault("type", "python_plugin")
+        transport.setdefault("module", str(file))
+        data["transport"] = transport
+        capabilities.append(Capability.from_dict(data))
+    return capabilities
+
+
+def parse_proto_messages(text: str) -> dict[str, dict[str, Any]]:
+    messages: dict[str, dict[str, Any]] = {}
+    for message_name, body in re.findall(r"message\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{(.*?)\}", text, re.S):
+        fields: dict[str, Any] = {}
+        for typ, name in re.findall(r"(?:optional|required|repeated)?\s*([A-Za-z_][A-Za-z0-9_.<>]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\d+", body):
+            fields[snake_case(name)] = {"type": proto_type_to_json_type(typ)}
+        messages[message_name] = fields
+    return messages
+
+
+def openapi_parameter_locations(parameters: list[Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {"path": [], "query": [], "header": {}, "cookie": []}
+    for param in parameters:
+        if not isinstance(param, dict) or not param.get("name"):
+            continue
+        key = snake_case(str(param["name"]))
+        location = str(param.get("in", "query"))
+        if location == "header":
+            result["header"][key] = str(param["name"])
+        elif location in result and isinstance(result[location], list):
+            result[location].append(key)
+    return {key: value for key, value in result.items() if value}
+
+
+def openapi_auth_requirements(
+    operation: dict[str, Any],
+    global_security: Any,
+    security_schemes: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(security_schemes, dict):
+        return []
+    requirements = operation.get("security", global_security)
+    if not isinstance(requirements, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        for scheme_name, scopes in requirement.items():
+            scheme = security_schemes.get(scheme_name, {})
+            if not isinstance(scheme, dict):
+                continue
+            item = {
+                "scheme": scheme_name,
+                "type": scheme.get("type", ""),
+                "scopes": scopes if isinstance(scopes, list) else [],
+            }
+            if scheme.get("type") == "http":
+                item["scheme_type"] = scheme.get("scheme", "")
+                item["bearer_format"] = scheme.get("bearerFormat", "")
+            if scheme.get("type") == "apiKey":
+                item["in"] = scheme.get("in", "")
+                item["name"] = scheme.get("name", "")
+                if scheme.get("in") == "header" and scheme.get("name"):
+                    item["runtime_header"] = scheme.get("name")
+                if scheme.get("in") == "query" and scheme.get("name"):
+                    item["runtime_query"] = scheme.get("name")
+            if scheme.get("type") in {"oauth2", "openIdConnect"}:
+                item["flows"] = sorted((scheme.get("flows") or {}).keys()) if isinstance(scheme.get("flows"), dict) else []
+                item["open_id_connect_url"] = scheme.get("openIdConnectUrl", "")
+            result.append(item)
+    return result
+
+
+def proto_type_to_json_type(value: str) -> str:
+    if value in {"double", "float", "int32", "int64", "uint32", "uint64", "sint32", "sint64", "fixed32", "fixed64", "sfixed32", "sfixed64"}:
+        return "number"
+    if value == "bool":
+        return "boolean"
+    return "string"
 
 
 def discover_source_routes(file: Path, text: str) -> list[Capability]:

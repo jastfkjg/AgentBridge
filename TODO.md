@@ -17,20 +17,20 @@ AgentBridge 的目标：通过 Claude Agent SDK 解析已有项目或系统，�
 
 ## P0：Agent Chat 体验
 
-- [ ] 持久化 Claude Agent SDK client/session，支持多轮 resume
-- [ ] Web Chat 支持 SSE/WebSocket 流式响应
-- [ ] 在 UI 中实时展示 tool use、tool result、确认等待和执行结果
-- [ ] 增加 tool call timeline，方便用户理解 Agent 如何操作系统
-- [ ] 支持 cancel/interrupt 当前 Agent 请求
-- [ ] 展示 model、token usage、cost 等运行信息
+- [x] 持久化 Claude Agent SDK client/session，支持多轮 resume
+- [x] Web Chat 支持 SSE/WebSocket 流式响应
+- [x] 在 UI 中实时展示 tool use、tool result、确认等待和执行结果
+- [x] 增加 tool call timeline，方便用户理解 Agent 如何操作系统
+- [x] 支持 cancel/interrupt 当前 Agent 请求
+- [x] 展示 model、token usage、cost 等运行信息
 
 ## P1：更多系统 Adapter
 
-- [ ] GraphQL adapter：schema/introspection、query/mutation、variables 映射
-- [ ] SQL read-only adapter：只允许 SELECT、自动 LIMIT、默认 dry-run
-- [ ] gRPC adapter：解析 proto service/method 并生成 tools
-- [ ] Custom Python plugin adapter：允许用户自定义 discovery/dry-run/execute
-- [ ] OpenAPI auth scheme 自动映射到 runtime 配置
+- [x] GraphQL adapter：schema/introspection、query/mutation、variables 映射
+- [x] SQL read-only adapter：只允许 SELECT、自动 LIMIT、默认 dry-run
+- [x] gRPC adapter：解析 proto service/method 并生成 tools
+- [x] Custom Python plugin adapter：允许用户自定义 discovery/dry-run/execute
+- [x] OpenAPI auth scheme 自动映射到 runtime 配置
 
 ## P2：安全与治理
 
@@ -70,6 +70,6 @@ AgentBridge 的目标：通过 Claude Agent SDK 解析已有项目或系统，�
 
 ## 当前注意事项
 
-- 当前真实执行 adapter 主要覆盖 HTTP/OpenAPI transport。
+- 当前真实执行 adapter 覆盖 HTTP/OpenAPI、GraphQL、SQLite read-only SQL、grpcurl gRPC 和显式标记的 Python plugin。
 - `serve` 默认 dry-run，这是安全默认值。
 - 写入、删除、外部副作用类操作必须保留明确的人类确认路径。

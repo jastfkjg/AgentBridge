@@ -16,15 +16,15 @@ AgentBridge 将现有项目和系统自动解析为可通过 Claude Agent Chat �
 ## 核心能力
 
 - 使用 Claude Agent SDK 进行 AI 优先的项目分析。
-- 从 OpenAPI、GraphQL、SQL、数据库 Schema 和源码路由收集候选能力。
+- 从 OpenAPI、GraphQL、SQL、gRPC proto、显式 Python plugin 和源码路由收集候选能力。
 - 生成稳定的 `agentbridge-kit/v1` 协议目录，包含能力、工具、提示词、技能、资源 Schema、Guardrail、Dry-run 计划、客户端配置和测试。
 - 从同一套能力模型生成 Claude Agent SDK、MCP、Claude、OpenAI 和 Vercel AI 工具定义。
 - 通过 Web 或终端 Chat 在生成的工具层上控制系统能力。
 - 默认 Dry-run，高风险操作需要用户明确授权。
-- 支持会话历史、点击调用工具、必填参数提示、文件上传和 AI Token 用量。
+- 支持会话历史、Web Chat 流式响应、工具调用时间线、点击调用工具、必填参数提示、文件上传和 AI Token/成本信息。
 - 项目变化后可在已有 Kit 基础上继续分析。
 
-当前真实执行主要覆盖 HTTP/OpenAPI transport。GraphQL、数据库和后台任务目前可作为能力证据被发现，后续会扩展为执行 adapter。
+当前运行 adapter 覆盖 HTTP/OpenAPI、GraphQL POST、SQLite read-only SQL SELECT、基于 `grpcurl` 的 gRPC，以及显式标记的 Python plugin dry-run/execute hook。所有 transport 默认仍是 dry-run。
 
 ## 安装
 
@@ -97,7 +97,7 @@ agentbridge web .agentbridge/my-system-kit --port 8765
 - Base URL 校验和连通测试。
 - 点击工具后自动填入 `/run` 命令和必填参数。
 - 高风险操作显示明确的授权/取消按钮。
-- 最近会话、文件上传、Markdown 响应和 Claude Agent SDK Token 用量。
+- SSE 流式响应、工具调用时间线、中断按钮、最近会话、文件上传、Markdown 响应和 Claude Agent SDK model/token/cost 用量。
 
 真实系统模式仍会执行生成的 Guardrail 和确认规则。
 
@@ -147,6 +147,16 @@ agentbridge serve .agentbridge/my-system-kit
 agentbridge serve .agentbridge/my-system-kit \
   --base-url http://localhost:8080 \
   --bearer-env API_TOKEN \
+  --execute
+```
+
+GraphQL、SQL 和 gRPC 工具使用对应的运行目标：
+
+```bash
+agentbridge serve .agentbridge/my-system-kit \
+  --graphql-endpoint http://localhost:8080/graphql \
+  --database-url sqlite:///tmp/app.db \
+  --grpc-target 127.0.0.1:50051 \
   --execute
 ```
 

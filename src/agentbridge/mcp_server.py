@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 import json
-import re
 import sys
 from datetime import datetime, timezone
-import urllib.error
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-from agentbridge.runtime import DryRunError, dry_run, load_runtime_kit, validate_args
-
-_PATH_PARAM_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}|:([A-Za-z_][A-Za-z0-9_]*)")
-_SENSITIVE_HEADER_NAMES = {"authorization", "cookie", "proxy-authorization", "x-api-key", "api-key"}
+from agentbridge.adapters import (
+    AdapterError,
+    AdapterRuntimeConfig,
+    append_query,
+    build_http_request_preview,
+    build_http_url,
+    build_request_preview,
+    execute_http_tool,
+    execute_tool,
+    format_http_response,
+    redact_headers,
+)
+from agentbridge.runtime import dry_run, load_runtime_kit
 
 
 @dataclass
@@ -28,6 +33,9 @@ class MCPServerConfig:
     deny_risks: set[str] = field(default_factory=set)
     allow_tools: set[str] = field(default_factory=set)
     audit_log: Path | None = None
+    graphql_endpoint: str = ""
+    database_url: str = ""
+    grpc_target: str = ""
 
 
 class MCPServerError(ValueError):
@@ -119,16 +127,10 @@ class AgentBridgeMCPServer:
             self._audit(name, args, "blocked", plan)
             return _tool_text(plan, is_error=True)
 
-        transport = plan.get("transport", {})
-        if transport.get("type") != "http":
-            raise MCPServerError(f"Execution is only implemented for HTTP tools, got: {transport.get('type', 'unknown')}")
-        result = execute_http_tool(
-            capability=capability,
-            args=args,
-            base_url=self.config.base_url,
-            headers=self.config.headers,
-            timeout=self.config.timeout,
-        )
+        try:
+            result = execute_tool(capability, args, self._adapter_config())
+        except AdapterError as exc:
+            raise MCPServerError(str(exc)) from exc
         self._audit(name, args, "executed" if not result.get("error") else "error", result)
         return _tool_text(result, is_error=bool(result.get("error")))
 
@@ -161,142 +163,26 @@ class AgentBridgeMCPServer:
             handle.write(json.dumps(event, sort_keys=True) + "\n")
 
     def _attach_request_preview(self, plan: dict[str, Any], capability: dict[str, Any], args: dict[str, Any]) -> None:
-        if plan.get("transport", {}).get("type") != "http":
-            return
         try:
-            plan["request_preview"] = build_http_request_preview(
-                capability=capability,
-                args=args,
-                base_url=self.config.base_url,
-                headers=self.config.headers,
-            )
-        except MCPServerError as exc:
+            plan["request_preview"] = build_request_preview(capability, args, self._adapter_config())
+        except AdapterError as exc:
             plan["request_preview"] = {"error": str(exc)}
+
+    def _adapter_config(self) -> AdapterRuntimeConfig:
+        return AdapterRuntimeConfig(
+            base_url=self.config.base_url,
+            headers=self.config.headers,
+            timeout=self.config.timeout,
+            graphql_endpoint=self.config.graphql_endpoint,
+            database_url=self.config.database_url,
+            grpc_target=self.config.grpc_target,
+        )
 
     def _response(self, request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
     def _error(self, request_id: Any, code: int, message: str) -> dict[str, Any]:
         return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
-
-
-def execute_http_tool(
-    capability: dict[str, Any],
-    args: dict[str, Any],
-    base_url: str,
-    headers: dict[str, str] | None = None,
-    timeout: float = 30.0,
-) -> dict[str, Any]:
-    if not base_url:
-        raise MCPServerError("--base-url is required when --execute is enabled")
-
-    validation = validate_args(capability.get("input_schema", {}), args)
-    if validation["errors"]:
-        raise MCPServerError("; ".join(validation["errors"]))
-
-    transport = capability.get("transport", {})
-    method = str(transport.get("method", "GET")).upper()
-    path = str(transport.get("path", ""))
-    if not path:
-        raise MCPServerError(f"HTTP tool {capability.get('name', '')} is missing transport.path")
-
-    url, remaining_args = build_http_url(base_url, path, args)
-    data: bytes | None = None
-    request_headers = dict(headers or {})
-    if method not in {"GET", "HEAD", "OPTIONS"} and remaining_args:
-        data = json.dumps(remaining_args).encode("utf-8")
-        request_headers.setdefault("Content-Type", "application/json")
-    elif method in {"GET", "HEAD", "OPTIONS"} and remaining_args:
-        url = append_query(url, remaining_args)
-
-    req = urllib.request.Request(url, data=data, headers=request_headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            body = response.read()
-            return {
-                "tool": capability.get("name", ""),
-                "status": "executed",
-                "request": {"method": method, "url": url, "body": remaining_args if data else None},
-                "response": format_http_response(response.status, dict(response.headers), body),
-            }
-    except urllib.error.HTTPError as exc:
-        body = exc.read()
-        return {
-            "tool": capability.get("name", ""),
-            "status": "http_error",
-            "error": f"HTTP {exc.code}",
-            "request": {"method": method, "url": url, "body": remaining_args if data else None},
-            "response": format_http_response(exc.code, dict(exc.headers), body),
-        }
-    except urllib.error.URLError as exc:
-        raise MCPServerError(f"HTTP request failed: {exc.reason}") from exc
-
-
-def build_http_request_preview(
-    capability: dict[str, Any],
-    args: dict[str, Any],
-    base_url: str = "",
-    headers: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    transport = capability.get("transport", {})
-    method = str(transport.get("method", "GET")).upper()
-    path = str(transport.get("path", ""))
-    if not path:
-        raise MCPServerError(f"HTTP tool {capability.get('name', '')} is missing transport.path")
-    url, remaining_args = build_http_url(base_url, path, args)
-    body: dict[str, Any] | None = None
-    if method in {"GET", "HEAD", "OPTIONS"}:
-        url = append_query(url, remaining_args)
-    elif remaining_args:
-        body = remaining_args
-    return {
-        "method": method,
-        "url": url,
-        "headers": redact_headers(headers or {}),
-        "body": body,
-    }
-
-
-def redact_headers(headers: dict[str, str]) -> dict[str, str]:
-    redacted: dict[str, str] = {}
-    for key, value in headers.items():
-        if key.lower() in _SENSITIVE_HEADER_NAMES:
-            redacted[key] = "<redacted>"
-        else:
-            redacted[key] = value
-    return redacted
-
-
-def build_http_url(base_url: str, path: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    remaining = dict(args)
-
-    def replace(match: re.Match[str]) -> str:
-        key = match.group(1) or match.group(2)
-        if key not in remaining:
-            raise MCPServerError(f"Missing path argument: {key}")
-        value = remaining.pop(key)
-        return urllib.parse.quote(str(value), safe="")
-
-    rendered_path = _PATH_PARAM_PATTERN.sub(replace, path)
-    return f"{base_url.rstrip('/')}/{rendered_path.lstrip('/')}", remaining
-
-
-def append_query(url: str, query_args: dict[str, Any]) -> str:
-    if not query_args:
-        return url
-    separator = "&" if urllib.parse.urlparse(url).query else "?"
-    return f"{url}{separator}{urllib.parse.urlencode(query_args, doseq=True)}"
-
-
-def format_http_response(status: int, headers: dict[str, str], body: bytes) -> dict[str, Any]:
-    text = body.decode("utf-8", errors="replace")
-    parsed: Any = None
-    if text:
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            parsed = text
-    return {"status": status, "headers": headers, "body": parsed}
 
 
 def run_stdio_server(

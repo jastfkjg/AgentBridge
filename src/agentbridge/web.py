@@ -129,6 +129,7 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                         "pending": session.pending.to_dict() if session.pending else None,
                         "tools": session.tool_summaries(),
                         "conversations": conversation_summaries(session.config, session.config.user, session.config.kit_dir),
+                        "usage": dict(session.usage),
                         "runtime": {
                             "execute": session.config.execute,
                             "base_url": session.config.base_url,
@@ -140,7 +141,7 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path not in {"/api/chat", "/api/tool", "/api/connectivity"}:
+            if parsed.path not in {"/api/chat", "/api/chat/stream", "/api/chat/interrupt", "/api/tool", "/api/connectivity"}:
                 self._send_error(HTTPStatus.NOT_FOUND, "Not found")
                 return
             try:
@@ -153,6 +154,17 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                     self._send_json(result)
                     return
                 session = self._session_from_body(body)
+                if parsed.path == "/api/chat/interrupt":
+                    response = session.interrupt()
+                    self._send_json(response.to_dict())
+                    return
+                if parsed.path == "/api/chat/stream":
+                    message = format_chat_message_with_attachments(
+                        str(body.get("message", "")),
+                        body.get("attachments", []),
+                    )
+                    self._send_sse(session.stream_process(message))
+                    return
                 if parsed.path == "/api/chat":
                     message = format_chat_message_with_attachments(
                         str(body.get("message", "")),
@@ -241,6 +253,25 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+        def _send_sse(self, events: Any) -> None:
+            self.send_response(HTTPStatus.OK.value)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            for event in events:
+                payload = event.to_dict() if hasattr(event, "to_dict") else dict(event)
+                event_type = str(payload.get("type") or getattr(event, "type", "message"))
+                data = json.dumps(payload, sort_keys=True)
+                frame = f"event: {event_type}\ndata: {data}\n\n".encode("utf-8")
+                try:
+                    self.wfile.write(frame)
+                    flush = getattr(self.wfile, "flush", None)
+                    if callable(flush):
+                        flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    break
 
         def _send_error(self, status: HTTPStatus, message: str) -> None:
             self._send_json({"error": message}, status=status)
@@ -835,6 +866,20 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       font-size: 18px;
       font-variant-numeric: tabular-nums;
     }}
+    .timeline {{
+      display: grid;
+      gap: 6px;
+      margin-top: 14px;
+    }}
+    .timeline-item {{
+      padding: 8px 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }}
     .actions {{
       display: flex;
       gap: 8px;
@@ -1423,6 +1468,11 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
                   <path d="M12 19V5m0 0-6 6m6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path>
                 </svg>
               </button>
+              <button class="send-button danger" id="interruptBtn" title="Stop current request" aria-label="Stop current request" hidden>
+                <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 7h10v10H7z" fill="currentColor"></path>
+                </svg>
+              </button>
             </div>
           </div>
         </div>
@@ -1464,6 +1514,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
             <div class="usage-stat"><span class="subtle">Session total</span><strong id="usageSessionTotal">0</strong></div>
           </div>
           <div class="field-help" id="usageMeta">Usage appears after an AI response.</div>
+          <div class="timeline" id="timeline"></div>
         </section>
       </div>
     </aside>
@@ -1480,6 +1531,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       messages: document.getElementById('messages'),
       message: document.getElementById('message'),
       send: document.getElementById('send'),
+      interrupt: document.getElementById('interruptBtn'),
       fileInput: document.getElementById('fileInput'),
       attachments: document.getElementById('attachments'),
       commandMenu: document.getElementById('commandMenu'),
@@ -1499,11 +1551,13 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       usageOutput: document.getElementById('usageOutput'),
       usageTotal: document.getElementById('usageTotal'),
       usageSessionTotal: document.getElementById('usageSessionTotal'),
-      usageMeta: document.getElementById('usageMeta')
+      usageMeta: document.getElementById('usageMeta'),
+      timeline: document.getElementById('timeline')
     }};
     let toolsCache = [];
     let attachments = [];
     let sendInFlight = false;
+    let activeStreamController = null;
     let runtimeExecute = initialExecuteMode;
     const markdownRenderer = window.markdownit ? window.markdownit({{
       html: false,
@@ -1657,6 +1711,12 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       bubble.replaceChildren(role === 'user' ? renderPlainText(text) : renderMarkdown(text));
       els.messages.appendChild(node);
       els.messages.scrollTop = els.messages.scrollHeight;
+      return node;
+    }}
+    function updateAssistantMessage(node, text) {{
+      const bubble = node.querySelector('.bubble');
+      bubble.replaceChildren(renderMarkdown(text));
+      els.messages.scrollTop = els.messages.scrollHeight;
     }}
     function setDrawer(name, open = true) {{
       document.querySelectorAll('.drawer-pane').forEach(pane => {{
@@ -1682,6 +1742,33 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       }});
       return await res.json();
     }}
+    async function readStreamResponse(res, onEvent) {{
+      if (!res.ok) {{
+        const payload = await res.json().catch(() => ({{ error: 'Request failed.' }}));
+        throw new Error(payload.error || 'Request failed.');
+      }}
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {{
+        const {{ value, done }} = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, {{ stream: true }});
+        let boundary = buffer.indexOf('\\n\\n');
+        while (boundary >= 0) {{
+          const frame = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const dataLine = frame.split('\\n').find(line => line.startsWith('data: '));
+          if (dataLine) onEvent(JSON.parse(dataLine.slice(6)));
+          boundary = buffer.indexOf('\\n\\n');
+        }}
+      }}
+      buffer += decoder.decode();
+      if (buffer.trim()) {{
+        const dataLine = buffer.split('\\n').find(line => line.startsWith('data: '));
+        if (dataLine) onEvent(JSON.parse(dataLine.slice(6)));
+      }}
+    }}
     function displayTextWithAttachments(text) {{
       if (!attachments.length) return text;
       const lines = attachments.map(file => '- ' + file.name + ' (' + file.size + ' bytes)');
@@ -1690,6 +1777,8 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     function setSending(sending) {{
       sendInFlight = sending;
       els.send.disabled = sending;
+      els.send.hidden = sending;
+      els.interrupt.hidden = !sending;
       els.send.setAttribute('aria-busy', sending ? 'true' : 'false');
     }}
     async function sendMessage(text) {{
@@ -1707,21 +1796,79 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         attachments = [];
         renderAttachments();
         renderCommandMenu();
-        const data = await post('/api/chat', payload({{ message: text, attachments: outgoingAttachments }}));
-        if (data.error) {{
-          addMessage('assistant', data.error);
-          return;
-        }}
-        addMessage('assistant', data.message);
-        renderPending(data.pending);
-        renderUsage(data.usage || {{}});
-        if (data.tools && data.tools.length) renderTools(data.tools);
-        if (data.conversations) renderConversations(data.conversations);
+        let assistantNode = null;
+        let assistantText = '';
+        let sawDone = false;
+        activeStreamController = new AbortController();
+        const res = await fetch('/api/chat/stream', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify(payload({{ message: text, attachments: outgoingAttachments }})),
+          signal: activeStreamController.signal
+        }});
+        await readStreamResponse(res, event => {{
+          renderTimelineEvent(event);
+          if (event.type === 'assistant_text' || event.type === 'assistant_text_delta') {{
+            assistantText += event.text || '';
+            if (!assistantNode) assistantNode = addMessage('assistant', '');
+            updateAssistantMessage(assistantNode, assistantText);
+          }} else if (event.type === 'confirmation_required') {{
+            renderPending(event.pending);
+            if (event.message && !assistantNode) assistantNode = addMessage('assistant', event.message);
+          }} else if (event.type === 'tool_result' && event.message && !assistantNode) {{
+            assistantNode = addMessage('assistant', event.message);
+          }} else if (event.type === 'tools') {{
+            renderTools(event.tools || []);
+            if (event.message && !assistantNode) assistantNode = addMessage('assistant', event.message);
+          }} else if (event.type === 'usage') {{
+            renderUsage(event.usage || {{}});
+          }} else if (event.type === 'error') {{
+            addMessage('assistant', event.message || 'Request failed.');
+          }} else if (event.type === 'done') {{
+            sawDone = true;
+            if (event.pending) renderPending(event.pending);
+            if (event.usage) renderUsage(event.usage);
+            if (event.tools && event.tools.length) renderTools(event.tools);
+            if (event.conversations) renderConversations(event.conversations);
+            if (!assistantText && event.message && !assistantNode) assistantNode = addMessage('assistant', event.message);
+          }}
+        }});
+        if (!sawDone && !assistantNode) addMessage('assistant', 'Request ended before AgentBridge returned a response.');
       }} catch (error) {{
-        addMessage('assistant', 'Request failed: ' + (error && error.message ? error.message : error));
+        if (!(error && error.name === 'AbortError')) {{
+          addMessage('assistant', 'Request failed: ' + (error && error.message ? error.message : error));
+        }}
       }} finally {{
+        activeStreamController = null;
         setSending(false);
       }}
+    }}
+    async function interruptRequest() {{
+      if (!sendInFlight) return;
+      try {{
+        await post('/api/chat/interrupt', payload());
+      }} catch (error) {{
+        // The in-flight stream may already be closing.
+      }}
+      if (activeStreamController) activeStreamController.abort();
+      addMessage('assistant', 'Current Agent request interrupted.');
+      setSending(false);
+    }}
+    function renderTimelineEvent(event) {{
+      if (!els.timeline) return;
+      let label = '';
+      if (event.type === 'message_start') label = event.model ? 'Model ' + event.model : 'Request started';
+      if (event.type === 'tool_use') label = 'Tool use · ' + event.name;
+      if (event.type === 'tool_result') label = 'Tool result · ' + (event.tool_use_id || 'tool');
+      if (event.type === 'confirmation_required') label = 'Waiting for confirmation';
+      if (event.type === 'interrupted') label = 'Interrupted';
+      if (event.type === 'timeline') label = event.message || 'Agent progress';
+      if (!label) return;
+      const item = document.createElement('div');
+      item.className = 'timeline-item';
+      item.textContent = label;
+      els.timeline.prepend(item);
+      while (els.timeline.children.length > 30) els.timeline.lastElementChild.remove();
     }}
     function renderPending(pending) {{
       if (!pending) {{
@@ -1898,6 +2045,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       renderUsage(data.usage || {{}});
     }}
     document.getElementById('send').onclick = () => sendMessage(els.message.value);
+    document.getElementById('interruptBtn').onclick = interruptRequest;
     document.getElementById('attachBtn').onclick = () => els.fileInput.click();
     els.runtimeMode.querySelectorAll('[data-mode]').forEach(button => {{
       button.addEventListener('click', () => applyRuntimeMode(button.dataset.mode));
