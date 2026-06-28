@@ -501,7 +501,7 @@ class AIGenerator:
         options_kwargs: dict[str, Any] = {
             "system_prompt": system_prompt,
             "max_turns": max_turns or _env_int("AGENTBRIDGE_AGENT_MAX_TURNS", 12),
-            "model": self.model,
+            "model": None if self.base_url else self.model,
             "tools": read_only_tools,
             "allowed_tools": read_only_tools,
             "disallowed_tools": ["Write", "Edit", "NotebookEdit", "Bash", "Agent"],
@@ -513,9 +513,12 @@ class AIGenerator:
         }
         if self.base_url:
             env["ANTHROPIC_BASE_URL"] = self.base_url
+        if self.model:
+            env["ANTHROPIC_MODEL"] = self.model
         options_kwargs["env"] = env
         if self.base_url:
             options_kwargs["base_url"] = self.base_url
+            options_kwargs["settings"] = _agent_sdk_settings(self.base_url, self.model)
         if cwd:
             options_kwargs["cwd"] = cwd
         options = _construct_with_supported_kwargs(ClaudeAgentOptions, options_kwargs)
@@ -730,6 +733,12 @@ class AgentRunner:
             tools=kit_tools,
         )
         allowed = [f"mcp__agentbridge-kit__{name}" for name in self._capabilities]
+        sdk_env = {
+            "ANTHROPIC_API_KEY": self.api_key,
+            "ANTHROPIC_MODEL": self.model,
+            **({"ANTHROPIC_BASE_URL": self.base_url} if self.base_url else {}),
+        }
+        sdk_settings = _agent_sdk_settings(self.base_url, self.model)
 
         async def connect_with_session(session_id: str) -> Any:
             options = _construct_with_supported_kwargs(
@@ -739,12 +748,10 @@ class AgentRunner:
                     "mcp_servers": {"agentbridge-kit": server},
                     "allowed_tools": allowed,
                     "session_id": session_id,
-                    "model": self.model,
+                    "model": None if self.base_url else self.model,
                     "base_url": self.base_url or None,
-                    "env": {
-                        "ANTHROPIC_API_KEY": self.api_key,
-                        **({"ANTHROPIC_BASE_URL": self.base_url} if self.base_url else {}),
-                    },
+                    "env": sdk_env,
+                    **({"settings": sdk_settings} if sdk_settings else {}),
                 },
             )
             client = ClaudeSDKClient(options=options)
@@ -947,6 +954,19 @@ def _resolve_agent_runner_model(model: str | None) -> str:
     if env_model:
         return env_model
     return _DEFAULT_MODEL
+
+
+def _agent_sdk_settings(base_url: str, model: str) -> str:
+    if not base_url:
+        return ""
+    return json.dumps(
+        {
+            "env": {
+                "ANTHROPIC_BASE_URL": base_url,
+                "ANTHROPIC_MODEL": model,
+            }
+        }
+    )
 
 
 PROMPT_GENERATE_ALL_SYSTEM = (

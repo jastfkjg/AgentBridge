@@ -384,8 +384,16 @@ class AgentProgressTests(unittest.TestCase):
                 runner.close()
 
         self.assertEqual(response, "deepseek sdk response")
-        self.assertEqual(FakeClaudeAgentOptions.last_kwargs["model"], "deepseek-v4-flash")
+        self.assertIsNone(FakeClaudeAgentOptions.last_kwargs.get("model"))
         self.assertEqual(FakeClaudeAgentOptions.last_kwargs["base_url"], "https://api.deepseek.com/anthropic")
+        sdk_env = FakeClaudeAgentOptions.last_kwargs["env"]
+        self.assertEqual(sdk_env["ANTHROPIC_API_KEY"], "sk-test")
+        self.assertEqual(sdk_env["ANTHROPIC_BASE_URL"], "https://api.deepseek.com/anthropic")
+        self.assertEqual(sdk_env["ANTHROPIC_MODEL"], "deepseek-v4-flash")
+        sdk_settings = json.loads(FakeClaudeAgentOptions.last_kwargs["settings"])
+        self.assertEqual(sdk_settings["env"]["ANTHROPIC_BASE_URL"], "https://api.deepseek.com/anthropic")
+        self.assertEqual(sdk_settings["env"]["ANTHROPIC_MODEL"], "deepseek-v4-flash")
+        self.assertNotIn("ANTHROPIC_API_KEY", sdk_settings["env"])
 
     def test_extract_agent_usage_supports_sdk_result_metadata(self):
         class FakeResultMessage:
@@ -509,6 +517,10 @@ class AgentProgressTests(unittest.TestCase):
 
         self.assertEqual(FakeClaudeAgentOptions.last_kwargs["cwd"], str(root.resolve()))
         self.assertEqual(FakeClaudeAgentOptions.last_kwargs["base_url"], base_url)
+        self.assertIsNone(FakeClaudeAgentOptions.last_kwargs.get("model"))
+        sdk_settings = json.loads(FakeClaudeAgentOptions.last_kwargs["settings"])
+        self.assertEqual(sdk_settings["env"]["ANTHROPIC_BASE_URL"], base_url)
+        self.assertEqual(sdk_settings["env"]["ANTHROPIC_MODEL"], "claude-sonnet-4-20250514")
         self.assertEqual(FakeClaudeAgentOptions.last_kwargs["tools"], ["Read", "Grep"])
         self.assertEqual(FakeClaudeAgentOptions.last_kwargs["allowed_tools"], ["Read", "Grep"])
         self.assertIn("Agent", FakeClaudeAgentOptions.last_kwargs["disallowed_tools"])
