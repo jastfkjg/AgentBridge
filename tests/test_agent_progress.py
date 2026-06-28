@@ -5,6 +5,7 @@ import sys
 import tempfile
 import types
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -76,7 +77,7 @@ class AgentProgressTests(unittest.TestCase):
             async def disconnect(self) -> None:
                 self.disconnected += 1
 
-            async def query(self, prompt: str, session_id: str = "default") -> None:
+            async def query(self, prompt: str, session_id: str = "__not_passed__") -> None:
                 self.query_calls.append((prompt, session_id))
 
             async def receive_response(self):
@@ -145,8 +146,79 @@ class AgentProgressTests(unittest.TestCase):
         client = FakeClaudeSDKClient.instances[0]
         self.assertEqual(client.connected, 1)
         self.assertEqual(client.disconnected, 1)
-        self.assertEqual(client.query_calls, [("first", sdk_session_id), ("second", sdk_session_id)])
+        self.assertEqual(client.query_calls, [("first", "__not_passed__"), ("second", "__not_passed__")])
         self.assertEqual(FakeClaudeAgentOptions.last_kwargs["session_id"], sdk_session_id)
+
+    def test_agent_runner_retries_with_temporary_session_when_sdk_session_is_busy(self):
+        class FakeResultMessage:
+            content = []
+            usage = {"input_tokens": 1, "output_tokens": 1}
+            result = "fallback response"
+
+        class FakeClaudeAgentOptions:
+            instances: list["FakeClaudeAgentOptions"] = []
+
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+                FakeClaudeAgentOptions.instances.append(self)
+
+        class FakeClaudeSDKClient:
+            instances: list["FakeClaudeSDKClient"] = []
+
+            def __init__(self, options: FakeClaudeAgentOptions) -> None:
+                self.options = options
+                self.disconnected = 0
+                FakeClaudeSDKClient.instances.append(self)
+
+            async def connect(self) -> None:
+                session_id = str(self.options.kwargs.get("session_id"))
+                if session_id == busy_session_id:
+                    raise RuntimeError(f"Error: Session ID {session_id} is already in use.")
+
+            async def disconnect(self) -> None:
+                self.disconnected += 1
+
+            async def query(self, prompt: str, session_id: str = "__not_passed__") -> None:
+                self.prompt = prompt
+                self.query_session_id = session_id
+
+            async def receive_response(self):
+                yield FakeResultMessage()
+
+        def fake_tool(_name: str, _description: str, _param_types: dict[str, type]):
+            def decorate(handler):
+                return handler
+
+            return decorate
+
+        fake_module = types.ModuleType("claude_agent_sdk")
+        fake_module.ClaudeAgentOptions = FakeClaudeAgentOptions
+        fake_module.ClaudeSDKClient = FakeClaudeSDKClient
+        fake_module.create_sdk_mcp_server = lambda **kwargs: kwargs
+        fake_module.tool = fake_tool
+
+        from agentbridge.agent import AgentRunner, _agent_sdk_session_id
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"claude_agent_sdk": fake_module}):
+            kit = Path(tmp) / "kit"
+            kit.mkdir()
+            (kit / "capabilities.json").write_text("[]", encoding="utf-8")
+            (kit / "guardrails").mkdir()
+            (kit / "guardrails" / "permissions.json").write_text(json.dumps({"tools": {}}), encoding="utf-8")
+            busy_session_id = _agent_sdk_session_id(kit, "web-session")
+
+            runner = AgentRunner(kit, api_key="sk-test", session_id="web-session")
+            response = runner.query_text("hello")
+            runner.close()
+
+        self.assertEqual(response, "fallback response")
+        self.assertEqual(len(FakeClaudeSDKClient.instances), 2)
+        self.assertEqual(FakeClaudeSDKClient.instances[0].disconnected, 1)
+        attempted_session_ids = [str(options.kwargs.get("session_id")) for options in FakeClaudeAgentOptions.instances]
+        self.assertEqual(attempted_session_ids[0], busy_session_id)
+        self.assertNotEqual(attempted_session_ids[1], busy_session_id)
+        uuid.UUID(attempted_session_ids[1])
+        self.assertEqual(getattr(FakeClaudeSDKClient.instances[1], "query_session_id"), "__not_passed__")
 
     def test_extract_agent_usage_supports_sdk_result_metadata(self):
         class FakeResultMessage:

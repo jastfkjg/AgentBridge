@@ -46,6 +46,13 @@ class _StreamingAgentRunner:
         ]
 
 
+class _FailingAgentRunner:
+    def query_messages(self, prompt: str) -> list[object]:
+        exc = RuntimeError("Command failed with exit code 1 (exit code: 1) Error output: Check stderr output for details")
+        exc.stderr = "Error: Session ID abc is already in use."
+        raise exc
+
+
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data), encoding="utf-8")
@@ -275,6 +282,16 @@ class ChatSessionTests(unittest.TestCase):
             self.assertEqual(events[-1]["type"], "done")
             self.assertEqual(events[-1]["status"], "agent_response")
 
+    def test_chat_stream_process_surfaces_agent_stderr_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            session = ChatSession(ChatConfig(kit_dir=kit, memory_enabled=False, agent_runner=_FailingAgentRunner()))
+
+            events = [event.to_dict() for event in session.stream_process("介绍下这个系统")]
+
+            error = next(event for event in events if event["type"] == "error")
+            self.assertIn("Session ID abc is already in use", error["message"])
+
 
 class WebChatTests(unittest.TestCase):
     def test_rendered_web_ui_has_command_suggestions_upload_and_conversation_controls(self):
@@ -411,6 +428,12 @@ class WebChatTests(unittest.TestCase):
             self.assertIn("setSending(true)", html)
             self.assertIn("setSending(false)", html)
             self.assertIn("els.send.disabled = sending", html)
+            self.assertIn(".send-button[hidden]", html)
+            self.assertIn("display: none", html)
+            self.assertIn("els.send.hidden = sending", html)
+            self.assertIn("els.interrupt.hidden = !sending", html)
+            self.assertLess(html.index("addMessage('user', displayTextWithAttachments(text))"), html.index("setSending(true)"))
+            self.assertLess(html.index("els.message.value = ''"), html.index("setSending(true)"))
 
     def test_rendered_web_ui_aligns_user_messages_to_the_right(self):
         with tempfile.TemporaryDirectory() as tmp:

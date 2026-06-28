@@ -373,7 +373,7 @@ class ChatSession:
                 message = "The AI agent did not return a response."
             return self._reply("agent_response", message)
         except Exception as exc:
-            return self._reply("agent_error", f"AI agent request failed: {exc}")
+            return self._reply("agent_error", format_agent_error(exc))
         finally:
             self._active_request_id = ""
 
@@ -422,7 +422,7 @@ class ChatSession:
             yield ChatEvent("usage", {"usage": dict(self.usage)})
             yield ChatEvent("done", {"status": "agent_response", "message": final, "usage": dict(self.usage)})
         except Exception as exc:
-            message = f"AI agent request failed: {exc}"
+            message = format_agent_error(exc)
             self._remember("assistant", message)
             self._save()
             yield ChatEvent("error", {"message": message})
@@ -607,6 +607,17 @@ def _content_block_value(block: Any, key: str) -> Any:
     if isinstance(block, dict):
         return block.get(key)
     return getattr(block, key, None)
+
+
+def format_agent_error(exc: Exception) -> str:
+    stderr = getattr(exc, "stderr", None)
+    if isinstance(stderr, bytes):
+        stderr_text = stderr.decode("utf-8", errors="replace").strip()
+    else:
+        stderr_text = str(stderr or "").strip()
+    if stderr_text:
+        return f"AI agent request failed: {stderr_text}"
+    return f"AI agent request failed: {exc}"
 
 
 def parse_tool_request(text: str, capabilities: dict[str, dict[str, Any]]) -> tuple[str, dict[str, Any]] | None:

@@ -680,6 +680,9 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       justify-content: center;
       font-weight: 700;
     }}
+    .send-button[hidden] {{
+      display: none !important;
+    }}
     .send-icon {{
       width: 18px;
       height: 18px;
@@ -1788,7 +1791,6 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         els.baseUrl.focus();
         return;
       }}
-      setSending(true);
       try {{
         addMessage('user', displayTextWithAttachments(text));
         const outgoingAttachments = attachments;
@@ -1796,6 +1798,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         attachments = [];
         renderAttachments();
         renderCommandMenu();
+        setSending(true);
         let assistantNode = null;
         let assistantText = '';
         let sawDone = false;

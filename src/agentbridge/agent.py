@@ -602,6 +602,7 @@ class AgentRunner:
         self.model = model or os.environ.get("ANTHROPIC_MODEL", "") or _DEFAULT_MODEL
         self.session_id = session_id or "default"
         self.sdk_session_id = _agent_sdk_session_id(self.kit_dir, self.session_id)
+        self._stable_sdk_session_id = self.sdk_session_id
         self.llm_timeout = llm_timeout
 
         os.environ.setdefault("ANTHROPIC_API_KEY", self.api_key)
@@ -699,7 +700,7 @@ class AgentRunner:
 
     async def _query_messages_async(self, prompt: str) -> list[Any]:
         client = await self._ensure_client_async()
-        await client.query(prompt, session_id=self.sdk_session_id)
+        await client.query(prompt)
         return [msg async for msg in client.receive_response()]
 
     async def _ensure_client_async(self) -> Any:
@@ -719,24 +720,43 @@ class AgentRunner:
             tools=kit_tools,
         )
         allowed = [f"mcp__agentbridge-kit__{name}" for name in self._capabilities]
-        options = _construct_with_supported_kwargs(
-            ClaudeAgentOptions,
-            {
-                "system_prompt": self._system_prompt,
-                "mcp_servers": {"agentbridge-kit": server},
-                "allowed_tools": allowed,
-                "session_id": self.sdk_session_id,
-                "model": self.model,
-                "base_url": self.base_url or None,
-                "env": {
-                    "ANTHROPIC_API_KEY": self.api_key,
-                    **({"ANTHROPIC_BASE_URL": self.base_url} if self.base_url else {}),
+
+        async def connect_with_session(session_id: str) -> Any:
+            options = _construct_with_supported_kwargs(
+                ClaudeAgentOptions,
+                {
+                    "system_prompt": self._system_prompt,
+                    "mcp_servers": {"agentbridge-kit": server},
+                    "allowed_tools": allowed,
+                    "session_id": session_id,
+                    "model": self.model,
+                    "base_url": self.base_url or None,
+                    "env": {
+                        "ANTHROPIC_API_KEY": self.api_key,
+                        **({"ANTHROPIC_BASE_URL": self.base_url} if self.base_url else {}),
+                    },
                 },
-            },
-        )
-        self._client = ClaudeSDKClient(options=options)
-        await self._client.connect()
-        return self._client
+            )
+            client = ClaudeSDKClient(options=options)
+            self._client = client
+            try:
+                await client.connect()
+            except Exception:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                self._client = None
+                raise
+            return client
+
+        try:
+            return await connect_with_session(self.sdk_session_id)
+        except Exception as exc:
+            if not _is_agent_session_in_use_error(exc):
+                raise
+            self.sdk_session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"agentbridge:{self._stable_sdk_session_id}:fallback:{uuid.uuid4()}"))
+            return await connect_with_session(self.sdk_session_id)
 
     async def _close_client_async(self) -> None:
         if self._client is None:
@@ -877,6 +897,16 @@ def _extract_agent_usage(message: Any) -> dict[str, Any]:
     if turns is not None:
         usage["turns"] = int(turns)
     return usage
+
+
+def _is_agent_session_in_use_error(exc: Exception) -> bool:
+    stderr = getattr(exc, "stderr", None)
+    if isinstance(stderr, bytes):
+        stderr_text = stderr.decode("utf-8", errors="replace")
+    else:
+        stderr_text = str(stderr or "")
+    text = f"{exc}\n{stderr_text}".lower()
+    return "session id" in text and "already in use" in text
 
 
 PROMPT_GENERATE_ALL_SYSTEM = (
