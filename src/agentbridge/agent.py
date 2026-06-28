@@ -660,6 +660,20 @@ class AgentRunner:
             future = asyncio.run_coroutine_threadsafe(self._query_messages_async(prompt), loop)
             return future.result(timeout=self.llm_timeout)
 
+    def stream_messages(self, prompt: str) -> Any:
+        with self._query_lock:
+            loop = self._ensure_client_loop()
+            events: queue.Queue[tuple[str, Any]] = queue.Queue()
+            asyncio.run_coroutine_threadsafe(self._stream_messages_async(prompt, events), loop)
+            while True:
+                kind, payload = events.get()
+                if kind == "message":
+                    yield payload
+                elif kind == "error":
+                    raise payload
+                elif kind == "done":
+                    return
+
     def query_text(self, prompt: str) -> str:
         if "query" in self.__dict__:
             return _run_async(self._query_text_async(prompt))
@@ -716,6 +730,31 @@ class AgentRunner:
         await client.query(prompt)
         return [msg async for msg in client.receive_response()]
 
+    async def _stream_messages_async(self, prompt: str, events: queue.Queue[tuple[str, Any]]) -> None:
+        try:
+            async for msg in self._stream_messages_once_async(prompt):
+                events.put(("message", msg))
+        except Exception as exc:
+            if not _is_agent_session_retryable_error(exc):
+                events.put(("error", exc))
+                events.put(("done", None))
+                return
+            try:
+                await self._reset_client_async()
+                self.sdk_session_id = _temporary_sdk_session_id(self._stable_sdk_session_id)
+                async for msg in self._stream_messages_once_async(prompt):
+                    events.put(("message", msg))
+            except Exception as retry_exc:
+                events.put(("error", retry_exc))
+        finally:
+            events.put(("done", None))
+
+    async def _stream_messages_once_async(self, prompt: str) -> Any:
+        client = await self._ensure_client_async()
+        await client.query(prompt)
+        async for msg in client.receive_response():
+            yield msg
+
     async def _ensure_client_async(self) -> Any:
         if self._client is not None:
             return self._client
@@ -751,6 +790,7 @@ class AgentRunner:
                     "model": None if self.base_url else self.model,
                     "base_url": self.base_url or None,
                     "env": sdk_env,
+                    "include_partial_messages": True,
                     **({"settings": sdk_settings} if sdk_settings else {}),
                 },
             )
@@ -866,6 +906,29 @@ def _extract_agent_message_text(message: Any) -> str:
             elif getattr(block, "type", "") == "text" and getattr(block, "text", ""):
                 chunks.append(str(getattr(block, "text")))
     return "\n".join(chunks).strip()
+
+
+def _is_agent_stream_event(message: Any) -> bool:
+    if isinstance(message, dict):
+        return message.get("type") == "stream_event" or isinstance(message.get("event"), dict)
+    return message.__class__.__name__ == "StreamEvent" or isinstance(getattr(message, "event", None), dict)
+
+
+def _extract_agent_stream_text_delta(message: Any) -> str:
+    event = message.get("event") if isinstance(message, dict) else getattr(message, "event", None)
+    if not isinstance(event, dict):
+        return ""
+    if event.get("type") == "content_block_delta":
+        delta = event.get("delta")
+        if isinstance(delta, dict):
+            text = delta.get("text")
+            return text if isinstance(text, str) else ""
+    if event.get("type") == "content_block_start":
+        content_block = event.get("content_block")
+        if isinstance(content_block, dict) and content_block.get("type") == "text":
+            text = content_block.get("text")
+            return text if isinstance(text, str) else ""
+    return ""
 
 
 def _extract_agent_result_text(message: Any) -> str:

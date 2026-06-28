@@ -394,7 +394,9 @@ class ChatSession:
         yield ChatEvent("message_start", {"request_id": request_id, "model": getattr(runner, "model", self.config.llm_model or "")})
         chunks: list[str] = []
         try:
-            if hasattr(runner, "query_messages"):
+            if hasattr(runner, "stream_messages"):
+                messages = runner.stream_messages(text)
+            elif hasattr(runner, "query_messages"):
                 messages = runner.query_messages(text)
             elif hasattr(runner, "query_text"):
                 messages = [str(runner.query_text(text))]
@@ -410,13 +412,17 @@ class ChatSession:
                         saw_message_usage = True
                     if event.type in {"assistant_text", "assistant_text_delta"}:
                         content = str(event.data.get("text", ""))
-                        if content:
-                            chunks.append(content)
+                        current = "".join(chunks)
+                        delta = content[len(current):] if content.startswith(current) else content
+                        if delta:
+                            chunks.append(delta)
+                            yield ChatEvent("assistant_text_delta", {"text": delta})
+                        continue
                     yield event
             current_usage = getattr(runner, "last_usage", {})
             if isinstance(current_usage, dict) and current_usage and not saw_message_usage:
                 self._record_usage(current_usage)
-            final = "\n".join(chunk for chunk in chunks if chunk).strip() or "The AI agent did not return a response."
+            final = "".join(chunk for chunk in chunks if chunk).strip() or "The AI agent did not return a response."
             self._remember("assistant", final)
             self._save()
             yield ChatEvent("usage", {"usage": dict(self.usage)})
@@ -534,9 +540,22 @@ class ChatSession:
         return events
 
     def _events_from_agent_message(self, message: Any) -> list[ChatEvent]:
-        from agentbridge.agent import _agent_sdk_progress_events, _extract_agent_message_text, _extract_agent_result_text, _extract_agent_usage
+        from agentbridge.agent import (
+            _agent_sdk_progress_events,
+            _extract_agent_message_text,
+            _extract_agent_result_text,
+            _extract_agent_stream_text_delta,
+            _extract_agent_usage,
+            _is_agent_stream_event,
+        )
 
         events: list[ChatEvent] = []
+        stream_delta = _extract_agent_stream_text_delta(message)
+        if stream_delta:
+            events.append(ChatEvent("assistant_text_delta", {"text": stream_delta}))
+            return events
+        if _is_agent_stream_event(message):
+            return events
         for block in _message_content_blocks(message):
             block_type = _content_block_type(block)
             if block_type == "tool_use" or block_type.endswith("ToolUseBlock"):

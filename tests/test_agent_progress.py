@@ -1,8 +1,10 @@
 import json
+import asyncio
 import builtins
 import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
 import uuid
@@ -150,6 +152,73 @@ class AgentProgressTests(unittest.TestCase):
         actual_session_id = str(FakeClaudeAgentOptions.last_kwargs["session_id"])
         self.assertNotEqual(actual_session_id, sdk_session_id)
         uuid.UUID(actual_session_id)
+
+    def test_agent_runner_stream_messages_yields_before_response_completes(self):
+        release_second_message = threading.Event()
+
+        class FakeResultMessage:
+            content = []
+            usage = {"input_tokens": 1, "output_tokens": 1}
+
+            def __init__(self, result: str) -> None:
+                self.result = result
+
+        class FakeClaudeAgentOptions:
+            last_kwargs: dict[str, object] | None = None
+
+            def __init__(self, **kwargs: object) -> None:
+                FakeClaudeAgentOptions.last_kwargs = kwargs
+
+        class FakeClaudeSDKClient:
+            def __init__(self, options: object) -> None:
+                self.options = options
+                self.query_calls: list[str] = []
+
+            async def connect(self) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                pass
+
+            async def query(self, prompt: str, session_id: str = "__not_passed__") -> None:
+                self.query_calls.append(prompt)
+
+            async def receive_response(self):
+                yield FakeResultMessage("first")
+                await asyncio.to_thread(release_second_message.wait)
+                yield FakeResultMessage("second")
+
+        def fake_tool(_name: str, _description: str, _param_types: dict[str, type]):
+            def decorate(handler):
+                return handler
+
+            return decorate
+
+        fake_module = types.ModuleType("claude_agent_sdk")
+        fake_module.ClaudeAgentOptions = FakeClaudeAgentOptions
+        fake_module.ClaudeSDKClient = FakeClaudeSDKClient
+        fake_module.create_sdk_mcp_server = lambda **kwargs: kwargs
+        fake_module.tool = fake_tool
+
+        from agentbridge.agent import AgentRunner
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"claude_agent_sdk": fake_module}):
+            kit = Path(tmp) / "kit"
+            kit.mkdir()
+            (kit / "capabilities.json").write_text("[]", encoding="utf-8")
+            (kit / "guardrails").mkdir()
+            (kit / "guardrails" / "permissions.json").write_text(json.dumps({"tools": {}}), encoding="utf-8")
+
+            runner = AgentRunner(kit, api_key="sk-test", session_id="web-session")
+            stream = runner.stream_messages("hello")
+            first = next(stream)
+            release_second_message.set()
+            rest = list(stream)
+            runner.close()
+
+        self.assertEqual(first.result, "first")
+        self.assertEqual([message.result for message in rest], ["second"])
+        self.assertIs(FakeClaudeAgentOptions.last_kwargs["include_partial_messages"], True)
 
     def test_agent_runner_uses_fresh_sdk_session_for_each_runner(self):
         from agentbridge.agent import AgentRunner, _agent_sdk_session_id

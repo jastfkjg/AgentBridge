@@ -54,6 +54,30 @@ class _FailingAgentRunner:
         raise exc
 
 
+class _StreamingOnlyAgentRunner:
+    model = "claude-stream"
+
+    def __init__(self) -> None:
+        self.streamed = False
+
+    def stream_messages(self, _prompt: str):
+        self.streamed = True
+        yield SimpleNamespace(content=[{"type": "text", "text": "第一段"}])
+        yield SimpleNamespace(content=[{"type": "text", "text": "第一段第二段"}])
+
+    def query_messages(self, _prompt: str) -> list[object]:
+        raise AssertionError("stream_process should use stream_messages before query_messages")
+
+
+class _PartialStreamAgentRunner:
+    model = "claude-partial"
+
+    def stream_messages(self, _prompt: str):
+        yield SimpleNamespace(event={"type": "content_block_delta", "delta": {"type": "text_delta", "text": "你好"}})
+        yield SimpleNamespace(event={"type": "content_block_delta", "delta": {"type": "text_delta", "text": "世界"}})
+        yield SimpleNamespace(content=[{"type": "text", "text": "你好世界"}])
+
+
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data), encoding="utf-8")
@@ -329,6 +353,32 @@ class ChatSessionTests(unittest.TestCase):
             self.assertEqual(events[-1]["type"], "done")
             self.assertEqual(events[-1]["status"], "agent_response")
 
+    def test_chat_stream_process_prefers_runner_stream_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            runner = _StreamingOnlyAgentRunner()
+            session = ChatSession(ChatConfig(kit_dir=kit, memory_enabled=False, agent_runner=runner))
+
+            events = [event.to_dict() for event in session.stream_process("介绍下这个系统")]
+
+        deltas = [event["text"] for event in events if event["type"] == "assistant_text_delta"]
+        self.assertTrue(runner.streamed)
+        self.assertEqual(deltas, ["第一段", "第二段"])
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual(events[-1]["message"], "第一段第二段")
+
+    def test_chat_stream_process_emits_sdk_partial_text_deltas_before_final_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            session = ChatSession(ChatConfig(kit_dir=kit, memory_enabled=False, agent_runner=_PartialStreamAgentRunner()))
+
+            events = [event.to_dict() for event in session.stream_process("介绍下这个系统")]
+
+        deltas = [event["text"] for event in events if event["type"] == "assistant_text_delta"]
+        self.assertEqual(deltas, ["你好", "世界"])
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual(events[-1]["message"], "你好世界")
+
     def test_chat_stream_process_surfaces_agent_stderr_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
@@ -444,6 +494,7 @@ class WebChatTests(unittest.TestCase):
                 self.headers: list[tuple[str, str]] = []
                 self.wfile = BytesIO()
                 self.status = None
+                self.flushes = 0
 
             def send_response(self, status: int) -> None:
                 self.status = status
@@ -455,6 +506,7 @@ class WebChatTests(unittest.TestCase):
                 return
 
         fake = FakeHandler()
+        fake.wfile.flush = lambda: setattr(fake, "flushes", fake.flushes + 1)
 
         handler_cls._send_sse(fake, [SimpleNamespace(type="assistant_text", to_dict=lambda: {"type": "assistant_text", "text": "hi"})])
 
@@ -462,6 +514,7 @@ class WebChatTests(unittest.TestCase):
         self.assertIn(("Content-Type", "text/event-stream; charset=utf-8"), fake.headers)
         self.assertIn(b"event: assistant_text\n", fake.wfile.getvalue())
         self.assertIn(b'data: {"text": "hi", "type": "assistant_text"}\n\n', fake.wfile.getvalue())
+        self.assertEqual(fake.flushes, 1)
 
     def test_rendered_web_ui_blocks_duplicate_send_while_request_is_in_flight(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -481,6 +534,9 @@ class WebChatTests(unittest.TestCase):
             self.assertIn("els.interrupt.hidden = !sending", html)
             self.assertLess(html.index("addMessage('user', displayTextWithAttachments(text))"), html.index("setSending(true)"))
             self.assertLess(html.index("els.message.value = ''"), html.index("setSending(true)"))
+            self.assertIn("setSending(false);", html[html.index("event.type === 'error'"):html.index("event.type === 'done'")])
+            done_block = html[html.index("event.type === 'done'"):html.index("if (!sawDone")]
+            self.assertIn("setSending(false);", done_block)
 
     def test_rendered_web_ui_aligns_user_messages_to_the_right(self):
         with tempfile.TemporaryDirectory() as tmp:

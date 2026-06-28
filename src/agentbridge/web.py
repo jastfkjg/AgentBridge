@@ -1836,6 +1836,10 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
             renderUsage(event.usage || {{}});
           }} else if (event.type === 'error') {{
             addMessage('assistant', event.message || 'Request failed.');
+            setSending(false);
+          }} else if (event.type === 'interrupted') {{
+            addMessage('assistant', event.message || 'Current Agent request interrupted.');
+            setSending(false);
           }} else if (event.type === 'done') {{
             sawDone = true;
             if (event.pending) renderPending(event.pending);
@@ -1843,6 +1847,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
             if (event.tools && event.tools.length) renderTools(event.tools);
             if (event.conversations) renderConversations(event.conversations);
             if (!assistantText && event.message && !assistantNode) assistantNode = addMessage('assistant', event.message);
+            setSending(false);
           }}
         }});
         if (!sawDone && !assistantNode) addMessage('assistant', 'Request ended before AgentBridge returned a response.');
