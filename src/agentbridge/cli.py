@@ -596,7 +596,7 @@ def _add_chat_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--memory-file", help="JSON file for chat memory. Defaults to <kit>/.agentbridge-chat-memory.json.")
     parser.add_argument("--no-memory", action="store_true", help="Disable chat memory persistence.")
     parser.add_argument("--api-key", help="LLM API key. Defaults to ANTHROPIC_API_KEY env var.")
-    parser.add_argument("--llm-base-url", help="Custom Anthropic-compatible LLM API endpoint for chat sessions.")
+    parser.add_argument("--llm-base-url", help="Custom Anthropic-compatible LLM API endpoint passed to Claude Agent SDK chat sessions.")
     parser.add_argument("--model", help="LLM model name for chat sessions. Defaults to ANTHROPIC_MODEL or AgentBridge's default.")
     parser.add_argument("--llm-timeout", type=float, help="LLM request timeout in seconds for chat sessions.")
 

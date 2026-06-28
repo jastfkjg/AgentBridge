@@ -599,10 +599,10 @@ class AgentRunner:
                 "Set ANTHROPIC_API_KEY environment variable or pass api_key parameter."
             )
         self.base_url = base_url or os.environ.get("ANTHROPIC_BASE_URL", "")
-        self.model = model or os.environ.get("ANTHROPIC_MODEL", "") or _DEFAULT_MODEL
+        self.model = _resolve_agent_runner_model(model)
         self.session_id = session_id or "default"
-        self.sdk_session_id = _agent_sdk_session_id(self.kit_dir, self.session_id)
-        self._stable_sdk_session_id = self.sdk_session_id
+        self._stable_sdk_session_id = _agent_sdk_session_id(self.kit_dir, self.session_id)
+        self.sdk_session_id = _temporary_sdk_session_id(self._stable_sdk_session_id)
         self.llm_timeout = llm_timeout
 
         os.environ.setdefault("ANTHROPIC_API_KEY", self.api_key)
@@ -699,6 +699,16 @@ class AgentRunner:
             return self._client_loop
 
     async def _query_messages_async(self, prompt: str) -> list[Any]:
+        try:
+            return await self._query_messages_once_async(prompt)
+        except Exception as exc:
+            if not _is_agent_session_retryable_error(exc):
+                raise
+            await self._reset_client_async()
+            self.sdk_session_id = _temporary_sdk_session_id(self._stable_sdk_session_id)
+            return await self._query_messages_once_async(prompt)
+
+    async def _query_messages_once_async(self, prompt: str) -> list[Any]:
         client = await self._ensure_client_async()
         await client.query(prompt)
         return [msg async for msg in client.receive_response()]
@@ -753,12 +763,15 @@ class AgentRunner:
         try:
             return await connect_with_session(self.sdk_session_id)
         except Exception as exc:
-            if not _is_agent_session_in_use_error(exc):
+            if not _is_agent_session_retryable_error(exc):
                 raise
-            self.sdk_session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"agentbridge:{self._stable_sdk_session_id}:fallback:{uuid.uuid4()}"))
+            self.sdk_session_id = _temporary_sdk_session_id(self._stable_sdk_session_id)
             return await connect_with_session(self.sdk_session_id)
 
     async def _close_client_async(self) -> None:
+        await self._reset_client_async()
+
+    async def _reset_client_async(self) -> None:
         if self._client is None:
             return
         try:
@@ -907,6 +920,33 @@ def _is_agent_session_in_use_error(exc: Exception) -> bool:
         stderr_text = str(stderr or "")
     text = f"{exc}\n{stderr_text}".lower()
     return "session id" in text and "already in use" in text
+
+
+def _is_agent_session_retryable_error(exc: Exception) -> bool:
+    if _is_agent_session_in_use_error(exc):
+        return True
+    stderr = getattr(exc, "stderr", None)
+    if isinstance(stderr, bytes):
+        stderr_text = stderr.decode("utf-8", errors="replace")
+    else:
+        stderr_text = str(stderr or "")
+    text = f"{exc}\n{stderr_text}".lower()
+    return "check stderr output for details" in text and (
+        "message reader" in text or "command failed" in text
+    )
+
+
+def _temporary_sdk_session_id(stable_session_id: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"agentbridge:{stable_session_id}:fallback:{uuid.uuid4()}"))
+
+
+def _resolve_agent_runner_model(model: str | None) -> str:
+    if model:
+        return model
+    env_model = os.environ.get("ANTHROPIC_MODEL", "").strip()
+    if env_model:
+        return env_model
+    return _DEFAULT_MODEL
 
 
 PROMPT_GENERATE_ALL_SYSTEM = (

@@ -441,8 +441,8 @@ class ChatSession:
             self.agent_runner = AgentRunner(
                 self.config.kit_dir,
                 api_key=api_key,
-                base_url=self.config.llm_base_url or None,
-                model=self.config.llm_model or None,
+                base_url=self.config.llm_base_url or os.environ.get("ANTHROPIC_BASE_URL", "") or None,
+                model=self.config.llm_model or os.environ.get("ANTHROPIC_MODEL", "") or None,
                 target_base_url=self.config.base_url,
                 headers=self.config.headers,
                 execute=self.config.execute,

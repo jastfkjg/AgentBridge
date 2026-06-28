@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from dataclasses import replace
 from http import HTTPStatus
@@ -17,6 +18,14 @@ from agentbridge.chat import ChatConfig, ChatSession
 
 class ChatWebError(ValueError):
     pass
+
+
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        exc_type, exc, _traceback = sys.exc_info()
+        if exc_type in {BrokenPipeError, ConnectionResetError} or isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
 
 
 def normalize_target_base_url(value: str) -> str:
@@ -82,7 +91,7 @@ def test_target_connectivity(
 
 def run_web_chat(config: ChatConfig, host: str = "127.0.0.1", port: int = 8765, allow_kit_switch: bool = False) -> int:
     handler = build_handler(config, allow_kit_switch=allow_kit_switch)
-    server = ThreadingHTTPServer((host, port), handler)
+    server = QuietThreadingHTTPServer((host, port), handler)
     print(f"AgentBridge Web Chat control surface: http://{host}:{server.server_port}", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
     try:

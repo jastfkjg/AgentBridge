@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -10,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentbridge.chat import ChatConfig, ChatSession
-from agentbridge.web import build_handler, normalize_target_base_url, render_index
+from agentbridge.web import QuietThreadingHTTPServer, build_handler, normalize_target_base_url, render_index
 
 
 class _FakeAgentRunner:
@@ -267,6 +268,52 @@ class ChatSessionTests(unittest.TestCase):
             self.assertEqual(response.status, "agent_unavailable")
             self.assertIn("ANTHROPIC_API_KEY", response.message)
             self.assertNotIn("I could not map that to a tool", response.message)
+
+    def test_chat_uses_agent_runner_for_custom_llm_base_url_env(self):
+        class FakeAgentRunner:
+            calls: list[dict[str, object]] = []
+
+            def __init__(self, *args, **kwargs):
+                FakeAgentRunner.calls.append({"args": args, "kwargs": kwargs})
+                self.last_usage = {"input_tokens": 11, "output_tokens": 7, "total_tokens": 18}
+                self.model = kwargs.get("model")
+
+            def query_text(self, _prompt: str) -> str:
+                return "这是 Claude Agent SDK DeepSeek response。"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            env = {
+                "ANTHROPIC_API_KEY": "sk-test",
+                "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+                "ANTHROPIC_MODEL": "deepseek-v4-flash",
+            }
+            with patch.dict(os.environ, env, clear=True), patch("agentbridge.agent.AgentRunner", FakeAgentRunner):
+                session = ChatSession(ChatConfig(kit_dir=kit, memory_enabled=False))
+
+                response = session.process("介绍下这个系统")
+
+        self.assertEqual(response.status, "agent_response")
+        self.assertEqual(response.message, "这是 Claude Agent SDK DeepSeek response。")
+        self.assertEqual(FakeAgentRunner.calls[0]["kwargs"]["base_url"], "https://api.deepseek.com/anthropic")
+        self.assertEqual(FakeAgentRunner.calls[0]["kwargs"]["model"], "deepseek-v4-flash")
+        self.assertEqual(response.usage["total_tokens"], 18)
+
+    def test_web_server_suppresses_browser_connection_reset_tracebacks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False, agent_runner=_FakeAgentRunner("received"))
+            server = QuietThreadingHTTPServer(("127.0.0.1", 0), build_handler(config))
+            try:
+                with patch("socketserver.BaseServer.handle_error") as handle_error:
+                    try:
+                        raise ConnectionResetError("reset")
+                    except ConnectionResetError:
+                        server.handle_error(None, ("127.0.0.1", 1))
+
+                handle_error.assert_not_called()
+            finally:
+                server.server_close()
 
     def test_chat_stream_process_emits_tool_timeline_usage_and_done(self):
         with tempfile.TemporaryDirectory() as tmp:
