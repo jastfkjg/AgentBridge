@@ -74,7 +74,7 @@ agentbridge web .agentbridge/openapi-kit \
 
 也可以直接在 Web 页面切换运行模式。真实系统模式必须填写 `http://` 或 `https://` Base URL。连通测试先向 Base URL 发送 `HEAD`，目标不支持时回退到 `GET`；只要收到 HTTP 响应，就判定系统网络可达。切换模式会先清除待确认操作并重建运行时，原有 guardrail 和高风险人工确认仍然生效。Web Chat 会把当前 Base URL 保存到 `<kit>/.agentbridge-runtime.json`，重新打开同一个 kit 时自动恢复。
 
-真实执行模式下，如果登录类 HTTP/GraphQL 工具使用 username/password 参数，或返回 `access_token`、`token`、`jwt`、`Authorization` 响应头、`Set-Cookie`，Web Chat 会把对应运行时凭证保存到 `<kit>/.agentbridge-runtime.json`，并在后续工具调用中自动复用。该文件已加入 gitignore，不属于生成的 kit 协议文件。
+真实执行模式下，如果登录类 HTTP/GraphQL 工具使用 username/password 参数，或返回 `access_token`、`token`、`jwt`、`Authorization` 响应头、`Set-Cookie`，Web Chat 会把对应运行时凭证保存到 `<kit>/.agentbridge-runtime.json`，并在后续工具调用中自动复用。同一个 kit 可以保存多个登录账号，页面会提供已保存账号下拉选择；前端只提交选中账号 id，账号密码仍由本地 runtime state 读取。该文件已加入 gitignore，不属于生成的 kit 协议文件。
 
 终端 Chat 通过 `/use`、`/mode`、`/connect` 和 `/usage` 提供同样的核心流程。`/use` 会显示编号工具并逐项询问必填参数；高风险调用会给出明确的 Authorize/Cancel 选择。
 

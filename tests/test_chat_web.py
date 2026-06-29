@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from agentbridge.chat import ChatConfig, ChatSession
+from agentbridge.chat import ChatConfig, ChatSession, load_kit_runtime_state, save_kit_runtime_state
 from agentbridge.web import QuietThreadingHTTPServer, build_handler, normalize_target_base_url, render_index
 
 
@@ -323,6 +323,76 @@ class ChatSessionTests(unittest.TestCase):
             self.assertEqual(reused.status, "tool_result")
             request = urlopen.call_args.args[0]
             self.assertEqual(json.loads(request.data.decode("utf-8")), {"username": "admin", "password": "secret"})
+
+    def test_chat_persists_multiple_login_accounts_and_reuses_selected_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            session = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, memory_enabled=False))
+
+            with patch(
+                "urllib.request.urlopen",
+                side_effect=[
+                    _FakeHTTPResponse({"access_token": "jwt-admin"}),
+                    _FakeHTTPResponse({"access_token": "jwt-editor"}),
+                ],
+            ):
+                admin_login = session.process("/run login username=admin password=secret")
+                editor_login = session.process("/run login username=editor password=edit")
+
+            state = load_kit_runtime_state(kit)
+            accounts = {account["label"]: account for account in state["login_accounts"]}
+            self.assertEqual(admin_login.status, "tool_result")
+            self.assertEqual(editor_login.status, "tool_result")
+            self.assertEqual(set(accounts), {"admin", "editor"})
+            self.assertEqual(state["selected_login_account"], accounts["editor"]["id"])
+
+            restored = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, memory_enabled=False))
+            restored.select_login_account(accounts["admin"]["id"])
+            with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-admin-2"})) as urlopen:
+                reused = restored.process("/run login")
+
+            self.assertEqual(reused.status, "tool_result")
+            request = urlopen.call_args.args[0]
+            self.assertEqual(json.loads(request.data.decode("utf-8")), {"username": "admin", "password": "secret"})
+
+    def test_selected_login_account_auth_headers_win_over_stale_session_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            memory = kit / ".agentbridge-chat-memory.json"
+            save_kit_runtime_state(
+                kit,
+                {
+                    "login_accounts": [
+                        {
+                            "id": "username:admin",
+                            "label": "admin",
+                            "credentials": {"username": "admin", "password": "secret"},
+                            "auth_headers": {"Authorization": "Bearer admin-token"},
+                        },
+                        {
+                            "id": "username:editor",
+                            "label": "editor",
+                            "credentials": {"username": "editor", "password": "edit"},
+                            "auth_headers": {"Authorization": "Bearer editor-token"},
+                        },
+                    ],
+                    "selected_login_account": "username:admin",
+                },
+            )
+            _write_json(
+                memory,
+                {
+                    f"local:default:{kit.resolve()}": {
+                        "history": [],
+                        "pending": None,
+                        "auth_headers": {"Authorization": "Bearer editor-token"},
+                    }
+                },
+            )
+
+            session = ChatSession(ChatConfig(kit_dir=kit, memory_file=memory))
+
+            self.assertEqual(session.config.headers["Authorization"], "Bearer admin-token")
 
     def test_chat_falls_back_to_agent_for_natural_language(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -708,6 +778,18 @@ class WebChatTests(unittest.TestCase):
             self.assertIn("applyRuntimeMode", html)
             self.assertIn("testConnectivity", html)
 
+    def test_rendered_web_ui_supports_saved_login_account_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, base_url="http://localhost:8080", execute=False, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn('id="loginAccount"', html)
+            self.assertIn("login_account_id: selectedLoginAccountId()", html)
+            self.assertIn("function renderLoginAccounts", html)
+            self.assertIn("els.loginAccount.addEventListener('change'", html)
+
     def test_rendered_web_ui_supports_clickable_tools_parameter_templates_and_usage(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
@@ -813,6 +895,39 @@ class WebChatTests(unittest.TestCase):
             target_request = url_open.call_args.args[0]
             self.assertEqual(target_request.full_url, "http://system.test")
             self.assertEqual(target_request.get_method(), "HEAD")
+
+    def test_web_api_state_can_select_saved_login_account(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            save_kit_runtime_state(
+                kit,
+                {
+                    "base_url": "http://example.test",
+                    "execute": True,
+                    "login_accounts": [
+                        {"id": "username:admin", "label": "admin", "credentials": {"username": "admin", "password": "secret"}},
+                        {"id": "username:editor", "label": "editor", "credentials": {"username": "editor", "password": "edit"}},
+                    ],
+                    "selected_login_account": "username:admin",
+                },
+            )
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            from http.server import ThreadingHTTPServer
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), build_handler(config))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.shutdown)
+            self.addCleanup(server.server_close)
+            base = f"http://127.0.0.1:{server.server_port}"
+
+            state = json.loads(urllib.request.urlopen(base + "/api/state?login_account_id=username:editor").read().decode("utf-8"))
+            self.assertEqual(state["runtime"]["selected_login_account"], "username:editor")
+            self.assertEqual([account["label"] for account in state["runtime"]["login_accounts"]], ["admin", "editor"])
+            self.assertNotIn("credentials", state["runtime"]["login_accounts"][0])
+            self.assertNotIn("password", json.dumps(state["runtime"]))
+            self.assertEqual(load_kit_runtime_state(kit)["selected_login_account"], "username:editor")
 
     def test_web_serves_local_markdown_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:

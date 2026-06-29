@@ -95,6 +95,7 @@ Open the printed URL. The Web UI acts as a Claude Agent chat control surface ove
 
 - Dry-run and real-system mode switching.
 - Base URL validation and connectivity testing.
+- Saved login-account selection per kit.
 - Clickable tools that insert `/run` commands and required parameters.
 - Visible authorization buttons for high-risk operations and Claude Agent SDK tool permission prompts.
 - Real-time SSE streaming, tool call timeline, interrupt control, recent conversations, file attachments, Markdown responses, and Claude Agent SDK model/token/cost usage.
@@ -110,7 +111,7 @@ agentbridge web .agentbridge/my-system-kit \
   --execute
 ```
 
-Web Chat stores the selected Base URL in `<kit>/.agentbridge-runtime.json` so reopening the same kit restores the target. When a real-system login call uses username/password arguments or returns `access_token`, `token`, `jwt`, an `Authorization` header, or `Set-Cookie`, Web Chat stores those runtime credentials in the same local state file and reuses them for later tool calls. This file is ignored by git and is not part of the generated kit protocol.
+Web Chat stores the selected Base URL in `<kit>/.agentbridge-runtime.json` so reopening the same kit restores the target. When a real-system login call uses username/password arguments or returns `access_token`, `token`, `jwt`, an `Authorization` header, or `Set-Cookie`, Web Chat stores the runtime credentials in the same local state file. Multiple login accounts can be saved per kit; the Web UI exposes a saved-account selector and only sends the selected account id back to the server. This file is ignored by git and is not part of the generated kit protocol.
 
 ## Start Terminal Chat
 

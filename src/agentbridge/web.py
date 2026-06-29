@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen as url_open
 
-from agentbridge.chat import ChatConfig, ChatSession
+from agentbridge.chat import ChatConfig, ChatSession, public_login_accounts
 
 
 class ChatWebError(ValueError):
@@ -142,6 +142,8 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                         "runtime": {
                             "execute": session.config.execute,
                             "base_url": session.config.base_url,
+                            "login_accounts": public_login_accounts(session.runtime_state),
+                            "selected_login_account": str(session.runtime_state.get("selected_login_account") or ""),
                         },
                     }
                 )
@@ -203,12 +205,14 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
             session_id = values.get("session", [base_config.session_id])[0] or base_config.session_id
             kit_dir = values.get("kit", [str(base_config.kit_dir)])[0] if allow_kit_switch else str(base_config.kit_dir)
             execute, base_url = self._runtime_from_values(values) if ("execute" in values or "base_url" in values) else (None, None)
+            login_account_id = values.get("login_account_id", [""])[0] if "login_account_id" in values else ""
             return get_session(
                 user=user,
                 session_id=session_id,
                 kit_dir=Path(kit_dir),
                 execute=execute,
                 base_url=base_url,
+                login_account_id=login_account_id,
             )
 
         def _session_from_body(self, body: dict[str, Any]) -> ChatSession:
@@ -216,12 +220,14 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
             session_id = str(body.get("session_id") or base_config.session_id)
             kit_dir = Path(str(body.get("kit_dir") or base_config.kit_dir)) if allow_kit_switch else base_config.kit_dir
             execute, base_url = self._runtime_from_values(body)
+            login_account_id = str(body.get("login_account_id") or "")
             return get_session(
                 user=user,
                 session_id=session_id,
                 kit_dir=kit_dir,
                 execute=execute,
                 base_url=base_url,
+                login_account_id=login_account_id,
             )
 
         def _runtime_from_values(self, values: dict[str, Any]) -> tuple[bool, str]:
@@ -301,6 +307,7 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
         kit_dir: Path,
         execute: bool | None,
         base_url: str | None,
+        login_account_id: str = "",
     ) -> ChatSession:
         key = f"{user}:{session_id}:{kit_dir}"
         if key not in sessions:
@@ -320,6 +327,11 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                 base_url=base_url if base_url is not None else session.config.base_url,
                 execute=execute if execute is not None else session.config.execute,
             )
+        if login_account_id:
+            try:
+                session.select_login_account(login_account_id)
+            except ValueError:
+                pass
         return session
 
     return ChatHandler
@@ -493,11 +505,11 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       font-size: 12px;
       text-transform: uppercase;
     }}
-    input, textarea, button {{
+    input, textarea, select, button {{
       font: inherit;
       letter-spacing: 0;
     }}
-    input, textarea {{
+    input, textarea, select {{
       width: 100%;
       margin-top: 6px;
       border: 1px solid var(--line);
@@ -509,6 +521,14 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     input:disabled {{
       color: var(--muted);
       background: #eef1ed;
+    }}
+    select {{
+      appearance: none;
+      background-image: linear-gradient(45deg, transparent 50%, #66736b 50%), linear-gradient(135deg, #66736b 50%, transparent 50%);
+      background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+      background-size: 5px 5px, 5px 5px;
+      background-repeat: no-repeat;
+      padding-right: 26px;
     }}
     button {{
       border: 0;
@@ -1078,6 +1098,15 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       border-radius: 8px;
       font-size: 13px;
     }}
+    .login-account-select {{
+      width: min(20vw, 180px);
+      min-width: 138px;
+      height: 36px;
+      margin: 0;
+      padding: 7px 26px 7px 9px;
+      border-radius: 8px;
+      font-size: 13px;
+    }}
     .connection-button {{
       min-width: 92px;
       height: 36px;
@@ -1487,6 +1516,9 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
               placeholder="http://localhost:8080"
               aria-label="Target system base URL"
             >
+            <select class="login-account-select" id="loginAccount" aria-label="Saved login account">
+              <option value="">No saved account</option>
+            </select>
             <button class="connection-button" id="testConnectionBtn" type="button">Test connection</button>
             <span class="connection-status" id="connectionStatus" aria-live="polite"></span>
           </div>
@@ -1612,6 +1644,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       runtimeMode: document.getElementById('runtimeMode'),
       runtimeTarget: document.getElementById('runtimeTarget'),
       baseUrl: document.getElementById('baseUrl'),
+      loginAccount: document.getElementById('loginAccount'),
       testConnection: document.getElementById('testConnectionBtn'),
       connectionStatus: document.getElementById('connectionStatus'),
       usageInput: document.getElementById('usageInput'),
@@ -1650,8 +1683,12 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         session_id: els.session.value,
         kit_dir: allowKitSwitch ? els.kit.value : undefined,
         execute: runtimeExecute,
-        base_url: runtimeExecute ? els.baseUrl.value.trim() : ''
+        base_url: runtimeExecute ? els.baseUrl.value.trim() : '',
+        login_account_id: selectedLoginAccountId()
       }}, extra);
+    }}
+    function selectedLoginAccountId() {{
+      return els.loginAccount && !els.loginAccount.disabled ? els.loginAccount.value : '';
     }}
     function stateQuery(includeRuntime = false) {{
       const qs = new URLSearchParams({{ user: els.user.value, session: els.session.value }});
@@ -1659,6 +1696,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       if (includeRuntime) {{
         qs.set('execute', runtimeExecute ? 'true' : 'false');
         if (runtimeExecute) qs.set('base_url', els.baseUrl.value.trim());
+        if (selectedLoginAccountId()) qs.set('login_account_id', selectedLoginAccountId());
       }}
       return qs;
     }}
@@ -2012,6 +2050,28 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       if (usage.session_cost_usd) meta.push('$' + Number(usage.session_cost_usd).toFixed(4));
       els.usageMeta.textContent = meta.join(' · ') || 'Usage appears after an AI response.';
     }}
+    function renderLoginAccounts(accounts = [], selectedId = '') {{
+      const previous = els.loginAccount.value;
+      els.loginAccount.innerHTML = '';
+      const empty = document.createElement('option');
+      empty.value = '';
+      empty.textContent = accounts.length ? 'No saved account' : 'No saved accounts';
+      els.loginAccount.appendChild(empty);
+      accounts.forEach(account => {{
+        const option = document.createElement('option');
+        option.value = account.id || '';
+        option.textContent = account.label || account.id || 'Saved account';
+        els.loginAccount.appendChild(option);
+      }});
+      const target = selectedId || previous;
+      if (target && accounts.some(account => account.id === target)) {{
+        els.loginAccount.value = target;
+      }} else {{
+        els.loginAccount.value = '';
+      }}
+      els.loginAccount.disabled = accounts.length === 0;
+      els.loginAccount.title = accounts.length ? 'Saved account for login tools' : 'Run a login tool once to save an account';
+    }}
     function buildToolCommand(tool) {{
       const params = (tool.required || []).map(name => name + '=');
       return '/run ' + tool.name + (params.length ? ' ' + params.join(' ') : '');
@@ -2158,6 +2218,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       if (data.runtime) {{
         if (data.runtime.base_url) els.baseUrl.value = data.runtime.base_url;
         applyRuntimeMode(data.runtime.execute ? 'execute' : 'dry-run', false);
+        renderLoginAccounts(data.runtime.login_accounts || [], data.runtime.selected_login_account || '');
       }}
       els.messages.innerHTML = '';
       (data.history || []).forEach(item => addMessage(item.role, item.content));
@@ -2177,6 +2238,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     els.baseUrl.addEventListener('change', () => {{
       if (runtimeExecute && validRuntimeBaseUrl(true)) loadState(true);
     }});
+    els.loginAccount.addEventListener('change', () => loadState(true));
     document.querySelectorAll('[data-drawer]').forEach(button => {{
       button.addEventListener('click', () => {{
         const isSameOpenDrawer = els.contextDrawer.classList.contains('open') &&

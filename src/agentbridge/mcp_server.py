@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -240,8 +241,12 @@ def _load_saved_credentials(kit_dir: Path) -> dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    credentials = data.get("login_credentials") if isinstance(data, dict) else None
-    return credentials if isinstance(credentials, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    state = _normalize_login_account_state(data)
+    account = _selected_login_account(state)
+    credentials = account.get("credentials") if account else None
+    return dict(credentials) if isinstance(credentials, dict) else {}
 
 
 def _is_login_tool(tool_name: str, capability: dict[str, Any]) -> bool:
@@ -273,12 +278,17 @@ def _save_runtime_state_from_tool(kit_dir: Path, tool_name: str, capability: dic
     if _is_login_tool(tool_name, capability):
         credentials = _login_credentials_from_args(args)
         if credentials:
+            state = _upsert_login_account(state, credentials, auth_headers={})
             state["login_credentials"] = credentials
     auth_headers = {
         key: value
         for key, value in headers.items()
         if key.lower() in {"authorization", "cookie", "proxy-authorization", "x-api-key", "api-key"} or "token" in key.lower() or "secret" in key.lower()
     }
+    if _is_login_tool(tool_name, capability):
+        credentials = _login_credentials_from_args(args)
+        if credentials:
+            state = _upsert_login_account(state, credentials, auth_headers=auth_headers)
     if auth_headers:
         state["auth_headers"] = auth_headers
     if state:
@@ -286,15 +296,108 @@ def _save_runtime_state_from_tool(kit_dir: Path, tool_name: str, capability: dic
 
 
 def _login_credentials_from_args(args: dict[str, Any]) -> dict[str, Any]:
-    username_keys = ["username", "user", "email", "login", "account"]
-    password_keys = ["password", "passwd", "pwd"]
     credentials: dict[str, Any] = {}
-    for key in username_keys:
+    for key in _USERNAME_KEYS:
         if key in args and args[key] not in (None, ""):
             credentials[key] = args[key]
             break
-    for key in password_keys:
+    for key in _PASSWORD_KEYS:
         if key in args and args[key] not in (None, ""):
             credentials[key] = args[key]
             break
     return credentials if len(credentials) >= 2 else {}
+
+
+_USERNAME_KEYS = ["username", "user", "email", "login", "account"]
+_PASSWORD_KEYS = ["password", "passwd", "pwd"]
+
+
+def _normalize_login_account_state(state: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(state)
+    raw_accounts = normalized.get("login_accounts", [])
+    accounts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if isinstance(raw_accounts, list):
+        for raw_account in raw_accounts:
+            if not isinstance(raw_account, dict):
+                continue
+            credentials = raw_account.get("credentials", {})
+            if not isinstance(credentials, dict) or len(credentials) < 2:
+                continue
+            account_id = str(raw_account.get("id") or _login_account_id(credentials))
+            if account_id in seen:
+                continue
+            seen.add(account_id)
+            auth_headers = raw_account.get("auth_headers", {})
+            accounts.append(
+                {
+                    "id": account_id,
+                    "label": str(raw_account.get("label") or _login_account_label(credentials)),
+                    "credentials": {str(key): value for key, value in credentials.items()},
+                    "auth_headers": {str(key): str(value) for key, value in auth_headers.items()} if isinstance(auth_headers, dict) else {},
+                }
+            )
+    legacy_credentials = normalized.get("login_credentials", {})
+    if isinstance(legacy_credentials, dict) and len(legacy_credentials) >= 2:
+        account_id = _login_account_id(legacy_credentials)
+        if account_id not in seen:
+            legacy_headers = normalized.get("auth_headers", {})
+            accounts.append(
+                {
+                    "id": account_id,
+                    "label": _login_account_label(legacy_credentials),
+                    "credentials": {str(key): value for key, value in legacy_credentials.items()},
+                    "auth_headers": {str(key): str(value) for key, value in legacy_headers.items()} if isinstance(legacy_headers, dict) else {},
+                }
+            )
+    normalized["login_accounts"] = accounts
+    selected = str(normalized.get("selected_login_account") or "")
+    if selected and not any(account["id"] == selected for account in accounts):
+        selected = ""
+    if not selected and accounts:
+        selected = str(accounts[-1]["id"])
+    if selected:
+        normalized["selected_login_account"] = selected
+    else:
+        normalized.pop("selected_login_account", None)
+    return normalized
+
+
+def _selected_login_account(state: dict[str, Any]) -> dict[str, Any] | None:
+    selected = str(state.get("selected_login_account") or "")
+    for account in state.get("login_accounts", []):
+        if isinstance(account, dict) and str(account.get("id") or "") == selected:
+            return account
+    return None
+
+
+def _upsert_login_account(state: dict[str, Any], credentials: dict[str, Any], auth_headers: dict[str, str] | None = None) -> dict[str, Any]:
+    normalized = _normalize_login_account_state(state)
+    account_id = _login_account_id(credentials)
+    account = {
+        "id": account_id,
+        "label": _login_account_label(credentials),
+        "credentials": {str(key): value for key, value in credentials.items()},
+        "auth_headers": dict(auth_headers or {}),
+    }
+    normalized["login_accounts"] = [item for item in normalized.get("login_accounts", []) if isinstance(item, dict) and item.get("id") != account_id] + [account]
+    normalized["selected_login_account"] = account_id
+    return normalized
+
+
+def _login_account_id(credentials: dict[str, Any]) -> str:
+    for key in _USERNAME_KEYS:
+        value = credentials.get(key)
+        if value not in (None, ""):
+            return f"{key}:{value}"
+    public_identity = {str(key): value for key, value in credentials.items() if str(key).lower() not in _PASSWORD_KEYS}
+    digest = hashlib.sha256(json.dumps(public_identity or sorted(credentials), sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    return f"account:{digest[:12]}"
+
+
+def _login_account_label(credentials: dict[str, Any]) -> str:
+    for key in _USERNAME_KEYS:
+        value = credentials.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return "Saved account"
