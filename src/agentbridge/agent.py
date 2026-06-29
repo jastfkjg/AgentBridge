@@ -622,7 +622,7 @@ class AgentRunner:
             MCPServerConfig(
                 kit_dir=self.kit_dir,
                 base_url=target_base_url,
-                headers=headers or {},
+                headers=headers if headers is not None else {},
                 execute=execute,
                 timeout=timeout,
                 read_only=read_only,
@@ -639,6 +639,9 @@ class AgentRunner:
         self._client_thread: threading.Thread | None = None
         self._client_lock = threading.Lock()
         self._query_lock = threading.Lock()
+        self._permission_lock = threading.Lock()
+        self._pending_permission: dict[str, Any] | None = None
+        self._permission_events: queue.Queue[tuple[str, Any]] | None = None
 
     def _load_kit(self) -> None:
         caps_path = self.kit_dir / "capabilities.json"
@@ -664,15 +667,48 @@ class AgentRunner:
         with self._query_lock:
             loop = self._ensure_client_loop()
             events: queue.Queue[tuple[str, Any]] = queue.Queue()
+            self._permission_events = events
             asyncio.run_coroutine_threadsafe(self._stream_messages_async(prompt, events), loop)
-            while True:
-                kind, payload = events.get()
-                if kind == "message":
-                    yield payload
-                elif kind == "error":
-                    raise payload
-                elif kind == "done":
-                    return
+            try:
+                while True:
+                    kind, payload = events.get()
+                    if kind == "message":
+                        yield payload
+                    elif kind == "error":
+                        raise payload
+                    elif kind == "done":
+                        return
+            finally:
+                self._permission_events = None
+
+    def resolve_permission(self, request_id: str, allow: bool) -> bool:
+        with self._permission_lock:
+            pending = self._pending_permission
+            if not pending or pending.get("id") != request_id:
+                return False
+            pending["allow"] = allow
+            event = pending.get("event")
+            if isinstance(event, threading.Event):
+                event.set()
+            return True
+
+    def interrupt(self) -> None:
+        with self._permission_lock:
+            pending = self._pending_permission
+            if pending:
+                pending["allow"] = False
+                event = pending.get("event")
+                if isinstance(event, threading.Event):
+                    event.set()
+        loop = self._client_loop
+        client = self._client
+        if loop is None or client is None:
+            return
+        interrupt = getattr(client, "interrupt", None)
+        if not callable(interrupt):
+            return
+        future = asyncio.run_coroutine_threadsafe(interrupt(), loop)
+        future.result(timeout=5)
 
     def query_text(self, prompt: str) -> str:
         if "query" in self.__dict__:
@@ -758,6 +794,7 @@ class AgentRunner:
     async def _ensure_client_async(self) -> Any:
         if self._client is not None:
             return self._client
+        import claude_agent_sdk as sdk_module
         from claude_agent_sdk import (
             ClaudeAgentOptions,
             ClaudeSDKClient,
@@ -779,6 +816,34 @@ class AgentRunner:
         }
         sdk_settings = _agent_sdk_settings(self.base_url, self.model)
 
+        async def can_use_tool(tool_name: str, tool_input: dict[str, Any], context: Any) -> Any:
+            request_id = str(uuid.uuid4())[:8]
+            decision = threading.Event()
+            pending = {
+                "id": request_id,
+                "tool": tool_name,
+                "input": tool_input,
+                "title": getattr(context, "title", None) or f"Authorize {tool_name}",
+                "display_name": getattr(context, "display_name", None) or tool_name,
+                "description": getattr(context, "description", None) or getattr(context, "decision_reason", None) or "",
+                "tool_use_id": getattr(context, "tool_use_id", None),
+                "event": decision,
+                "allow": None,
+            }
+            payload = {key: value for key, value in pending.items() if key not in {"event", "allow"} and value is not None}
+            with self._permission_lock:
+                self._pending_permission = pending
+            if self._permission_events is not None:
+                self._permission_events.put(("message", {"type": "agent_permission_required", "pending": payload}))
+            await asyncio.to_thread(decision.wait)
+            with self._permission_lock:
+                allow = bool(pending.get("allow"))
+                if self._pending_permission is pending:
+                    self._pending_permission = None
+            if allow:
+                return sdk_module.PermissionResultAllow()
+            return sdk_module.PermissionResultDeny(message="Denied by user.")
+
         async def connect_with_session(session_id: str) -> Any:
             options = _construct_with_supported_kwargs(
                 ClaudeAgentOptions,
@@ -791,6 +856,7 @@ class AgentRunner:
                     "base_url": self.base_url or None,
                     "env": sdk_env,
                     "include_partial_messages": True,
+                    "can_use_tool": can_use_tool,
                     **({"settings": sdk_settings} if sdk_settings else {}),
                 },
             )

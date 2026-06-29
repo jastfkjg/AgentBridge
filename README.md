@@ -96,7 +96,7 @@ Open the printed URL. The Web UI acts as a Claude Agent chat control surface ove
 - Dry-run and real-system mode switching.
 - Base URL validation and connectivity testing.
 - Clickable tools that insert `/run` commands and required parameters.
-- Visible authorization buttons for high-risk operations.
+- Visible authorization buttons for high-risk operations and Claude Agent SDK tool permission prompts.
 - Real-time SSE streaming, tool call timeline, interrupt control, recent conversations, file attachments, Markdown responses, and Claude Agent SDK model/token/cost usage.
 
 Real-system mode still enforces generated guardrails and confirmation requirements.
@@ -109,6 +109,8 @@ agentbridge web .agentbridge/my-system-kit \
   --bearer-env API_TOKEN \
   --execute
 ```
+
+When a real-system login call returns `access_token`, `token`, `jwt`, an `Authorization` header, or `Set-Cookie`, Web Chat stores the resulting session credential in local chat memory and reuses it for later tool calls in the same user/session.
 
 ## Start Terminal Chat
 
@@ -172,7 +174,7 @@ agentbridge mcp-config .agentbridge/my-system-kit --write
 - Destructive and external-side-effect tools require explicit confirmation.
 - Switching runtime mode clears pending authorization.
 - Project analysis is read-only; generated files are written only to the selected kit directory.
-- Secrets are runtime inputs and must not be stored in generated kits.
+- Secrets are runtime inputs and must not be stored in generated kits. Web Chat session credentials are runtime memory, not kit protocol files.
 
 ## Main Commands
 

@@ -96,12 +96,12 @@ class ChatMemory:
 
     def load(self, key: str) -> dict[str, Any]:
         if not self.enabled or not self.path or not self.path.exists():
-            return {"history": [], "pending": None}
+            return {"history": [], "pending": None, "auth_headers": {}}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return {"history": [], "pending": None}
-        return data.get(key, {"history": [], "pending": None})
+            return {"history": [], "pending": None, "auth_headers": {}}
+        return data.get(key, {"history": [], "pending": None, "auth_headers": {}})
 
     def save(self, key: str, state: dict[str, Any]) -> None:
         if not self.enabled or not self.path:
@@ -117,6 +117,7 @@ class ChatMemory:
             "history": history,
             "pending": state.get("pending"),
             "usage": state.get("usage", {}),
+            "auth_headers": state.get("auth_headers", {}),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -124,6 +125,7 @@ class ChatMemory:
 
 class ChatSession:
     def __init__(self, config: ChatConfig) -> None:
+        config = replace(config, headers=dict(config.headers))
         self.config = config
         self.capabilities = load_capabilities(config.kit_dir)
         self.server = self._build_server(config)
@@ -133,6 +135,9 @@ class ChatSession:
         self.memory = ChatMemory(memory_file, enabled=config.memory_enabled, max_history=config.max_history)
         self.memory_key = f"{config.user}:{config.session_id}:{config.kit_dir.resolve()}"
         state = self.memory.load(self.memory_key)
+        auth_headers = state.get("auth_headers", {})
+        if isinstance(auth_headers, dict):
+            config.headers.update({str(key): str(value) for key, value in auth_headers.items()})
         self.history: list[dict[str, str]] = list(state.get("history", []))
         self.usage: dict[str, Any] = dict(state.get("usage", {}))
         pending_data = state.get("pending")
@@ -285,6 +290,13 @@ class ChatSession:
             return self._reply("no_pending", "There is no pending operation to confirm.")
         pending = self.pending
         return self.call_tool(pending.tool, pending.args, confirmed=True)
+
+    def resolve_pending(self, allow: bool) -> ChatResponse:
+        if allow:
+            return self.confirm()
+        self.pending = None
+        self._save()
+        return self._reply("cancelled", "Pending operation cleared.")
 
     def tool_summaries(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
@@ -502,7 +514,7 @@ class ChatSession:
         pending = self.pending.to_dict() if self.pending else None
         self.memory.save(
             self.memory_key,
-            {"history": self.history, "pending": pending, "usage": self.usage},
+            {"history": self.history, "pending": pending, "usage": self.usage, "auth_headers": _auth_headers(self.config.headers)},
         )
 
     def _record_usage(self, usage: dict[str, Any]) -> None:
@@ -550,6 +562,11 @@ class ChatSession:
         )
 
         events: list[ChatEvent] = []
+        if isinstance(message, dict) and message.get("type") == "agent_permission_required":
+            pending = dict(message.get("pending", {}))
+            pending["kind"] = "agent_permission"
+            events.append(ChatEvent("confirmation_required", {"pending": pending, "message": _format_agent_permission_message(pending)}))
+            return events
         stream_delta = _extract_agent_stream_text_delta(message)
         if stream_delta:
             events.append(ChatEvent("assistant_text_delta", {"text": stream_delta}))
@@ -593,6 +610,13 @@ class ChatSession:
         for progress in _agent_sdk_progress_events(message):
             events.append(ChatEvent("timeline", {"message": progress}))
         return events
+
+    def resolve_agent_permission(self, request_id: str, allow: bool) -> dict[str, Any]:
+        runner = self.agent_runner
+        resolve = getattr(runner, "resolve_permission", None)
+        if not callable(resolve) or not resolve(request_id, allow):
+            return {"status": "not_found", "message": "No matching Agent permission request is pending."}
+        return {"status": "approved" if allow else "denied", "message": "Agent permission approved." if allow else "Agent permission denied."}
 
 
 def _message_content_blocks(message: Any) -> list[Any]:
@@ -796,6 +820,21 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
         next_step = result.get("next_step", "")
         return f"{tool_name} planned. {next_step}"
     return f"{tool_name} completed."
+
+
+def _format_agent_permission_message(pending: dict[str, Any]) -> str:
+    title = pending.get("title") or f"Authorize {pending.get('tool', 'tool')}"
+    description = pending.get("description") or ""
+    return f"{title}. {description}".strip()
+
+
+def _auth_headers(headers: dict[str, str]) -> dict[str, str]:
+    names = {"authorization", "cookie", "proxy-authorization", "x-api-key", "api-key"}
+    return {
+        key: value
+        for key, value in headers.items()
+        if key.lower() in names or "token" in key.lower() or "secret" in key.lower()
+    }
 
 
 def agent_unavailable_message() -> str:

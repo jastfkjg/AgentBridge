@@ -23,6 +23,8 @@ AgentBridge 的目标：通过 Claude Agent SDK 解析已有项目或系统，�
 - [x] 增加 tool call timeline，方便用户理解 Agent 如何操作系统
 - [x] 支持 cancel/interrupt 当前 Agent 请求
 - [x] 展示 model、token usage、cost 等运行信息
+- [x] Web Chat 使用按钮处理高风险工具确认和 Claude Agent SDK 权限请求
+- [x] Web Chat 在登录响应中捕获 token/cookie，并在同一用户会话后续操作中复用
 
 ## P1：更多系统 Adapter
 

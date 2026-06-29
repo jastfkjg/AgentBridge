@@ -150,7 +150,7 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path not in {"/api/chat", "/api/chat/stream", "/api/chat/interrupt", "/api/tool", "/api/connectivity"}:
+            if parsed.path not in {"/api/chat", "/api/chat/stream", "/api/chat/interrupt", "/api/chat/agent-permission", "/api/chat/pending", "/api/tool", "/api/connectivity"}:
                 self._send_error(HTTPStatus.NOT_FOUND, "Not found")
                 return
             try:
@@ -165,6 +165,13 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                 session = self._session_from_body(body)
                 if parsed.path == "/api/chat/interrupt":
                     response = session.interrupt()
+                    self._send_json(response.to_dict())
+                    return
+                if parsed.path == "/api/chat/agent-permission":
+                    self._send_json(session.resolve_agent_permission(str(body.get("permission_id", "")), allow=bool(body.get("allow", False))))
+                    return
+                if parsed.path == "/api/chat/pending":
+                    response = session.resolve_pending(allow=bool(body.get("allow", False)))
                     self._send_json(response.to_dict())
                     return
                 if parsed.path == "/api/chat/stream":
@@ -1571,6 +1578,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     let sendInFlight = false;
     let activeStreamController = null;
     let runtimeExecute = initialExecuteMode;
+    let currentPending = null;
     const markdownRenderer = window.markdownit ? window.markdownit({{
       html: false,
       linkify: true,
@@ -1871,6 +1879,14 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       addMessage('assistant', 'Current Agent request interrupted.');
       setSending(false);
     }}
+    function renderChatResponse(data) {{
+      if (!data) return;
+      if (data.pending) renderPending(data.pending);
+      else renderPending(null);
+      if (data.usage) renderUsage(data.usage);
+      if (data.tools && data.tools.length) renderTools(data.tools);
+      if (data.message) addMessage('assistant', data.message);
+    }}
     function renderTimelineEvent(event) {{
       if (!els.timeline) return;
       let label = '';
@@ -1889,13 +1905,31 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     }}
     function renderPending(pending) {{
       if (!pending) {{
+        currentPending = null;
         els.pending.classList.remove('show');
         return;
       }}
+      currentPending = pending;
       els.pending.classList.add('show');
+      if (pending.kind === 'agent_permission') {{
+        const input = pending.input || {{}};
+        const command = input.command || input.pattern || input.path || '';
+        els.pendingText.textContent = (pending.display_name || pending.tool || 'Agent tool') + ' · ' + (pending.description || pending.title || '') + (command ? ' · ' + command : '');
+        return;
+      }}
       const plan = pending.plan || {{}};
       const transport = plan.transport || {{}};
       els.pendingText.textContent = pending.tool + ' · ' + plan.risk + ' · ' + (transport.method || transport.type || '') + ' ' + (transport.path || '');
+    }}
+    async function resolvePending(allow) {{
+      if (!currentPending) return;
+      if (currentPending.kind === 'agent_permission') {{
+        await post('/api/chat/agent-permission', payload({{ permission_id: currentPending.id, allow }}));
+        renderPending(null);
+        return;
+      }}
+      const data = await post('/api/chat/pending', payload({{ allow }}));
+      renderChatResponse(data);
     }}
     function formatNumber(value) {{
       return new Intl.NumberFormat().format(Number(value || 0));
@@ -2128,8 +2162,8 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         els.commandMenu.classList.remove('show');
       }}
     }});
-    document.getElementById('confirmBtn').onclick = () => sendMessage('confirm');
-    document.getElementById('cancelBtn').onclick = () => sendMessage('cancel');
+    document.getElementById('confirmBtn').onclick = () => resolvePending(true);
+    document.getElementById('cancelBtn').onclick = () => resolvePending(false);
     [els.user, els.session, els.kit].forEach(el => el.addEventListener('change', () => {{
       loadState();
       loadConversations();

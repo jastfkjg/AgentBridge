@@ -56,7 +56,7 @@ agentbridge web .agentbridge/openapi-kit --port 8765
 - Base URL 校验和目标系统连通测试
 - 可点击的工具列表，自动填入 `/run` 命令和必填参数
 - 聊天记录
-- 高风险操作的 Authorize/Cancel 控件
+- 高风险操作和 Claude Agent SDK 工具权限请求的 Authorize/Cancel 控件
 - Agent 回复和工具事件的 SSE 流式响应
 - 展示 tool use、tool result、确认等待和中断状态的工具调用时间线
 - 中断当前 Agent 请求的控制按钮
@@ -73,6 +73,8 @@ agentbridge web .agentbridge/openapi-kit \
 ```
 
 也可以直接在 Web 页面切换运行模式。真实系统模式必须填写 `http://` 或 `https://` Base URL。连通测试先向 Base URL 发送 `HEAD`，目标不支持时回退到 `GET`；只要收到 HTTP 响应，就判定系统网络可达。切换模式会先清除待确认操作并重建运行时，原有 guardrail 和高风险人工确认仍然生效。
+
+真实执行模式下，如果登录类 HTTP/GraphQL 工具返回 `access_token`、`token`、`jwt`、`Authorization` 响应头或 `Set-Cookie`，Web Chat 会把对应凭证保存到当前用户/会话的本地聊天记忆中，并在后续工具调用中自动复用。该凭证属于运行时状态，不属于生成的 kit 协议文件。
 
 终端 Chat 通过 `/use`、`/mode`、`/connect` 和 `/usage` 提供同样的核心流程。`/use` 会显示编号工具并逐项询问必填参数；高风险调用会给出明确的 Authorize/Cancel 选择。
 

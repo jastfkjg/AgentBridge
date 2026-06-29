@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import http.cookies
 import json
 import sqlite3
 import subprocess
@@ -212,6 +213,28 @@ def execute_tool(capability: dict[str, Any], args: dict[str, Any], config: Adapt
     return DEFAULT_ADAPTER_REGISTRY.execute(capability, args, config)
 
 
+def capture_auth_headers_from_result(result: dict[str, Any], headers: dict[str, str]) -> dict[str, str]:
+    response = result.get("response")
+    if not isinstance(response, dict):
+        return {}
+    captured: dict[str, str] = {}
+    response_headers = response.get("headers")
+    if isinstance(response_headers, dict):
+        for key, value in response_headers.items():
+            lowered = str(key).lower()
+            if lowered == "authorization" and value:
+                captured["Authorization"] = str(value)
+            elif lowered == "set-cookie" and value:
+                cookie = _cookie_header_from_set_cookie(str(value))
+                if cookie:
+                    captured["Cookie"] = cookie
+    token = _find_bearer_token(response.get("body"))
+    if token:
+        captured["Authorization"] = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+    headers.update(captured)
+    return captured
+
+
 def execute_http_tool(
     capability: dict[str, Any],
     args: dict[str, Any],
@@ -319,6 +342,34 @@ def redact_headers(headers: dict[str, str]) -> dict[str, str]:
         else:
             redacted[key] = value
     return redacted
+
+
+def _cookie_header_from_set_cookie(value: str) -> str:
+    cookie = http.cookies.SimpleCookie()
+    try:
+        cookie.load(value)
+    except http.cookies.CookieError:
+        return ""
+    return "; ".join(f"{key}={morsel.value}" for key, morsel in cookie.items())
+
+
+def _find_bearer_token(payload: Any) -> str:
+    token_keys = {"access_token", "accesstoken", "auth_token", "authtoken", "id_token", "idtoken", "jwt", "token"}
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            normalized = str(key).replace("-", "_").replace(" ", "_").lower()
+            if normalized in token_keys and isinstance(value, str) and len(value) >= 8:
+                return value
+        for value in payload.values():
+            token = _find_bearer_token(value)
+            if token:
+                return token
+    elif isinstance(payload, list):
+        for item in payload:
+            token = _find_bearer_token(item)
+            if token:
+                return token
+    return ""
 
 
 def build_http_url(base_url: str, path: str, args: dict[str, Any]) -> tuple[str, dict[str, Any]]:

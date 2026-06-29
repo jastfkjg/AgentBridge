@@ -14,6 +14,7 @@ from agentbridge.adapters import (
     build_http_request_preview,
     build_http_url,
     build_request_preview,
+    capture_auth_headers_from_result,
     execute_http_tool,
     execute_tool,
     format_http_response,
@@ -131,6 +132,7 @@ class AgentBridgeMCPServer:
             result = execute_tool(capability, args, self._adapter_config())
         except AdapterError as exc:
             raise MCPServerError(str(exc)) from exc
+        capture_auth_headers_from_result(result, self.config.headers)
         self._audit(name, args, "executed" if not result.get("error") else "error", result)
         return _tool_text(result, is_error=bool(result.get("error")))
 

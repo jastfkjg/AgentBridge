@@ -87,6 +87,24 @@ def _make_kit(root: Path) -> Path:
     kit = root / "kit"
     capabilities = [
         {
+            "name": "login",
+            "domain": "auth",
+            "resource": "session",
+            "action": "create",
+            "description": "Log in",
+            "input_schema": {
+                "type": "object",
+                "properties": {"username": {"type": "string"}, "password": {"type": "string"}},
+                "required": ["username", "password"],
+                "additionalProperties": False,
+            },
+            "risk": "external_side_effect",
+            "confirm_required": False,
+            "source": {"kind": "openapi", "path": "openapi.json", "location": "POST /auth/login"},
+            "transport": {"type": "http", "method": "POST", "path": "/auth/login"},
+            "dry_run_supported": True,
+        },
+        {
             "name": "list_chapter",
             "domain": "writing",
             "resource": "chapter",
@@ -146,6 +164,11 @@ class _FakeHTTPResponse:
     status = 200
     headers = {"Content-Type": "application/json"}
 
+    def __init__(self, payload: object | None = None, headers: dict[str, str] | None = None) -> None:
+        self.payload = payload if payload is not None else {"ok": True}
+        if headers is not None:
+            self.headers = headers
+
     def __enter__(self):
         return self
 
@@ -153,7 +176,7 @@ class _FakeHTTPResponse:
         return False
 
     def read(self):
-        return b'{"ok": true}'
+        return json.dumps(self.payload).encode("utf-8")
 
 
 class _ConnectivityResponse:
@@ -222,6 +245,29 @@ class ChatSessionTests(unittest.TestCase):
             request = urlopen.call_args.args[0]
             self.assertEqual(request.get_method(), "GET")
             self.assertEqual(request.full_url, "http://example.test/projects/p1/chapters")
+
+    def test_chat_persists_bearer_token_from_login_response_for_later_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            memory = Path(tmp) / "memory.json"
+            session = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, memory_file=memory, session_id="s1"))
+
+            responses = [
+                _FakeHTTPResponse({"access_token": "jwt-123456"}),
+                _FakeHTTPResponse({"items": []}),
+            ]
+
+            with patch("urllib.request.urlopen", side_effect=responses) as urlopen:
+                login = session.process("/run login username=admin password=secret")
+                listed = session.process("/run list_chapter project_id=p1")
+
+            self.assertEqual(login.status, "tool_result")
+            self.assertEqual(listed.status, "tool_result")
+            second_request = urlopen.call_args_list[1].args[0]
+            self.assertEqual(second_request.headers.get("Authorization"), "Bearer jwt-123456")
+
+            restored = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, memory_file=memory, session_id="s1"))
+            self.assertEqual(restored.config.headers.get("Authorization"), "Bearer jwt-123456")
 
     def test_chat_reports_read_only_policy_block(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -537,6 +583,20 @@ class WebChatTests(unittest.TestCase):
             self.assertIn("setSending(false);", html[html.index("event.type === 'error'"):html.index("event.type === 'done'")])
             done_block = html[html.index("event.type === 'done'"):html.index("if (!sawDone")]
             self.assertIn("setSending(false);", done_block)
+
+    def test_rendered_web_ui_resolves_pending_with_buttons_without_sending_chat_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("/api/chat/agent-permission", html)
+            self.assertIn("/api/chat/pending", html)
+            self.assertIn("currentPending.kind === 'agent_permission'", html)
+            self.assertIn("document.getElementById('confirmBtn').onclick = () => resolvePending(true)", html)
+            self.assertIn("document.getElementById('cancelBtn').onclick = () => resolvePending(false)", html)
+            self.assertNotIn("document.getElementById('confirmBtn').onclick = () => sendMessage('confirm')", html)
 
     def test_rendered_web_ui_aligns_user_messages_to_the_right(self):
         with tempfile.TemporaryDirectory() as tmp:
