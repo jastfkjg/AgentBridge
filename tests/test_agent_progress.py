@@ -305,6 +305,83 @@ class AgentProgressTests(unittest.TestCase):
         self.assertEqual(rest[0].result, "allowed")
         self.assertIsInstance(callback_result["result"], FakePermissionResultAllow)
 
+    def test_agent_runner_auto_allows_read_only_bash_permission_requests(self):
+        callback_result: dict[str, object] = {}
+
+        class FakeResultMessage:
+            content = []
+
+            def __init__(self, result: str) -> None:
+                self.result = result
+
+        class FakePermissionContext:
+            title = "Get script detail"
+            display_name = "Bash"
+            description = "curl -s http://localhost:3001/api/v1/scripts/1"
+            tool_use_id = "toolu_1"
+
+        class FakePermissionResultAllow:
+            pass
+
+        class FakePermissionResultDeny:
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+
+        class FakeClaudeAgentOptions:
+            last_kwargs: dict[str, object] | None = None
+
+            def __init__(self, **kwargs: object) -> None:
+                FakeClaudeAgentOptions.last_kwargs = kwargs
+
+        class FakeClaudeSDKClient:
+            def __init__(self, options: object) -> None:
+                self.options = options
+
+            async def connect(self) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                pass
+
+            async def query(self, _prompt: str, session_id: str = "__not_passed__") -> None:
+                pass
+
+            async def receive_response(self):
+                can_use_tool = FakeClaudeAgentOptions.last_kwargs["can_use_tool"]
+                result = await can_use_tool("Bash", {"command": "TOKEN=abc curl -s http://localhost:3001/api/v1/scripts/1 -H 'Authorization: Bearer $TOKEN' | python3 -m json.tool"}, FakePermissionContext())
+                callback_result["result"] = result
+                yield FakeResultMessage("allowed")
+
+        def fake_tool(_name: str, _description: str, _param_types: dict[str, type]):
+            def decorate(handler):
+                return handler
+
+            return decorate
+
+        fake_module = types.ModuleType("claude_agent_sdk")
+        fake_module.ClaudeAgentOptions = FakeClaudeAgentOptions
+        fake_module.ClaudeSDKClient = FakeClaudeSDKClient
+        fake_module.PermissionResultAllow = FakePermissionResultAllow
+        fake_module.PermissionResultDeny = FakePermissionResultDeny
+        fake_module.create_sdk_mcp_server = lambda **kwargs: kwargs
+        fake_module.tool = fake_tool
+
+        from agentbridge.agent import AgentRunner
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"claude_agent_sdk": fake_module}):
+            kit = Path(tmp) / "kit"
+            kit.mkdir()
+            (kit / "capabilities.json").write_text("[]", encoding="utf-8")
+            (kit / "guardrails").mkdir()
+            (kit / "guardrails" / "permissions.json").write_text(json.dumps({"tools": {}}), encoding="utf-8")
+
+            runner = AgentRunner(kit, api_key="sk-test", session_id="web-session")
+            messages = list(runner.stream_messages("get script detail"))
+            runner.close()
+
+        self.assertEqual([message.result for message in messages], ["allowed"])
+        self.assertIsInstance(callback_result["result"], FakePermissionResultAllow)
+
     def test_agent_runner_uses_fresh_sdk_session_for_each_runner(self):
         from agentbridge.agent import AgentRunner, _agent_sdk_session_id
 

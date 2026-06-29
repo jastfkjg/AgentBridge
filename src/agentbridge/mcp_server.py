@@ -37,6 +37,7 @@ class MCPServerConfig:
     graphql_endpoint: str = ""
     database_url: str = ""
     grpc_target: str = ""
+    saved_credentials: dict[str, Any] = field(default_factory=dict)
 
 
 class MCPServerError(ValueError):
@@ -47,6 +48,8 @@ class AgentBridgeMCPServer:
     def __init__(self, config: MCPServerConfig) -> None:
         self.config = config
         self.capabilities, self.guardrails = load_runtime_kit(config.kit_dir)
+        if not self.config.saved_credentials:
+            self.config.saved_credentials.update(_load_saved_credentials(config.kit_dir))
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any] | None:
         request_id = request.get("id")
@@ -79,6 +82,9 @@ class AgentBridgeMCPServer:
             schema = dict(cap.get("input_schema", {"type": "object", "properties": {}}))
             schema["properties"] = dict(schema.get("properties", {}))
             rule = rules.get(name, {})
+            if self.config.saved_credentials and _is_login_tool(name, cap):
+                required = [item for item in schema.get("required", []) if item not in self.config.saved_credentials]
+                schema["required"] = required
             if rule.get("confirm_required"):
                 schema["properties"]["confirmed"] = {
                     "type": "boolean",
@@ -109,6 +115,9 @@ class AgentBridgeMCPServer:
             raise MCPServerError("tools/call params.arguments must be an object")
 
         args = dict(raw_args)
+        if self.config.saved_credentials and _is_login_tool(name, self.capabilities.get(name, {})):
+            for key, value in self.config.saved_credentials.items():
+                args.setdefault(key, value)
         confirmed = bool(args.pop("confirmed", False))
         plan = dry_run(self.config.kit_dir, name, args, confirmed=confirmed)
         capability = self.capabilities[name]
@@ -133,6 +142,10 @@ class AgentBridgeMCPServer:
         except AdapterError as exc:
             raise MCPServerError(str(exc)) from exc
         capture_auth_headers_from_result(result, self.config.headers)
+        if result.get("status") == "executed":
+            if _is_login_tool(name, capability):
+                self.config.saved_credentials.update(_login_credentials_from_args(args))
+            _save_runtime_state_from_tool(self.config.kit_dir, name, capability, args, self.config.headers)
         self._audit(name, args, "executed" if not result.get("error") else "error", result)
         return _tool_text(result, is_error=bool(result.get("error")))
 
@@ -217,3 +230,71 @@ def _tool_text(payload: dict[str, Any], is_error: bool = False) -> dict[str, Any
         "content": [{"type": "text", "text": json.dumps(payload, indent=2, sort_keys=True)}],
         "isError": is_error,
     }
+
+
+def _load_saved_credentials(kit_dir: Path) -> dict[str, Any]:
+    path = kit_dir / ".agentbridge-runtime.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    credentials = data.get("login_credentials") if isinstance(data, dict) else None
+    return credentials if isinstance(credentials, dict) else {}
+
+
+def _is_login_tool(tool_name: str, capability: dict[str, Any]) -> bool:
+    transport = capability.get("transport", {}) if isinstance(capability.get("transport"), dict) else {}
+    haystack = " ".join(
+        str(value)
+        for value in [
+            tool_name,
+            capability.get("name", ""),
+            capability.get("action", ""),
+            capability.get("resource", ""),
+            capability.get("description", ""),
+            transport.get("path", ""),
+        ]
+    ).lower()
+    return any(token in haystack for token in {"login", "log_in", "signin", "sign_in", "auth/login", "/login"})
+
+
+def _save_runtime_state_from_tool(kit_dir: Path, tool_name: str, capability: dict[str, Any], args: dict[str, Any], headers: dict[str, str]) -> None:
+    path = kit_dir / ".agentbridge-runtime.json"
+    state: dict[str, Any] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                state = loaded
+        except (OSError, json.JSONDecodeError):
+            state = {}
+    if _is_login_tool(tool_name, capability):
+        credentials = _login_credentials_from_args(args)
+        if credentials:
+            state["login_credentials"] = credentials
+    auth_headers = {
+        key: value
+        for key, value in headers.items()
+        if key.lower() in {"authorization", "cookie", "proxy-authorization", "x-api-key", "api-key"} or "token" in key.lower() or "secret" in key.lower()
+    }
+    if auth_headers:
+        state["auth_headers"] = auth_headers
+    if state:
+        path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _login_credentials_from_args(args: dict[str, Any]) -> dict[str, Any]:
+    username_keys = ["username", "user", "email", "login", "account"]
+    password_keys = ["password", "passwd", "pwd"]
+    credentials: dict[str, Any] = {}
+    for key in username_keys:
+        if key in args and args[key] not in (None, ""):
+            credentials[key] = args[key]
+            break
+    for key in password_keys:
+        if key in args and args[key] not in (None, ""):
+            credentials[key] = args[key]
+            break
+    return credentials if len(credentials) >= 2 else {}

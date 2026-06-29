@@ -817,6 +817,8 @@ class AgentRunner:
         sdk_settings = _agent_sdk_settings(self.base_url, self.model)
 
         async def can_use_tool(tool_name: str, tool_input: dict[str, Any], context: Any) -> Any:
+            if _is_read_only_permission_request(tool_name, tool_input):
+                return sdk_module.PermissionResultAllow()
             request_id = str(uuid.uuid4())[:8]
             decision = threading.Event()
             pending = {
@@ -995,6 +997,42 @@ def _extract_agent_stream_text_delta(message: Any) -> str:
             text = content_block.get("text")
             return text if isinstance(text, str) else ""
     return ""
+
+
+def _is_read_only_permission_request(tool_name: str, tool_input: dict[str, Any]) -> bool:
+    name = tool_name.lower()
+    if name in {"read", "grep", "glob", "ls"}:
+        return True
+    if name != "bash":
+        return False
+    command = str(tool_input.get("command", "") or "")
+    lowered = command.lower()
+    mutating_markers = [
+        " -x post",
+        " -x put",
+        " -x patch",
+        " -x delete",
+        "--request post",
+        "--request put",
+        "--request patch",
+        "--request delete",
+        " >",
+        ">>",
+        " rm ",
+        " mv ",
+        " cp ",
+        " chmod ",
+        " chown ",
+        " mkdir ",
+        " touch ",
+        " python -c",
+        " node -e",
+    ]
+    if any(marker in f" {lowered} " for marker in mutating_markers):
+        return False
+    if any(marker in lowered for marker in ["/auth/login", "/login", "signin", "sign_in"]):
+        return False
+    return "curl " in lowered and not any(method in lowered for method in ["post", "put", "patch", "delete"])
 
 
 def _extract_agent_result_text(message: Any) -> str:

@@ -9,4 +9,6 @@ venv/
 build/
 dist/
 .agentbridge/
+.agentbridge-runtime.json
+.agentbridge-chat-memory.json
 .superpowers/

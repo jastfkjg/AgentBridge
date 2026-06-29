@@ -14,6 +14,8 @@ from agentbridge.adapters import AdapterRuntimeConfig, build_request_preview
 from agentbridge.mcp_server import AgentBridgeMCPServer, MCPServerConfig
 from agentbridge.runtime import dry_run, load_capabilities, validate_args
 
+RUNTIME_STATE_FILE = ".agentbridge-runtime.json"
+
 
 @dataclass
 class ChatConfig:
@@ -40,6 +42,7 @@ class ChatConfig:
     graphql_endpoint: str = ""
     database_url: str = ""
     grpc_target: str = ""
+    runtime_state_enabled: bool = True
 
 
 @dataclass
@@ -126,9 +129,18 @@ class ChatMemory:
 class ChatSession:
     def __init__(self, config: ChatConfig) -> None:
         config = replace(config, headers=dict(config.headers))
+        self.runtime_state_path = config.kit_dir / RUNTIME_STATE_FILE
+        self.runtime_state = load_kit_runtime_state(config.kit_dir) if config.runtime_state_enabled else {}
+        saved_base_url = str(self.runtime_state.get("base_url") or "")
+        if saved_base_url and not config.base_url:
+            config = replace(config, base_url=saved_base_url)
+        if saved_base_url and not config.execute and self.runtime_state.get("execute") is True:
+            config = replace(config, execute=True)
+        saved_headers = self.runtime_state.get("auth_headers", {})
+        if isinstance(saved_headers, dict):
+            config.headers.update({str(key): str(value) for key, value in saved_headers.items()})
         self.config = config
         self.capabilities = load_capabilities(config.kit_dir)
-        self.server = self._build_server(config)
         memory_file = config.memory_file
         if memory_file is None and config.memory_enabled:
             memory_file = config.kit_dir / ".agentbridge-chat-memory.json"
@@ -142,6 +154,7 @@ class ChatSession:
         self.usage: dict[str, Any] = dict(state.get("usage", {}))
         pending_data = state.get("pending")
         self.pending: PendingCall | None = PendingCall.from_dict(pending_data) if isinstance(pending_data, dict) else None
+        self.server = self._build_server(config)
         self.agent_runner = config.agent_runner
         self._agent_runner_supplied = config.agent_runner is not None
         self._active_request_id = ""
@@ -163,6 +176,7 @@ class ChatSession:
                 graphql_endpoint=config.graphql_endpoint,
                 database_url=config.database_url,
                 grpc_target=config.grpc_target,
+                saved_credentials=_saved_credentials(config.kit_dir) if config.runtime_state_enabled else {},
             )
         )
 
@@ -175,6 +189,7 @@ class ChatSession:
         if not self._agent_runner_supplied:
             self._close_agent_runner()
             self.agent_runner = None
+        self._save_runtime_state()
         self._save()
 
     def process(self, message: str) -> ChatResponse:
@@ -247,6 +262,7 @@ class ChatSession:
     def call_tool(self, tool_name: str, args: dict[str, Any], confirmed: bool = False) -> ChatResponse:
         if tool_name not in self.capabilities:
             return self._reply("unknown_tool", f"Unknown tool: {tool_name}. Try /tools.")
+        args = self._args_with_saved_credentials(tool_name, args)
         schema = self.capabilities[tool_name].get("input_schema", {})
         validation = validate_args(schema, args)
         if validation["errors"]:
@@ -280,8 +296,10 @@ class ChatSession:
             )
 
         result = self._call_mcp(tool_name, args, confirmed=confirmed)
+        self._capture_runtime_state_from_tool(tool_name, args, result)
         message = format_tool_result(tool_name, result)
         self.pending = None
+        self._save_runtime_state()
         self._save()
         return self._reply("tool_result", message, tool_result=result)
 
@@ -516,6 +534,40 @@ class ChatSession:
             self.memory_key,
             {"history": self.history, "pending": pending, "usage": self.usage, "auth_headers": _auth_headers(self.config.headers)},
         )
+
+    def _save_runtime_state(self) -> None:
+        if not self.config.runtime_state_enabled:
+            return
+        state = dict(self.runtime_state)
+        if self.config.base_url:
+            state["base_url"] = self.config.base_url
+        state["execute"] = self.config.execute
+        state["auth_headers"] = _auth_headers(self.config.headers)
+        self.runtime_state = state
+        save_kit_runtime_state(self.config.kit_dir, state)
+
+    def _capture_runtime_state_from_tool(self, tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+        if not self.config.runtime_state_enabled or result.get("status") != "executed":
+            return
+        state = dict(self.runtime_state)
+        if is_login_tool(tool_name, self.capabilities.get(tool_name, {})):
+            credentials = login_credentials_from_args(args)
+            if credentials:
+                state["login_credentials"] = credentials
+                self.server.config.saved_credentials = dict(credentials)
+        state["auth_headers"] = _auth_headers(self.config.headers)
+        self.runtime_state = state
+
+    def _args_with_saved_credentials(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if not is_login_tool(tool_name, self.capabilities.get(tool_name, {})):
+            return args
+        credentials = self.runtime_state.get("login_credentials", {})
+        if not isinstance(credentials, dict):
+            return args
+        merged = dict(args)
+        for key, value in credentials.items():
+            merged.setdefault(str(key), value)
+        return merged
 
     def _record_usage(self, usage: dict[str, Any]) -> None:
         for key in (
@@ -820,6 +872,57 @@ def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
         next_step = result.get("next_step", "")
         return f"{tool_name} planned. {next_step}"
     return f"{tool_name} completed."
+
+
+def load_kit_runtime_state(kit_dir: Path) -> dict[str, Any]:
+    path = kit_dir / RUNTIME_STATE_FILE
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_kit_runtime_state(kit_dir: Path, state: dict[str, Any]) -> None:
+    path = kit_dir / RUNTIME_STATE_FILE
+    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _saved_credentials(kit_dir: Path) -> dict[str, Any]:
+    credentials = load_kit_runtime_state(kit_dir).get("login_credentials", {})
+    return credentials if isinstance(credentials, dict) else {}
+
+
+def is_login_tool(tool_name: str, capability: dict[str, Any]) -> bool:
+    haystack = " ".join(
+        str(value)
+        for value in [
+            tool_name,
+            capability.get("name", ""),
+            capability.get("action", ""),
+            capability.get("resource", ""),
+            capability.get("description", ""),
+            capability.get("transport", {}).get("path", "") if isinstance(capability.get("transport"), dict) else "",
+        ]
+    ).lower()
+    return any(token in haystack for token in {"login", "log_in", "signin", "sign_in", "auth/login", "/login"})
+
+
+def login_credentials_from_args(args: dict[str, Any]) -> dict[str, Any]:
+    username_keys = ["username", "user", "email", "login", "account"]
+    password_keys = ["password", "passwd", "pwd"]
+    credentials: dict[str, Any] = {}
+    for key in username_keys:
+        if key in args and args[key] not in (None, ""):
+            credentials[key] = args[key]
+            break
+    for key in password_keys:
+        if key in args and args[key] not in (None, ""):
+            credentials[key] = args[key]
+            break
+    return credentials if len(credentials) >= 2 else {}
 
 
 def _format_agent_permission_message(pending: dict[str, Any]) -> str:

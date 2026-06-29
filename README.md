@@ -110,7 +110,7 @@ agentbridge web .agentbridge/my-system-kit \
   --execute
 ```
 
-When a real-system login call returns `access_token`, `token`, `jwt`, an `Authorization` header, or `Set-Cookie`, Web Chat stores the resulting session credential in local chat memory and reuses it for later tool calls in the same user/session.
+Web Chat stores the selected Base URL in `<kit>/.agentbridge-runtime.json` so reopening the same kit restores the target. When a real-system login call uses username/password arguments or returns `access_token`, `token`, `jwt`, an `Authorization` header, or `Set-Cookie`, Web Chat stores those runtime credentials in the same local state file and reuses them for later tool calls. This file is ignored by git and is not part of the generated kit protocol.
 
 ## Start Terminal Chat
 
@@ -174,7 +174,7 @@ agentbridge mcp-config .agentbridge/my-system-kit --write
 - Destructive and external-side-effect tools require explicit confirmation.
 - Switching runtime mode clears pending authorization.
 - Project analysis is read-only; generated files are written only to the selected kit directory.
-- Secrets are runtime inputs and must not be stored in generated kits. Web Chat session credentials are runtime memory, not kit protocol files.
+- Secrets are runtime inputs and must not be stored in generated kit protocol files. Web Chat credentials live in local runtime state (`.agentbridge-runtime.json`), which should stay out of version control.
 
 ## Main Commands
 

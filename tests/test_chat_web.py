@@ -296,6 +296,34 @@ class ChatSessionTests(unittest.TestCase):
             self.assertEqual(session.server.config.base_url, "http://example.test")
             self.assertIsNone(session.agent_runner)
 
+    def test_chat_persists_runtime_base_url_to_the_kit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            session = ChatSession(ChatConfig(kit_dir=kit, memory_enabled=False))
+
+            session.update_runtime(base_url="http://localhost:3001", execute=True)
+
+            restored = ChatSession(ChatConfig(kit_dir=kit, memory_enabled=False))
+            self.assertTrue(restored.config.execute)
+            self.assertEqual(restored.config.base_url, "http://localhost:3001")
+
+    def test_chat_persists_login_credentials_to_the_kit_and_reuses_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            session = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, memory_enabled=False))
+
+            with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-123456"})):
+                login = session.process("/run login username=admin password=secret")
+
+            restored = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, memory_enabled=False))
+            with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-789"})) as urlopen:
+                reused = restored.process("/run login")
+
+            self.assertEqual(login.status, "tool_result")
+            self.assertEqual(reused.status, "tool_result")
+            request = urlopen.call_args.args[0]
+            self.assertEqual(json.loads(request.data.decode("utf-8")), {"username": "admin", "password": "secret"})
+
     def test_chat_falls_back_to_agent_for_natural_language(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
@@ -597,6 +625,33 @@ class WebChatTests(unittest.TestCase):
             self.assertIn("document.getElementById('confirmBtn').onclick = () => resolvePending(true)", html)
             self.assertIn("document.getElementById('cancelBtn').onclick = () => resolvePending(false)", html)
             self.assertNotIn("document.getElementById('confirmBtn').onclick = () => sendMessage('confirm')", html)
+
+    def test_rendered_web_ui_collapses_long_authorization_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn('id="pendingSummary"', html)
+            self.assertIn('id="pendingDetails"', html)
+            self.assertIn("authorization-summary", html)
+            self.assertIn("authorization-command", html)
+            self.assertIn("overflow-wrap: anywhere", html)
+            self.assertIn("pendingDetails.open = false", html)
+            self.assertIn("pendingSummary.textContent", html)
+
+    def test_rendered_web_ui_sends_runtime_state_only_after_explicit_switch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("function stateQuery(includeRuntime = false)", html)
+            self.assertIn("if (includeRuntime)", html)
+            self.assertIn("loadState(true)", html)
+            self.assertIn("loadState(false)", html)
 
     def test_rendered_web_ui_aligns_user_messages_to_the_right(self):
         with tempfile.TemporaryDirectory() as tmp:

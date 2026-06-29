@@ -202,7 +202,7 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
             user = values.get("user", [base_config.user])[0] or base_config.user
             session_id = values.get("session", [base_config.session_id])[0] or base_config.session_id
             kit_dir = values.get("kit", [str(base_config.kit_dir)])[0] if allow_kit_switch else str(base_config.kit_dir)
-            execute, base_url = self._runtime_from_values(values)
+            execute, base_url = self._runtime_from_values(values) if ("execute" in values or "base_url" in values) else (None, None)
             return get_session(
                 user=user,
                 session_id=session_id,
@@ -299,8 +299,8 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
         user: str,
         session_id: str,
         kit_dir: Path,
-        execute: bool,
-        base_url: str,
+        execute: bool | None,
+        base_url: str | None,
     ) -> ChatSession:
         key = f"{user}:{session_id}:{kit_dir}"
         if key not in sessions:
@@ -310,12 +310,16 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                     user=user,
                     session_id=session_id,
                     kit_dir=kit_dir,
-                    execute=execute,
-                    base_url=base_url,
+                    execute=execute if execute is not None else base_config.execute,
+                    base_url=base_url if base_url is not None else base_config.base_url,
                 )
             )
         session = sessions[key]
-        session.update_runtime(base_url=base_url, execute=execute)
+        if execute is not None or base_url is not None:
+            session.update_runtime(
+                base_url=base_url if base_url is not None else session.config.base_url,
+                execute=execute if execute is not None else session.config.execute,
+            )
         return session
 
     return ChatHandler
@@ -857,10 +861,46 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     }}
     .approval-copy {{
       min-width: 0;
+      flex: 1 1 auto;
     }}
     .approval-title {{
       font-size: 13px;
       font-weight: 700;
+    }}
+    .authorization-summary {{
+      margin-top: 2px;
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }}
+    .authorization-subtitle {{
+      margin-top: 2px;
+      overflow-wrap: anywhere;
+    }}
+    .authorization-details {{
+      margin-top: 8px;
+      max-width: 100%;
+    }}
+    .authorization-details summary {{
+      cursor: pointer;
+      color: #6a4c2a;
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .authorization-command {{
+      max-width: 100%;
+      max-height: 120px;
+      overflow: auto;
+      margin: 6px 0 0;
+      padding: 8px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .72);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      font-size: 12px;
+      line-height: 1.45;
     }}
     .approval-actions {{
       display: flex;
@@ -1457,7 +1497,12 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         <div class="approval-card" id="pending">
           <div class="approval-copy">
             <div class="approval-title">Authorization required</div>
-            <div class="subtle" id="pendingText"></div>
+            <div class="authorization-summary" id="pendingSummary"></div>
+            <div class="subtle authorization-subtitle" id="pendingText"></div>
+            <details class="authorization-details" id="pendingDetails">
+              <summary>Command details</summary>
+              <pre class="authorization-command" id="pendingCommand"></pre>
+            </details>
           </div>
           <div class="approval-actions">
             <button id="confirmBtn" type="button">Authorize</button>
@@ -1557,7 +1602,10 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       conversations: document.getElementById('conversations'),
       tools: document.getElementById('tools'),
       pending: document.getElementById('pending'),
+      pendingSummary: document.getElementById('pendingSummary'),
       pendingText: document.getElementById('pendingText'),
+      pendingDetails: document.getElementById('pendingDetails'),
+      pendingCommand: document.getElementById('pendingCommand'),
       contextDrawer: document.getElementById('contextDrawer'),
       drawerTitle: document.getElementById('drawerTitle'),
       drawerBackdrop: document.getElementById('drawerBackdrop'),
@@ -1605,11 +1653,13 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         base_url: runtimeExecute ? els.baseUrl.value.trim() : ''
       }}, extra);
     }}
-    function stateQuery() {{
+    function stateQuery(includeRuntime = false) {{
       const qs = new URLSearchParams({{ user: els.user.value, session: els.session.value }});
       if (allowKitSwitch) qs.set('kit', els.kit.value);
-      qs.set('execute', runtimeExecute ? 'true' : 'false');
-      if (runtimeExecute) qs.set('base_url', els.baseUrl.value.trim());
+      if (includeRuntime) {{
+        qs.set('execute', runtimeExecute ? 'true' : 'false');
+        if (runtimeExecute) qs.set('base_url', els.baseUrl.value.trim());
+      }}
       return qs;
     }}
     function setConnectionStatus(message = '', state = '') {{
@@ -1638,7 +1688,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       els.runtimeTarget.hidden = !runtimeExecute;
       renderPending(null);
       setConnectionStatus();
-      if (reload && validRuntimeBaseUrl(false)) loadState();
+      if (reload && validRuntimeBaseUrl(false)) loadState(true);
       if (runtimeExecute && !els.baseUrl.value.trim()) {{
         setConnectionStatus('Base URL is required for real system mode.', 'error');
         els.baseUrl.focus();
@@ -1907,19 +1957,36 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       if (!pending) {{
         currentPending = null;
         els.pending.classList.remove('show');
+        els.pendingSummary.textContent = '';
+        els.pendingText.textContent = '';
+        els.pendingCommand.textContent = '';
+        els.pendingDetails.hidden = true;
         return;
       }}
       currentPending = pending;
       els.pending.classList.add('show');
+      els.pendingDetails.open = false;
+      els.pendingDetails.hidden = true;
+      els.pendingCommand.textContent = '';
       if (pending.kind === 'agent_permission') {{
         const input = pending.input || {{}};
         const command = input.command || input.pattern || input.path || '';
-        els.pendingText.textContent = (pending.display_name || pending.tool || 'Agent tool') + ' · ' + (pending.description || pending.title || '') + (command ? ' · ' + command : '');
+        els.pendingSummary.textContent = pending.title || pending.description || pending.display_name || pending.tool || 'Agent operation';
+        els.pendingText.textContent = (pending.display_name || pending.tool || 'Agent tool') + (pending.tool ? ' · ' + pending.tool : '');
+        if (command) {{
+          els.pendingCommand.textContent = command;
+          els.pendingDetails.hidden = false;
+        }}
         return;
       }}
       const plan = pending.plan || {{}};
       const transport = plan.transport || {{}};
-      els.pendingText.textContent = pending.tool + ' · ' + plan.risk + ' · ' + (transport.method || transport.type || '') + ' ' + (transport.path || '');
+      const preview = plan.request_preview || {{}};
+      els.pendingSummary.textContent = pending.tool || 'System operation';
+      els.pendingText.textContent = plan.risk + ' · ' + (preview.method || transport.method || transport.type || '') + ' ' + (preview.url || transport.path || '');
+      const command = JSON.stringify({{ arguments: pending.args || {{}}, request: preview }}, null, 2);
+      els.pendingCommand.textContent = command;
+      els.pendingDetails.hidden = false;
     }}
     async function resolvePending(allow) {{
       if (!currentPending) return;
@@ -2081,12 +2148,16 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         file.name.endsWith('.txt')
       );
     }}
-    async function loadState() {{
-      if (!validRuntimeBaseUrl(false)) return;
-      const data = await fetch('/api/state?' + stateQuery().toString()).then(r => r.json());
+    async function loadState(includeRuntime = false) {{
+      if (runtimeExecute && els.baseUrl.value.trim() && !validRuntimeBaseUrl(false)) return;
+      const data = await fetch('/api/state?' + stateQuery(includeRuntime).toString()).then(r => r.json());
       if (data.error) {{
         setConnectionStatus(data.error, 'error');
         return;
+      }}
+      if (data.runtime) {{
+        if (data.runtime.base_url) els.baseUrl.value = data.runtime.base_url;
+        applyRuntimeMode(data.runtime.execute ? 'execute' : 'dry-run', false);
       }}
       els.messages.innerHTML = '';
       (data.history || []).forEach(item => addMessage(item.role, item.content));
@@ -2104,7 +2175,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     els.testConnection.onclick = testConnectivity;
     els.baseUrl.addEventListener('input', () => setConnectionStatus());
     els.baseUrl.addEventListener('change', () => {{
-      if (runtimeExecute && validRuntimeBaseUrl(true)) loadState();
+      if (runtimeExecute && validRuntimeBaseUrl(true)) loadState(true);
     }});
     document.querySelectorAll('[data-drawer]').forEach(button => {{
       button.addEventListener('click', () => {{
@@ -2169,7 +2240,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       loadConversations();
     }}));
     applyRuntimeMode(initialExecuteMode ? 'execute' : 'dry-run', false);
-    loadState();
+    loadState(false);
     loadConversations();
   </script>
 </body>
