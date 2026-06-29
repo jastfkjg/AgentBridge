@@ -54,13 +54,15 @@ agentbridge web .agentbridge/openapi-kit --port 8765
 - 当前 kit 展示
 - Dry-run / 真实系统运行模式切换
 - Base URL 校验和目标系统连通测试
+- 已保存登录账号选择、是否保存登录账号开关，以及账号新增/修改/删除控件
 - 可点击的工具列表，自动填入 `/run` 命令和必填参数
 - 聊天记录
-- 高风险操作和 Claude Agent SDK 工具权限请求的 Authorize/Cancel 控件
+- 高风险操作和 Claude Agent SDK 工具权限请求的 Authorize/Cancel 控件，并显示 Login、Create script 等具体操作摘要
 - Agent 回复和工具事件的 SSE 流式响应
-- 展示 tool use、tool result、确认等待和中断状态的工具调用时间线
+- 对 `curl`、`python` 等实际命令在聊天消息中提供默认折叠的详情
 - 中断当前 Agent 请求的控制按钮
-- 最近一次响应和当前会话的 Claude Agent SDK model/token/cost 用量
+- token 输入/输出/总量统计，以及最近 100 条 token 消耗历史
+- Recent conversations 支持 New chat、重命名和删除
 
 执行模式：
 
@@ -72,9 +74,9 @@ agentbridge web .agentbridge/openapi-kit \
   --read-only
 ```
 
-也可以直接在 Web 页面切换运行模式。真实系统模式必须填写 `http://` 或 `https://` Base URL。连通测试先向 Base URL 发送 `HEAD`，目标不支持时回退到 `GET`；只要收到 HTTP 响应，就判定系统网络可达。切换模式会先清除待确认操作并重建运行时，原有 guardrail 和高风险人工确认仍然生效。Web Chat 会把当前 Base URL 保存到 `<kit>/.agentbridge-runtime.json`，重新打开同一个 kit 时自动恢复。
+也可以直接在 Web 页面切换运行模式。真实系统模式必须填写 `http://` 或 `https://` Base URL。连通测试先向 Base URL 发送 `HEAD`，目标不支持时回退到 `GET`；只要收到 HTTP 响应，就判定系统网络可达。切换模式会先清除待确认操作并重建运行时，原有 guardrail 和高风险人工确认仍然生效。Web Chat 会把当前 Base URL 保存到 `<kit>/.agentbridge-runtime.json`，重新打开同一个 kit 时自动恢复。Web Chat 服务端会在终端输出必要的请求、流式事件、授权和错误日志，并对密码、token、cookie、API key 等敏感值做脱敏。
 
-真实执行模式下，如果登录类 HTTP/GraphQL 工具使用 username/password 参数，或返回 `access_token`、`token`、`jwt`、`Authorization` 响应头、`Set-Cookie`，Web Chat 会把对应运行时凭证保存到 `<kit>/.agentbridge-runtime.json`，并在后续工具调用中自动复用。同一个 kit 可以保存多个登录账号，页面会提供已保存账号下拉选择；前端只提交选中账号 id，账号密码仍由本地 runtime state 读取。该文件已加入 gitignore，不属于生成的 kit 协议文件。
+真实执行模式下，如果开启 Save login，且登录类 HTTP/GraphQL 工具使用 username/password 参数，或返回 `access_token`、`token`、`jwt`、`Authorization` 响应头、`Set-Cookie`，Web Chat 会把对应运行时凭证保存到 `<kit>/.agentbridge-runtime.json`，并在后续工具调用中自动复用。同一个 kit 可以保存多个登录账号，页面会提供已保存账号下拉选择以及新增、修改、删除控件；普通聊天请求只提交选中账号 id，账号密码仍由本地 runtime state 读取。生成的 HTTP 工具遇到 HTTP 401 且响应显示 token expired 时，会优先用选中的已保存账号重新登录一次，再重试原工具；如果无法刷新，会明确提示用户重新选择账号或登录。该文件已加入 gitignore，不属于生成的 kit 协议文件。
 
 终端 Chat 通过 `/use`、`/mode`、`/connect` 和 `/usage` 提供同样的核心流程。`/use` 会显示编号工具并逐项询问必填参数；高风险调用会给出明确的 Authorize/Cancel 选择。
 

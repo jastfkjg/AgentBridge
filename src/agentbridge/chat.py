@@ -44,6 +44,7 @@ class ChatConfig:
     database_url: str = ""
     grpc_target: str = ""
     runtime_state_enabled: bool = True
+    save_login_account: bool = True
 
 
 @dataclass
@@ -117,11 +118,13 @@ class ChatMemory:
             except (OSError, json.JSONDecodeError):
                 data = {}
         history = state.get("history", [])[-self.max_history :]
+        existing = data.get(key, {}) if isinstance(data.get(key), dict) else {}
         data[key] = {
             "history": history,
             "pending": state.get("pending"),
             "usage": state.get("usage", {}),
             "auth_headers": state.get("auth_headers", {}),
+            "title": state.get("title", existing.get("title", "")),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -162,6 +165,7 @@ class ChatSession:
         self.usage: dict[str, Any] = dict(state.get("usage", {}))
         pending_data = state.get("pending")
         self.pending: PendingCall | None = PendingCall.from_dict(pending_data) if isinstance(pending_data, dict) else None
+        self.agent_pending: dict[str, Any] | None = None
         self.server = self._build_server(config)
         self.agent_runner = config.agent_runner
         self._agent_runner_supplied = config.agent_runner is not None
@@ -192,6 +196,7 @@ class ChatSession:
         if self.config.base_url == base_url and self.config.execute == execute:
             return
         self.pending = None
+        self.agent_pending = None
         self.config = replace(self.config, base_url=base_url, execute=execute)
         self.server = self._build_server(self.config)
         if not self._agent_runner_supplied:
@@ -213,6 +218,27 @@ class ChatSession:
         self._save_runtime_state()
         self._save()
 
+    def upsert_saved_login_account(
+        self,
+        credentials: dict[str, Any],
+        label: str = "",
+        account_id: str = "",
+    ) -> None:
+        state = upsert_login_account(self.runtime_state, credentials, label=label, account_id=account_id)
+        self.runtime_state = state
+        self._apply_selected_account_auth_headers()
+        self.server.config.saved_credentials = selected_login_credentials(self.runtime_state)
+        self.server.config.headers = self.config.headers
+        self._save_runtime_state()
+
+    def delete_saved_login_account(self, account_id: str) -> None:
+        state = delete_login_account(self.runtime_state, account_id)
+        self.runtime_state = state
+        self._apply_selected_account_auth_headers()
+        self.server.config.saved_credentials = selected_login_credentials(self.runtime_state)
+        self.server.config.headers = self.config.headers
+        self._save_runtime_state()
+
     def process(self, message: str) -> ChatResponse:
         text = message.strip()
         if not text:
@@ -229,6 +255,7 @@ class ChatSession:
             return ChatResponse("history", "Session history.", history=self.history[-self.config.max_history :])
         if lowered in {"cancel", "/cancel"}:
             self.pending = None
+            self.agent_pending = None
             self._save()
             return self._reply("cancelled", "Pending operation cleared.")
         if lowered.startswith("confirm") or lowered == "/confirm":
@@ -264,6 +291,7 @@ class ChatSession:
 
     def interrupt(self) -> ChatResponse:
         self._active_cancel.set()
+        self.agent_pending = None
         runner = self.agent_runner
         interrupt = getattr(runner, "interrupt", None)
         if callable(interrupt):
@@ -317,6 +345,20 @@ class ChatSession:
             )
 
         result = self._call_mcp(tool_name, args, confirmed=confirmed)
+        self.config = replace(self.config, headers=dict(self.server.config.headers))
+        if self._should_refresh_auth(tool_name, result):
+            refresh_result = self._refresh_auth_with_saved_login()
+            if refresh_result.get("status") == "executed" and not is_auth_expired_result(refresh_result):
+                result = self._call_mcp(tool_name, args, confirmed=confirmed)
+                self.config = replace(self.config, headers=dict(self.server.config.headers))
+                if not is_auth_expired_result(result):
+                    result["auth_refreshed"] = True
+                else:
+                    result["auth_expired"] = True
+                    result["auth_refresh_error"] = "Authentication was refreshed, but the target still rejected the request."
+            else:
+                result["auth_expired"] = True
+                result["auth_refresh_error"] = str(refresh_result.get("error") or "No saved login account is available for automatic re-login.")
         self._capture_runtime_state_from_tool(tool_name, args, result)
         message = format_tool_result(tool_name, result)
         self.pending = None
@@ -334,8 +376,14 @@ class ChatSession:
         if allow:
             return self.confirm()
         self.pending = None
+        self.agent_pending = None
         self._save()
         return self._reply("cancelled", "Pending operation cleared.")
+
+    def current_pending(self) -> dict[str, Any] | None:
+        if self.agent_pending:
+            return dict(self.agent_pending)
+        return self.pending.to_dict() if self.pending else None
 
     def tool_summaries(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
@@ -401,6 +449,31 @@ class ChatSession:
             payload = {"text": text}
         payload["is_error"] = bool(result.get("isError"))
         return payload
+
+    def _should_refresh_auth(self, tool_name: str, result: dict[str, Any]) -> bool:
+        if is_login_tool(tool_name, self.capabilities.get(tool_name, {})):
+            return False
+        return is_auth_expired_result(result)
+
+    def _refresh_auth_with_saved_login(self) -> dict[str, Any]:
+        credentials = selected_login_credentials(self.runtime_state)
+        if not credentials:
+            return {"status": "auth_refresh_unavailable", "error": "Authentication expired. Select a saved account or run the login tool again."}
+        login_tool = self._login_tool_name()
+        if not login_tool:
+            return {"status": "auth_refresh_unavailable", "error": "Authentication expired, and this kit has no detected login tool to refresh it."}
+        result = self._call_mcp(login_tool, credentials, confirmed=True)
+        self.config = replace(self.config, headers=dict(self.server.config.headers))
+        if result.get("status") == "executed":
+            self._capture_runtime_state_from_tool(login_tool, credentials, result)
+            self._save_runtime_state()
+        return result
+
+    def _login_tool_name(self) -> str:
+        for name, capability in self.capabilities.items():
+            if is_login_tool(name, capability):
+                return name
+        return ""
 
     def _agent_reply(self, text: str) -> ChatResponse:
         if not self.config.agent_enabled:
@@ -484,6 +557,7 @@ class ChatSession:
             self._save()
             yield ChatEvent("error", {"message": message})
         finally:
+            self.agent_pending = None
             self._active_request_id = ""
 
     def _get_agent_runner(self) -> Any | None:
@@ -573,7 +647,7 @@ class ChatSession:
         state = normalize_login_account_state(self.runtime_state)
         if is_login_tool(tool_name, self.capabilities.get(tool_name, {})):
             credentials = login_credentials_from_args(args)
-            if credentials:
+            if credentials and self.config.save_login_account:
                 auth_headers = _auth_headers(self.config.headers)
                 state = upsert_login_account(state, credentials, auth_headers)
                 self.server.config.saved_credentials = dict(credentials)
@@ -600,6 +674,15 @@ class ChatSession:
         self.config = replace(self.config, headers=headers)
 
     def _record_usage(self, usage: dict[str, Any]) -> None:
+        history = list(self.usage.get("history", [])) if isinstance(self.usage.get("history"), list) else []
+        entry = {
+            "input_tokens": int(usage.get("input_tokens", 0) or 0),
+            "output_tokens": int(usage.get("output_tokens", 0) or 0),
+            "total_tokens": int(usage.get("total_tokens", 0) or 0),
+        }
+        if any(entry.values()):
+            history.append(entry)
+            self.usage["history"] = history[-100:]
         for key in (
             "input_tokens",
             "output_tokens",
@@ -647,6 +730,7 @@ class ChatSession:
         if isinstance(message, dict) and message.get("type") == "agent_permission_required":
             pending = dict(message.get("pending", {}))
             pending["kind"] = "agent_permission"
+            self.agent_pending = dict(pending)
             events.append(ChatEvent("confirmation_required", {"pending": pending, "message": _format_agent_permission_message(pending)}))
             return events
         stream_delta = _extract_agent_stream_text_delta(message)
@@ -698,6 +782,8 @@ class ChatSession:
         resolve = getattr(runner, "resolve_permission", None)
         if not callable(resolve) or not resolve(request_id, allow):
             return {"status": "not_found", "message": "No matching Agent permission request is pending."}
+        if self.agent_pending and self.agent_pending.get("id") == request_id:
+            self.agent_pending = None
         return {"status": "approved" if allow else "denied", "message": "Agent permission approved." if allow else "Agent permission denied."}
 
 
@@ -891,17 +977,38 @@ def format_pending_confirmation(pending: PendingCall, execute: bool) -> str:
 
 
 def format_tool_result(tool_name: str, result: dict[str, Any]) -> str:
+    if result.get("auth_expired"):
+        detail = result.get("auth_refresh_error") or "Select a saved account or run the login tool again."
+        return f"{tool_name} could not run because authentication expired. {detail}"
     if result.get("policy_error"):
         return f"{tool_name} blocked by runtime policy: {result['policy_error']}"
     if result.get("error"):
         return f"{tool_name} failed: {result['error']}"
     if result.get("status") == "executed":
         response = result.get("response", {})
+        if result.get("auth_refreshed"):
+            return f"{tool_name} executed after refreshing authentication. HTTP {response.get('status')}."
         return f"{tool_name} executed. HTTP {response.get('status')}."
     if "would_execute" in result:
         next_step = result.get("next_step", "")
         return f"{tool_name} planned. {next_step}"
     return f"{tool_name} completed."
+
+
+def is_auth_expired_result(result: dict[str, Any]) -> bool:
+    response = result.get("response", {})
+    if not isinstance(response, dict):
+        return False
+    status = response.get("status")
+    if status not in {401, "401"}:
+        return False
+    body = response.get("body")
+    if isinstance(body, dict):
+        code = str(body.get("code") or "")
+        message = " ".join(str(value) for value in [body.get("message", ""), body.get("error", ""), body.get("detail", "")]).lower()
+        return code in {"100002", "token_expired", "auth_expired"} or ("token" in message and "expired" in message) or "unauthorized" in message
+    text = str(body or result.get("error") or "").lower()
+    return ("token" in text and "expired" in text) or "unauthorized" in text
 
 
 def load_kit_runtime_state(kit_dir: Path) -> dict[str, Any]:
@@ -1012,19 +1119,47 @@ def selected_login_auth_headers(state: dict[str, Any]) -> dict[str, str]:
     return {str(key): str(value) for key, value in headers.items()} if isinstance(headers, dict) else {}
 
 
-def upsert_login_account(state: dict[str, Any], credentials: dict[str, Any], auth_headers: dict[str, str] | None = None) -> dict[str, Any]:
+def upsert_login_account(
+    state: dict[str, Any],
+    credentials: dict[str, Any],
+    auth_headers: dict[str, str] | None = None,
+    label: str = "",
+    account_id: str = "",
+) -> dict[str, Any]:
     normalized = normalize_login_account_state(state)
-    account_id = login_account_id(credentials)
+    existing = login_account_by_id(normalized, account_id) if account_id else None
+    merged_credentials = dict(existing.get("credentials", {})) if isinstance(existing, dict) else {}
+    for key, value in credentials.items():
+        if value not in (None, ""):
+            merged_credentials[str(key)] = value
+    if len(merged_credentials) < 2:
+        raise ValueError("Saved login account requires at least username and password.")
+    existing_headers = existing.get("auth_headers", {}) if isinstance(existing, dict) and isinstance(existing.get("auth_headers"), dict) else {}
+    new_account_id = login_account_id(merged_credentials)
     account = {
-        "id": account_id,
-        "label": login_account_label(credentials),
-        "credentials": {str(key): value for key, value in credentials.items()},
-        "auth_headers": dict(auth_headers or {}),
+        "id": new_account_id,
+        "label": str(label or (existing.get("label") if isinstance(existing, dict) else "") or login_account_label(merged_credentials)),
+        "credentials": {str(key): value for key, value in merged_credentials.items()},
+        "auth_headers": dict(auth_headers if auth_headers is not None else existing_headers),
     }
-    accounts = [item for item in normalized.get("login_accounts", []) if isinstance(item, dict) and item.get("id") != account_id]
+    remove_ids = {account_id, new_account_id}
+    accounts = [item for item in normalized.get("login_accounts", []) if isinstance(item, dict) and item.get("id") not in remove_ids]
     accounts.append(account)
     normalized["login_accounts"] = accounts
-    normalized["selected_login_account"] = account_id
+    normalized["selected_login_account"] = new_account_id
+    return normalized
+
+
+def delete_login_account(state: dict[str, Any], account_id: str) -> dict[str, Any]:
+    normalized = normalize_login_account_state(state)
+    accounts = [item for item in normalized.get("login_accounts", []) if isinstance(item, dict) and str(item.get("id") or "") != account_id]
+    normalized["login_accounts"] = accounts
+    selected = str(normalized.get("selected_login_account") or "")
+    if selected == account_id:
+        if accounts:
+            normalized["selected_login_account"] = str(accounts[-1].get("id") or "")
+        else:
+            normalized.pop("selected_login_account", None)
     return normalized
 
 
@@ -1075,7 +1210,7 @@ def login_credentials_from_args(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _format_agent_permission_message(pending: dict[str, Any]) -> str:
-    title = pending.get("title") or f"Authorize {pending.get('tool', 'tool')}"
+    title = pending.get("operation") or pending.get("title") or f"Authorize {pending.get('tool', 'tool')}"
     description = pending.get("description") or ""
     return f"{title}. {description}".strip()
 

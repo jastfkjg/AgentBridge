@@ -28,6 +28,30 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+SECRET_LOG_KEYS = {"password", "passwd", "pwd", "authorization", "cookie", "token", "secret", "api_key", "x-api-key"}
+
+
+def web_log(event: str, **fields: Any) -> None:
+    payload = redact_for_log(fields)
+    suffix = " " + json.dumps(payload, ensure_ascii=False, sort_keys=True) if payload else ""
+    print(f"[web] {event}{suffix}", flush=True)
+
+
+def redact_for_log(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in SECRET_LOG_KEYS or any(marker in lowered for marker in ["password", "token", "secret"]):
+                redacted[str(key)] = "<redacted>"
+            else:
+                redacted[str(key)] = redact_for_log(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact_for_log(item) for item in value]
+    return value
+
+
 def normalize_target_base_url(value: str) -> str:
     base_url = value.strip().rstrip("/")
     if not base_url:
@@ -89,6 +113,54 @@ def test_target_connectivity(
     }
 
 
+def runtime_payload(session: ChatSession) -> dict[str, Any]:
+    return {
+        "execute": session.config.execute,
+        "base_url": session.config.base_url,
+        "login_accounts": public_login_accounts(session.runtime_state),
+        "selected_login_account": str(session.runtime_state.get("selected_login_account") or ""),
+    }
+
+
+def rename_conversation(config: ChatConfig, user: str, kit_dir: Path, session_id: str, title: str) -> None:
+    title = title.strip()
+    if not title:
+        raise ChatWebError("Conversation title is required.")
+    path = memory_path_for(config, kit_dir)
+    if not path or not path.exists():
+        raise ChatWebError("Conversation memory was not found.")
+    data = _load_memory_file(path)
+    key = f"{user}:{session_id}:{kit_dir.resolve()}"
+    state = data.get(key)
+    if not isinstance(state, dict):
+        raise ChatWebError("Conversation was not found.")
+    state["title"] = title[:80]
+    data[key] = state
+    _write_memory_file(path, data)
+
+
+def delete_conversation(config: ChatConfig, user: str, kit_dir: Path, session_id: str) -> None:
+    path = memory_path_for(config, kit_dir)
+    if not path or not path.exists():
+        return
+    data = _load_memory_file(path)
+    data.pop(f"{user}:{session_id}:{kit_dir.resolve()}", None)
+    _write_memory_file(path, data)
+
+
+def _load_memory_file(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_memory_file(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def run_web_chat(config: ChatConfig, host: str = "127.0.0.1", port: int = 8765, allow_kit_switch: bool = False) -> int:
     handler = build_handler(config, allow_kit_switch=allow_kit_switch)
     server = QuietThreadingHTTPServer((host, port), handler)
@@ -135,16 +207,11 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                 self._send_json(
                     {
                         "history": session.history[-session.config.max_history :],
-                        "pending": session.pending.to_dict() if session.pending else None,
+                        "pending": session.current_pending(),
                         "tools": session.tool_summaries(),
                         "conversations": conversation_summaries(session.config, session.config.user, session.config.kit_dir),
                         "usage": dict(session.usage),
-                        "runtime": {
-                            "execute": session.config.execute,
-                            "base_url": session.config.base_url,
-                            "login_accounts": public_login_accounts(session.runtime_state),
-                            "selected_login_account": str(session.runtime_state.get("selected_login_account") or ""),
-                        },
+                        "runtime": runtime_payload(session),
                     }
                 )
                 return
@@ -152,25 +219,39 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path not in {"/api/chat", "/api/chat/stream", "/api/chat/interrupt", "/api/chat/agent-permission", "/api/chat/pending", "/api/tool", "/api/connectivity"}:
+            if parsed.path not in {"/api/chat", "/api/chat/stream", "/api/chat/interrupt", "/api/chat/agent-permission", "/api/chat/pending", "/api/tool", "/api/connectivity", "/api/login-account", "/api/conversation"}:
                 self._send_error(HTTPStatus.NOT_FOUND, "Not found")
                 return
             try:
                 body = self._read_json()
+                web_log("request", path=parsed.path, user=body.get("user") or base_config.user, session=body.get("session_id") or base_config.session_id)
                 if parsed.path == "/api/connectivity":
                     result = test_target_connectivity(
                         str(body.get("base_url", "")),
                         timeout=base_config.timeout,
                     )
+                    web_log("connectivity", result=result)
                     self._send_json(result)
                     return
                 session = self._session_from_body(body)
+                if parsed.path == "/api/login-account":
+                    self._handle_login_account(session, body)
+                    return
+                if parsed.path == "/api/conversation":
+                    self._handle_conversation(body)
+                    return
                 if parsed.path == "/api/chat/interrupt":
+                    web_log("chat_interrupt", session=session.config.session_id)
                     response = session.interrupt()
                     self._send_json(response.to_dict())
                     return
                 if parsed.path == "/api/chat/agent-permission":
-                    self._send_json(session.resolve_agent_permission(str(body.get("permission_id", "")), allow=bool(body.get("allow", False))))
+                    permission_id = str(body.get("permission_id", ""))
+                    allow = bool(body.get("allow", False))
+                    web_log("permission_resolve_start", session=session.config.session_id, permission_id=permission_id, allow=allow)
+                    result = session.resolve_agent_permission(permission_id, allow=allow)
+                    web_log("permission_resolve_done", session=session.config.session_id, permission_id=permission_id, result=result)
+                    self._send_json(result)
                     return
                 if parsed.path == "/api/chat/pending":
                     response = session.resolve_pending(allow=bool(body.get("allow", False)))
@@ -181,6 +262,7 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                         str(body.get("message", "")),
                         body.get("attachments", []),
                     )
+                    web_log("chat_stream_start", session=session.config.session_id, execute=session.config.execute)
                     self._send_sse(session.stream_process(message))
                     return
                 if parsed.path == "/api/chat":
@@ -197,7 +279,48 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                     response = session.call_tool(tool, args, confirmed=bool(body.get("confirmed", False)))
                 self._send_json(response.to_dict())
             except Exception as exc:
+                web_log("request_error", path=parsed.path, error=str(exc))
                 self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+
+        def _handle_login_account(self, session: ChatSession, body: dict[str, Any]) -> None:
+            action = str(body.get("action") or "upsert")
+            account_id = str(body.get("account_id") or "")
+            if action == "delete":
+                session.delete_saved_login_account(account_id)
+                web_log("login_account_delete", account_id=account_id)
+            elif action == "select":
+                session.select_login_account(account_id)
+                web_log("login_account_select", account_id=account_id)
+            elif action == "upsert":
+                credentials = body.get("credentials", {})
+                if not isinstance(credentials, dict):
+                    credentials = {}
+                username = str(body.get("username") or "").strip()
+                password = str(body.get("password") or "")
+                if username:
+                    credentials["username"] = username
+                if password:
+                    credentials["password"] = password
+                session.upsert_saved_login_account(credentials, label=str(body.get("label") or ""), account_id=account_id)
+                web_log("login_account_upsert", account_id=account_id, label=body.get("label") or username)
+            else:
+                raise ChatWebError("Unsupported login account action.")
+            self._send_json({"runtime": runtime_payload(session)})
+
+        def _handle_conversation(self, body: dict[str, Any]) -> None:
+            user = str(body.get("user") or base_config.user)
+            kit_dir = Path(str(body.get("kit_dir") or base_config.kit_dir)) if allow_kit_switch else base_config.kit_dir
+            session_id = str(body.get("session_id") or body.get("session") or "")
+            action = str(body.get("action") or "")
+            if action == "rename":
+                rename_conversation(base_config, user, kit_dir, session_id, str(body.get("title") or ""))
+                web_log("conversation_rename", user=user, session=session_id)
+            elif action == "delete":
+                delete_conversation(base_config, user, kit_dir, session_id)
+                web_log("conversation_delete", user=user, session=session_id)
+            else:
+                raise ChatWebError("Unsupported conversation action.")
+            self._send_json({"conversations": conversation_summaries(base_config, user, kit_dir)})
 
         def _session_from_query(self, query: str) -> ChatSession:
             values = parse_qs(query)
@@ -221,6 +344,7 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
             kit_dir = Path(str(body.get("kit_dir") or base_config.kit_dir)) if allow_kit_switch else base_config.kit_dir
             execute, base_url = self._runtime_from_values(body)
             login_account_id = str(body.get("login_account_id") or "")
+            save_login_account = body.get("save_login_account")
             return get_session(
                 user=user,
                 session_id=session_id,
@@ -228,6 +352,7 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                 execute=execute,
                 base_url=base_url,
                 login_account_id=login_account_id,
+                save_login_account=bool(save_login_account) if save_login_account is not None else None,
             )
 
         def _runtime_from_values(self, values: dict[str, Any]) -> tuple[bool, str]:
@@ -285,6 +410,15 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
             for event in events:
                 payload = event.to_dict() if hasattr(event, "to_dict") else dict(event)
                 event_type = str(payload.get("type") or getattr(event, "type", "message"))
+                if event_type in {"confirmation_required", "error", "done", "interrupted"}:
+                    pending = payload.get("pending") if isinstance(payload.get("pending"), dict) else {}
+                    web_log(
+                        "sse_event",
+                        event=event_type,
+                        status=payload.get("status"),
+                        permission_id=pending.get("id") if isinstance(pending, dict) else "",
+                        operation=pending.get("operation") if isinstance(pending, dict) else "",
+                    )
                 data = json.dumps(payload, sort_keys=True)
                 frame = f"event: {event_type}\ndata: {data}\n\n".encode("utf-8")
                 try:
@@ -308,6 +442,7 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
         execute: bool | None,
         base_url: str | None,
         login_account_id: str = "",
+        save_login_account: bool | None = None,
     ) -> ChatSession:
         key = f"{user}:{session_id}:{kit_dir}"
         if key not in sessions:
@@ -319,9 +454,12 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                     kit_dir=kit_dir,
                     execute=execute if execute is not None else base_config.execute,
                     base_url=base_url if base_url is not None else base_config.base_url,
+                    save_login_account=save_login_account if save_login_account is not None else base_config.save_login_account,
                 )
             )
         session = sessions[key]
+        if save_login_account is not None and session.config.save_login_account != save_login_account:
+            session.config = replace(session.config, save_login_account=save_login_account)
         if execute is not None or base_url is not None:
             session.update_runtime(
                 base_url=base_url if base_url is not None else session.config.base_url,
@@ -373,6 +511,7 @@ def conversation_summaries(config: ChatConfig, user: str, kit_dir: Path, limit: 
         summaries.append(
             {
                 "session_id": session_id,
+                "title": str(state.get("title") or session_id)[:80] if isinstance(state, dict) else session_id,
                 "preview": preview[:120],
                 "message_count": len(history) if isinstance(history, list) else 0,
                 "has_pending": bool(isinstance(state, dict) and state.get("pending")),
@@ -805,6 +944,71 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       font-size: 13px;
       overflow-wrap: anywhere;
     }}
+    .conversation-row {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 34px;
+      align-items: start;
+      gap: 4px;
+      border-radius: 10px;
+      position: relative;
+    }}
+    .conversation-menu {{
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border-radius: 9px;
+      background: transparent;
+      color: var(--muted);
+    }}
+    .conversation-menu:hover {{
+      background: #e8eee9;
+      color: var(--ink);
+      transform: none;
+    }}
+    .conversation-popover {{
+      position: absolute;
+      right: 0;
+      top: 34px;
+      z-index: 4;
+      min-width: 132px;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      box-shadow: 0 14px 30px rgba(22,30,25,.16);
+    }}
+    .conversation-popover[hidden] {{
+      display: none;
+    }}
+    .conversation-popover button {{
+      width: 100%;
+      display: block;
+      padding: 8px 9px;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--ink);
+      text-align: left;
+      font-size: 13px;
+    }}
+    .conversation-popover button:hover {{
+      background: #eef3f0;
+      transform: none;
+    }}
+    .conversation-popover button.danger-text {{
+      color: var(--danger);
+    }}
+    .drawer-action-row, .account-actions {{
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 12px;
+    }}
+    .drawer-action-row button, .account-actions button {{
+      min-height: 34px;
+      padding: 7px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+    }}
     .tools {{
       margin-top: 18px;
       display: grid;
@@ -958,6 +1162,64 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       color: var(--muted);
       font-size: 12px;
       overflow-wrap: anywhere;
+    }}
+    .usage-history {{
+      display: grid;
+      gap: 6px;
+      margin-top: 14px;
+    }}
+    .usage-history-item {{
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 8px 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }}
+    .save-login-toggle {{
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      width: auto;
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: none;
+      white-space: nowrap;
+    }}
+    .save-login-toggle input {{
+      width: auto;
+      margin: 0;
+    }}
+    .account-manager {{
+      margin-top: 18px;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+    }}
+    .command-disclosure {{
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfbf8;
+      padding: 7px 8px;
+    }}
+    .command-disclosure summary {{
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+    }}
+    .command-disclosure pre {{
+      max-height: 160px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      margin: 8px 0 0;
+      font-size: 12px;
     }}
     .actions {{
       display: flex;
@@ -1519,6 +1781,11 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
             <select class="login-account-select" id="loginAccount" aria-label="Saved login account">
               <option value="">No saved account</option>
             </select>
+            <label class="save-login-toggle" title="Store login credentials in this local kit runtime state">
+              <input id="saveLoginAccount" type="checkbox" checked>
+              Save login
+            </label>
+            <button class="connection-button" id="manageAccountsBtn" type="button">Accounts</button>
             <button class="connection-button" id="testConnectionBtn" type="button">Test connection</button>
             <span class="connection-status" id="connectionStatus" aria-live="polite"></span>
           </div>
@@ -1584,6 +1851,9 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       <div class="drawer-content">
         <section class="drawer-pane active" data-pane="conversations">
           <div class="subtle">Continue a previous session or start a new chat.</div>
+          <div class="drawer-action-row">
+            <button id="drawerNewChatBtn" type="button">New chat</button>
+          </div>
           <div class="conversation-list" id="conversations"></div>
         </section>
         <section class="drawer-pane" data-pane="context">
@@ -1596,6 +1866,23 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
           <label for="kit">Kit</label>
           <input id="kit" value="{escape_attr(kit)}" {"disabled" if not allow_kit_switch else ""}>
           <div class="field-help">{kit_help}</div>
+          <div class="account-manager">
+            <strong>Saved accounts</strong>
+            <div class="field-help">Add, edit, or remove login credentials stored in this kit runtime state.</div>
+            <form id="accountForm">
+              <label for="accountLabel">Label</label>
+              <input id="accountLabel" autocomplete="off" placeholder="Admin">
+              <label for="accountUsername">Username</label>
+              <input id="accountUsername" autocomplete="username" placeholder="admin">
+              <label for="accountPassword">Password</label>
+              <input id="accountPassword" type="password" autocomplete="current-password" placeholder="Leave blank to keep current password">
+              <div class="account-actions">
+                <button id="saveAccountBtn" type="submit">Save account</button>
+                <button class="secondary" id="newAccountFormBtn" type="button">Add account</button>
+                <button class="secondary" id="deleteAccountBtn" type="button">Delete selected</button>
+              </div>
+            </form>
+          </div>
         </section>
         <section class="drawer-pane" data-pane="tools">
           <div class="subtle">Select a tool to insert a runnable command and its required parameters.</div>
@@ -1609,8 +1896,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
             <div class="usage-stat"><span class="subtle">Last total</span><strong id="usageTotal">0</strong></div>
             <div class="usage-stat"><span class="subtle">Session total</span><strong id="usageSessionTotal">0</strong></div>
           </div>
-          <div class="field-help" id="usageMeta">Usage appears after an AI response.</div>
-          <div class="timeline" id="timeline"></div>
+          <div class="usage-history" id="usageHistory"></div>
         </section>
       </div>
     </aside>
@@ -1638,6 +1924,8 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       pendingText: document.getElementById('pendingText'),
       pendingDetails: document.getElementById('pendingDetails'),
       pendingCommand: document.getElementById('pendingCommand'),
+      confirm: document.getElementById('confirmBtn'),
+      cancel: document.getElementById('cancelBtn'),
       contextDrawer: document.getElementById('contextDrawer'),
       drawerTitle: document.getElementById('drawerTitle'),
       drawerBackdrop: document.getElementById('drawerBackdrop'),
@@ -1645,21 +1933,31 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       runtimeTarget: document.getElementById('runtimeTarget'),
       baseUrl: document.getElementById('baseUrl'),
       loginAccount: document.getElementById('loginAccount'),
+      saveLoginAccount: document.getElementById('saveLoginAccount'),
+      manageAccounts: document.getElementById('manageAccountsBtn'),
+      accountForm: document.getElementById('accountForm'),
+      accountLabel: document.getElementById('accountLabel'),
+      accountUsername: document.getElementById('accountUsername'),
+      accountPassword: document.getElementById('accountPassword'),
+      newAccountForm: document.getElementById('newAccountFormBtn'),
+      deleteAccount: document.getElementById('deleteAccountBtn'),
+      drawerNewChat: document.getElementById('drawerNewChatBtn'),
       testConnection: document.getElementById('testConnectionBtn'),
       connectionStatus: document.getElementById('connectionStatus'),
       usageInput: document.getElementById('usageInput'),
       usageOutput: document.getElementById('usageOutput'),
       usageTotal: document.getElementById('usageTotal'),
       usageSessionTotal: document.getElementById('usageSessionTotal'),
-      usageMeta: document.getElementById('usageMeta'),
-      timeline: document.getElementById('timeline')
+      usageHistory: document.getElementById('usageHistory')
     }};
     let toolsCache = [];
+    let loginAccountsCache = [];
     let attachments = [];
     let sendInFlight = false;
     let activeStreamController = null;
     let runtimeExecute = initialExecuteMode;
     let currentPending = null;
+    const renderedCommandKeys = new Set();
     const markdownRenderer = window.markdownit ? window.markdownit({{
       html: false,
       linkify: true,
@@ -1684,7 +1982,8 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         kit_dir: allowKitSwitch ? els.kit.value : undefined,
         execute: runtimeExecute,
         base_url: runtimeExecute ? els.baseUrl.value.trim() : '',
-        login_account_id: selectedLoginAccountId()
+        login_account_id: selectedLoginAccountId(),
+        save_login_account: els.saveLoginAccount.checked
       }}, extra);
     }}
     function selectedLoginAccountId() {{
@@ -1826,6 +2125,72 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       bubble.replaceChildren(renderMarkdown(text));
       els.messages.scrollTop = els.messages.scrollHeight;
     }}
+    function humanizeIdentifier(value) {{
+      const text = String(value || '').replace(/[_-]+/g, ' ').trim();
+      return text ? text.charAt(0).toUpperCase() + text.slice(1) : 'Agent operation';
+    }}
+    function pendingOperation(pending) {{
+      if (!pending) return 'Agent operation';
+      if (pending.operation) return pending.operation;
+      if (pending.kind === 'agent_permission') {{
+        return summarizeCommand((pending.input || {{}}).command || '') || humanizeIdentifier(pending.display_name || pending.tool || pending.title);
+      }}
+      return humanizeIdentifier(pending.tool || 'System operation');
+    }}
+    function summarizeCommand(command) {{
+      const text = String(command || '');
+      const lowered = text.toLowerCase();
+      if (lowered.includes('/auth/login') || lowered.includes('/login')) return 'Login';
+      const methodMatch = lowered.match(/(?:-x|--request)\\s+([a-z]+)/);
+      const method = methodMatch ? methodMatch[1].toUpperCase() : (/(\\s-d\\s|--data)/.test(lowered) ? 'POST' : 'GET');
+      const urlMatch = text.match(/https?:\\/\\/[^'"\\s\\\\]+/);
+      if (!urlMatch) return '';
+      let parts = [];
+      try {{
+        parts = new URL(urlMatch[0]).pathname.split('/').filter(Boolean).filter(part => !['api', 'v1', 'v2', 'v3'].includes(part.toLowerCase()));
+      }} catch (error) {{
+        return '';
+      }}
+      const hasId = parts.length > 1 && /\\d|cm[a-z0-9]{{6,}}|[a-f0-9-]{{12,}}/i.test(parts[parts.length - 1]);
+      let resource = hasId ? parts[parts.length - 2] : parts[parts.length - 1];
+      resource = humanizeIdentifier(String(resource || 'operation').replace(/s$/, ''));
+      if (method === 'GET') return hasId ? 'Get ' + resource + ' detail' : 'List ' + resource;
+      if (method === 'POST') return 'Create ' + resource;
+      if (method === 'PUT' || method === 'PATCH') return 'Update ' + resource;
+      if (method === 'DELETE') return 'Delete ' + resource;
+      return resource;
+    }}
+    function commandFromEvent(event) {{
+      if (!event) return '';
+      if (event.pending && event.pending.input) return event.pending.input.command || event.pending.input.pattern || event.pending.input.path || '';
+      if (event.input) return event.input.command || event.input.pattern || event.input.path || '';
+      return '';
+    }}
+    function addCommandSummaryMessage(event) {{
+      const command = commandFromEvent(event);
+      if (!command) return;
+      const pending = event.pending || {{}};
+      const key = (pending.id || event.id || '') + ':' + command;
+      if (renderedCommandKeys.has(key)) return;
+      renderedCommandKeys.add(key);
+      const node = addMessage('assistant', '');
+      const bubble = node.querySelector('.bubble');
+      const title = pendingOperation(pending) || summarizeCommand(command);
+      bubble.replaceChildren();
+      const summary = document.createElement('p');
+      summary.textContent = 'Authorization requested: ' + title;
+      const details = document.createElement('details');
+      details.className = 'command-disclosure';
+      const detailsSummary = document.createElement('summary');
+      detailsSummary.textContent = 'Command details';
+      const pre = document.createElement('pre');
+      pre.textContent = command;
+      details.appendChild(detailsSummary);
+      details.appendChild(pre);
+      bubble.appendChild(summary);
+      bubble.appendChild(details);
+      els.messages.scrollTop = els.messages.scrollHeight;
+    }}
     function setDrawer(name, open = true) {{
       document.querySelectorAll('.drawer-pane').forEach(pane => {{
         pane.classList.toggle('active', pane.dataset.pane === name);
@@ -1842,13 +2207,26 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       els.drawerBackdrop.classList.remove('show');
       document.querySelectorAll('[data-drawer]').forEach(button => button.classList.remove('active'));
     }}
-    async function post(url, body) {{
-      const res = await fetch(url, {{
+    async function post(url, body, timeoutMs = 0) {{
+      const controller = timeoutMs ? new AbortController() : null;
+      const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
+      let res;
+      try {{
+        res = await fetch(url, {{
         method: 'POST',
         headers: {{ 'Content-Type': 'application/json' }},
-        body: JSON.stringify(body)
-      }});
-      return await res.json();
+        body: JSON.stringify(body),
+        signal: controller ? controller.signal : undefined
+        }});
+      }} catch (error) {{
+        if (error && error.name === 'AbortError') throw new Error('Permission resolve timed out. Check the AgentBridge terminal logs and try again.');
+        throw error;
+      }} finally {{
+        if (timer) clearTimeout(timer);
+      }}
+      const data = await res.json().catch(() => ({{ error: 'Request failed.' }}));
+      if (!res.ok) throw new Error(data.error || 'Request failed.');
+      return data;
     }}
     async function readStreamResponse(res, onEvent) {{
       if (!res.ok) {{
@@ -1922,7 +2300,10 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
             updateAssistantMessage(assistantNode, assistantText);
           }} else if (event.type === 'confirmation_required') {{
             renderPending(event.pending);
-            if (event.message && !assistantNode) assistantNode = addMessage('assistant', event.message);
+            addCommandSummaryMessage(event);
+            if (event.message && !assistantNode && !commandFromEvent(event)) assistantNode = addMessage('assistant', event.message);
+          }} else if (event.type === 'tool_use') {{
+            if (commandFromEvent(event)) addCommandSummaryMessage(event);
           }} else if (event.type === 'tool_result' && event.message && !assistantNode) {{
             assistantNode = addMessage('assistant', event.message);
           }} else if (event.type === 'tools') {{
@@ -1976,24 +2357,12 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       if (data.message) addMessage('assistant', data.message);
     }}
     function renderTimelineEvent(event) {{
-      if (!els.timeline) return;
-      let label = '';
-      if (event.type === 'message_start') label = event.model ? 'Model ' + event.model : 'Request started';
-      if (event.type === 'tool_use') label = 'Tool use · ' + event.name;
-      if (event.type === 'tool_result') label = 'Tool result · ' + (event.tool_use_id || 'tool');
-      if (event.type === 'confirmation_required') label = 'Waiting for confirmation';
-      if (event.type === 'interrupted') label = 'Interrupted';
-      if (event.type === 'timeline') label = event.message || 'Agent progress';
-      if (!label) return;
-      const item = document.createElement('div');
-      item.className = 'timeline-item';
-      item.textContent = label;
-      els.timeline.prepend(item);
-      while (els.timeline.children.length > 30) els.timeline.lastElementChild.remove();
+      return;
     }}
     function renderPending(pending) {{
       if (!pending) {{
         currentPending = null;
+        setPendingBusy(false);
         els.pending.classList.remove('show');
         els.pendingSummary.textContent = '';
         els.pendingText.textContent = '';
@@ -2009,7 +2378,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       if (pending.kind === 'agent_permission') {{
         const input = pending.input || {{}};
         const command = input.command || input.pattern || input.path || '';
-        els.pendingSummary.textContent = pending.title || pending.description || pending.display_name || pending.tool || 'Agent operation';
+        els.pendingSummary.textContent = pendingOperation(pending);
         els.pendingText.textContent = (pending.display_name || pending.tool || 'Agent tool') + (pending.tool ? ' · ' + pending.tool : '');
         if (command) {{
           els.pendingCommand.textContent = command;
@@ -2020,21 +2389,37 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       const plan = pending.plan || {{}};
       const transport = plan.transport || {{}};
       const preview = plan.request_preview || {{}};
-      els.pendingSummary.textContent = pending.tool || 'System operation';
+      els.pendingSummary.textContent = pendingOperation(pending);
       els.pendingText.textContent = plan.risk + ' · ' + (preview.method || transport.method || transport.type || '') + ' ' + (preview.url || transport.path || '');
       const command = JSON.stringify({{ arguments: pending.args || {{}}, request: preview }}, null, 2);
       els.pendingCommand.textContent = command;
       els.pendingDetails.hidden = false;
     }}
+    function setPendingBusy(busy, message = '') {{
+      els.confirm.disabled = busy;
+      els.cancel.disabled = busy;
+      if (busy && message) els.pendingText.textContent = message;
+    }}
     async function resolvePending(allow) {{
       if (!currentPending) return;
-      if (currentPending.kind === 'agent_permission') {{
-        await post('/api/chat/agent-permission', payload({{ permission_id: currentPending.id, allow }}));
-        renderPending(null);
-        return;
+      setPendingBusy(true, allow ? 'Authorizing...' : 'Cancelling...');
+      try {{
+        if (currentPending.kind === 'agent_permission') {{
+          const data = await post('/api/chat/agent-permission', payload({{ permission_id: currentPending.id, allow }}), 15000);
+          if (data.error || data.status === 'not_found') throw new Error(data.error || data.message || 'No matching permission request is pending.');
+          renderPending(null);
+          return;
+        }}
+        const data = await post('/api/chat/pending', payload({{ allow }}));
+        if (data.error) throw new Error(data.error);
+        renderChatResponse(data);
+      }} catch (error) {{
+        const message = 'Authorization request failed: ' + (error && error.message ? error.message : error);
+        els.pendingText.textContent = message;
+        addMessage('assistant', message);
+      }} finally {{
+        setPendingBusy(false);
       }}
-      const data = await post('/api/chat/pending', payload({{ allow }}));
-      renderChatResponse(data);
     }}
     function formatNumber(value) {{
       return new Intl.NumberFormat().format(Number(value || 0));
@@ -2044,13 +2429,29 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       els.usageOutput.textContent = formatNumber(usage.output_tokens);
       els.usageTotal.textContent = formatNumber(usage.total_tokens);
       els.usageSessionTotal.textContent = formatNumber(usage.session_total_tokens);
-      const meta = [];
-      if (usage.turns) meta.push(usage.turns + ' turns');
-      if (usage.duration_ms) meta.push(formatNumber(usage.duration_ms) + ' ms');
-      if (usage.session_cost_usd) meta.push('$' + Number(usage.session_cost_usd).toFixed(4));
-      els.usageMeta.textContent = meta.join(' · ') || 'Usage appears after an AI response.';
+      els.usageHistory.innerHTML = '';
+      const history = Array.isArray(usage.history) ? usage.history.slice(-100).reverse() : [];
+      if (!history.length) {{
+        const empty = document.createElement('div');
+        empty.className = 'subtle';
+        empty.textContent = 'Usage appears after an AI response.';
+        els.usageHistory.appendChild(empty);
+        return;
+      }}
+      history.forEach((item, index) => {{
+        const row = document.createElement('div');
+        row.className = 'usage-history-item';
+        const left = document.createElement('span');
+        left.textContent = 'Turn ' + (history.length - index);
+        const right = document.createElement('span');
+        right.textContent = 'in ' + formatNumber(item.input_tokens) + ' · out ' + formatNumber(item.output_tokens) + ' · total ' + formatNumber(item.total_tokens);
+        row.appendChild(left);
+        row.appendChild(right);
+        els.usageHistory.appendChild(row);
+      }});
     }}
     function renderLoginAccounts(accounts = [], selectedId = '') {{
+      loginAccountsCache = accounts;
       const previous = els.loginAccount.value;
       els.loginAccount.innerHTML = '';
       const empty = document.createElement('option');
@@ -2071,6 +2472,47 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       }}
       els.loginAccount.disabled = accounts.length === 0;
       els.loginAccount.title = accounts.length ? 'Saved account for login tools' : 'Run a login tool once to save an account';
+      fillAccountForm();
+    }}
+    function selectedAccount() {{
+      return loginAccountsCache.find(account => account.id === selectedLoginAccountId()) || null;
+    }}
+    function fillAccountForm(clear = false) {{
+      const account = clear ? null : selectedAccount();
+      els.accountLabel.value = account ? (account.label || '') : '';
+      els.accountUsername.value = account ? (account.label || '') : '';
+      els.accountPassword.value = '';
+    }}
+    function accountPayload(action, extra = {{}}) {{
+      return payload(Object.assign({{
+        action,
+        account_id: selectedLoginAccountId(),
+        label: els.accountLabel.value.trim(),
+        username: els.accountUsername.value.trim(),
+        password: els.accountPassword.value
+      }}, extra));
+    }}
+    async function saveAccountForm(event) {{
+      if (event) event.preventDefault();
+      const data = await post('/api/login-account', accountPayload('upsert'));
+      if (data.runtime) {{
+        renderLoginAccounts(data.runtime.login_accounts || [], data.runtime.selected_login_account || '');
+        setConnectionStatus('Saved account updated.', 'success');
+      }}
+    }}
+    function newAccountForm() {{
+      els.loginAccount.value = '';
+      fillAccountForm(true);
+      els.accountUsername.focus();
+    }}
+    async function deleteSelectedAccount() {{
+      const accountId = selectedLoginAccountId();
+      if (!accountId) return;
+      const data = await post('/api/login-account', payload({{ action: 'delete', account_id: accountId }}));
+      if (data.runtime) {{
+        renderLoginAccounts(data.runtime.login_accounts || [], data.runtime.selected_login_account || '');
+        setConnectionStatus('Saved account deleted.', 'success');
+      }}
     }}
     function buildToolCommand(tool) {{
       const params = (tool.required || []).map(name => name + '=');
@@ -2079,7 +2521,6 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     function insertToolCommand(tool) {{
       els.message.value = buildToolCommand(tool);
       els.message.dispatchEvent(new Event('input'));
-      closeDrawer();
       els.message.focus();
       const firstValue = els.message.value.indexOf('=');
       if (firstValue >= 0) els.message.setSelectionRange(firstValue + 1, firstValue + 1);
@@ -2181,17 +2622,78 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         return;
       }}
       conversations.forEach(item => {{
+        const row = document.createElement('div');
+        row.className = 'conversation-row';
         const button = document.createElement('button');
         button.className = 'conversation' + (item.session_id === els.session.value ? ' active' : '');
         button.innerHTML = '<strong></strong><span class="subtle"></span>';
-        button.querySelector('strong').textContent = item.session_id;
+        button.querySelector('strong').textContent = item.title || item.session_id;
         button.querySelector('.subtle').textContent = item.preview || (item.message_count + ' messages');
         button.onclick = () => {{
           els.session.value = item.session_id;
           loadState();
         }};
-        els.conversations.appendChild(button);
+        const menu = document.createElement('button');
+        menu.type = 'button';
+        menu.className = 'conversation-menu';
+        menu.title = 'Conversation actions';
+        menu.textContent = '...';
+        const popover = document.createElement('div');
+        popover.className = 'conversation-popover';
+        popover.hidden = true;
+        const renameButton = document.createElement('button');
+        renameButton.type = 'button';
+        renameButton.textContent = 'Rename';
+        const deleteButton = document.createElement('button');
+        deleteButton.type = 'button';
+        deleteButton.className = 'danger-text';
+        deleteButton.textContent = 'Delete';
+        popover.appendChild(renameButton);
+        popover.appendChild(deleteButton);
+        menu.onclick = (event) => {{
+          event.stopPropagation();
+          document.querySelectorAll('.conversation-popover').forEach(node => {{
+            if (node !== popover) node.hidden = true;
+          }});
+          popover.hidden = !popover.hidden;
+        }};
+        renameButton.onclick = (event) => {{
+          event.stopPropagation();
+          popover.hidden = true;
+          renameConversation(item.session_id, item.title || item.session_id);
+        }};
+        deleteButton.onclick = (event) => {{
+          event.stopPropagation();
+          popover.hidden = true;
+          deleteConversation(item.session_id);
+        }};
+        row.appendChild(button);
+        row.appendChild(menu);
+        row.appendChild(popover);
+        els.conversations.appendChild(row);
       }});
+    }}
+    async function renameConversation(sessionId, currentTitle) {{
+      const title = window.prompt('Rename conversation', currentTitle || sessionId);
+      if (!title) return;
+      const data = await post('/api/conversation', payload({{ action: 'rename', session_id: sessionId, title }}));
+      renderConversations(data.conversations || []);
+    }}
+    async function deleteConversation(sessionId) {{
+      const confirmed = window.confirm('Delete this conversation?');
+      if (!confirmed) return;
+      const data = await post('/api/conversation', payload({{ action: 'delete', session_id: sessionId }}));
+      if (els.session.value === sessionId) startNewChat(false);
+      renderConversations(data.conversations || []);
+    }}
+    function startNewChat(close = true) {{
+      const now = new Date();
+      const stamp = now.toISOString().replace(/[-:]/g, '').slice(0, 15);
+      els.session.value = 'chat-' + stamp;
+      els.messages.innerHTML = '';
+      renderPending(null);
+      if (close) closeDrawer();
+      loadState();
     }}
     async function loadConversations() {{
       const qs = new URLSearchParams({{ user: els.user.value }});
@@ -2234,11 +2736,19 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       button.addEventListener('click', () => applyRuntimeMode(button.dataset.mode));
     }});
     els.testConnection.onclick = testConnectivity;
+    els.manageAccounts.onclick = () => setDrawer('context', true);
+    els.accountForm.addEventListener('submit', saveAccountForm);
+    els.newAccountForm.onclick = newAccountForm;
+    els.deleteAccount.onclick = deleteSelectedAccount;
+    els.drawerNewChat.onclick = () => startNewChat(false);
     els.baseUrl.addEventListener('input', () => setConnectionStatus());
     els.baseUrl.addEventListener('change', () => {{
       if (runtimeExecute && validRuntimeBaseUrl(true)) loadState(true);
     }});
-    els.loginAccount.addEventListener('change', () => loadState(true));
+    els.loginAccount.addEventListener('change', () => {{
+      fillAccountForm();
+      loadState(true);
+    }});
     document.querySelectorAll('[data-drawer]').forEach(button => {{
       button.addEventListener('click', () => {{
         const isSameOpenDrawer = els.contextDrawer.classList.contains('open') &&
@@ -2250,15 +2760,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     document.getElementById('mobileMenuBtn').onclick = () => setDrawer('conversations', true);
     document.getElementById('drawerCloseBtn').onclick = closeDrawer;
     els.drawerBackdrop.onclick = closeDrawer;
-    document.getElementById('newChatBtn').onclick = () => {{
-      const now = new Date();
-      const stamp = now.toISOString().replace(/[-:]/g, '').slice(0, 15);
-      els.session.value = 'chat-' + stamp;
-      els.messages.innerHTML = '';
-      els.pending.classList.remove('show');
-      closeDrawer();
-      loadState();
-    }};
+    document.getElementById('newChatBtn').onclick = () => startNewChat(true);
     els.fileInput.addEventListener('change', async () => {{
       const selected = [];
       for (const file of Array.from(els.fileInput.files || [])) {{

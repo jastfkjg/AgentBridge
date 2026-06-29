@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import queue
+import re
 import threading
 import uuid
 from collections import Counter
@@ -616,6 +617,7 @@ class AgentRunner:
         self._system_prompt = ""
         self.last_usage: dict[str, Any] = {}
         self._load_kit()
+        self._system_prompt = _with_runtime_auth_guidance(self._system_prompt)
         from agentbridge.mcp_server import AgentBridgeMCPServer, MCPServerConfig
 
         self._server = AgentBridgeMCPServer(
@@ -821,6 +823,7 @@ class AgentRunner:
                 return sdk_module.PermissionResultAllow()
             request_id = str(uuid.uuid4())[:8]
             decision = threading.Event()
+            operation = _summarize_permission_operation(tool_name, tool_input, context)
             pending = {
                 "id": request_id,
                 "tool": tool_name,
@@ -828,6 +831,7 @@ class AgentRunner:
                 "title": getattr(context, "title", None) or f"Authorize {tool_name}",
                 "display_name": getattr(context, "display_name", None) or tool_name,
                 "description": getattr(context, "description", None) or getattr(context, "decision_reason", None) or "",
+                "operation": operation,
                 "tool_use_id": getattr(context, "tool_use_id", None),
                 "event": decision,
                 "allow": None,
@@ -1033,6 +1037,87 @@ def _is_read_only_permission_request(tool_name: str, tool_input: dict[str, Any])
     if any(marker in lowered for marker in ["/auth/login", "/login", "signin", "sign_in"]):
         return False
     return "curl " in lowered and not any(method in lowered for method in ["post", "put", "patch", "delete"])
+
+
+def _summarize_permission_operation(tool_name: str, tool_input: dict[str, Any], context: Any) -> str:
+    command = str(tool_input.get("command", "") or "") if isinstance(tool_input, dict) else ""
+    description = str(getattr(context, "description", "") or getattr(context, "decision_reason", "") or "")
+    haystack = f"{command}\n{description}".lower()
+    if any(marker in haystack for marker in ["/auth/login", "/login", "signin", "sign_in"]):
+        return "Login"
+    method = _curl_method(command)
+    path = _first_url_path(command)
+    if path:
+        resource = _resource_from_path(path)
+        if method == "GET":
+            return f"Get {resource} detail" if _path_has_identifier(path) else f"List {resource}"
+        if method == "POST":
+            return f"Create {resource}"
+        if method == "PATCH" or method == "PUT":
+            return f"Update {resource}"
+        if method == "DELETE":
+            return f"Delete {resource}"
+    title = str(getattr(context, "title", "") or "")
+    if title and not title.lower().startswith("authorize "):
+        return title
+    return _humanize_identifier(tool_name)
+
+
+def _curl_method(command: str) -> str:
+    lowered = command.lower()
+    method_match = re.search(r"(?:-x|--request)\s+([a-z]+)", lowered)
+    if method_match:
+        return method_match.group(1).upper()
+    if re.search(r"\s-d\s|--data(?:-raw|-binary|-urlencode)?\s", lowered):
+        return "POST"
+    return "GET"
+
+
+def _first_url_path(command: str) -> str:
+    match = re.search(r"https?://[^'\"\s\\]+", command)
+    if not match:
+        return ""
+    try:
+        from urllib.parse import urlparse
+
+        return urlparse(match.group(0)).path
+    except Exception:
+        return ""
+
+
+def _path_has_identifier(path: str) -> bool:
+    parts = [part for part in path.strip("/").split("/") if part]
+    return bool(parts and re.search(r"\d|cm[a-z0-9]{6,}|[a-f0-9-]{12,}", parts[-1], re.I))
+
+
+def _resource_from_path(path: str) -> str:
+    parts = [part for part in path.strip("/").split("/") if part]
+    filtered = [part for part in parts if part.lower() not in {"api", "v1", "v2", "v3"}]
+    resource = filtered[-2] if filtered and _path_has_identifier(path) and len(filtered) >= 2 else (filtered[-1] if filtered else "operation")
+    resource = re.sub(r"[-_]+", " ", resource).strip()
+    if resource.endswith("ies"):
+        resource = resource[:-3] + "y"
+    elif resource.endswith("s") and len(resource) > 3:
+        resource = resource[:-1]
+    return resource or "operation"
+
+
+def _humanize_identifier(value: str) -> str:
+    words = re.sub(r"[_-]+", " ", value).strip()
+    return words[:1].upper() + words[1:] if words else "Agent operation"
+
+
+def _with_runtime_auth_guidance(system_prompt: str) -> str:
+    guidance = (
+        "Runtime authentication guidance:\n"
+        "- If a target API response is HTTP 401, code 100002, or says Token expired, treat the saved token as expired.\n"
+        "- Refresh authentication first: use the AgentBridge kit login tool, which can reuse the selected saved account, then retry the original operation once.\n"
+        "- Do not keep retrying the same expired token with Bash/curl. If refresh is unavailable or still fails, tell the user the token expired and ask them to select a saved account or login again."
+    )
+    prompt = system_prompt.strip()
+    if guidance in prompt:
+        return prompt
+    return (prompt + "\n\n" + guidance).strip() if prompt else guidance
 
 
 def _extract_agent_result_text(message: Any) -> str:

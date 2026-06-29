@@ -20,12 +20,12 @@ AgentBridge 的目标：通过 Claude Agent SDK 解析已有项目或系统，�
 - [x] 持久化 Claude Agent SDK client/session，支持多轮 resume
 - [x] Web Chat 支持 SSE/WebSocket 流式响应
 - [x] 在 UI 中实时展示 tool use、tool result、确认等待和执行结果
-- [x] 增加 tool call timeline，方便用户理解 Agent 如何操作系统
+- [x] 在聊天消息中以默认折叠的方式展示 curl/python 等实际命令详情
 - [x] 支持 cancel/interrupt 当前 Agent 请求
-- [x] 展示 model、token usage、cost 等运行信息
+- [x] 展示输入/输出 token usage 和最近 100 条 token 消耗历史
 - [x] Web Chat 使用按钮处理高风险工具确认和 Claude Agent SDK 权限请求
 - [x] Web Chat 在登录响应中捕获 token/cookie，并在同一用户会话后续操作中复用
-- [x] Web Chat 按 kit 保存 Base URL 和多个本地运行时登录账号，并支持选择已保存账号
+- [x] Web Chat 按 kit 保存 Base URL 和多个本地运行时登录账号，并支持选择、新增、修改、删除已保存账号
 
 ## P1：更多系统 Adapter
 

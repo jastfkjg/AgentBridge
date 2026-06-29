@@ -78,6 +78,31 @@ class _PartialStreamAgentRunner:
         yield SimpleNamespace(content=[{"type": "text", "text": "你好世界"}])
 
 
+class _PermissionStreamAgentRunner:
+    model = "claude-permission"
+
+    def __init__(self) -> None:
+        self.resolutions: list[tuple[str, bool]] = []
+
+    def stream_messages(self, _prompt: str):
+        yield {
+            "type": "agent_permission_required",
+            "pending": {
+                "id": "perm-1",
+                "tool": "Bash",
+                "title": "Authorize Bash",
+                "display_name": "Bash",
+                "description": "Check stored account configuration",
+                "input": {"command": "cat .agentbridge-runtime.json"},
+            },
+        }
+        yield SimpleNamespace(content=[{"type": "text", "text": "Done"}])
+
+    def resolve_permission(self, request_id: str, allow: bool) -> bool:
+        self.resolutions.append((request_id, allow))
+        return request_id == "perm-1"
+
+
 def _write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data), encoding="utf-8")
@@ -179,6 +204,16 @@ class _FakeHTTPResponse:
         return json.dumps(self.payload).encode("utf-8")
 
 
+def _http_error(status: int, payload: object) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        url="http://example.test/api",
+        code=status,
+        msg="error",
+        hdrs={},
+        fp=BytesIO(json.dumps(payload).encode("utf-8")),
+    )
+
+
 class _ConnectivityResponse:
     status = 204
     headers = {}
@@ -268,6 +303,99 @@ class ChatSessionTests(unittest.TestCase):
 
             restored = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, memory_file=memory, session_id="s1"))
             self.assertEqual(restored.config.headers.get("Authorization"), "Bearer jwt-123456")
+
+    def test_chat_refreshes_expired_token_with_selected_saved_account_and_retries_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            save_kit_runtime_state(
+                kit,
+                {
+                    "base_url": "http://example.test",
+                    "execute": True,
+                    "login_accounts": [
+                        {
+                            "id": "username:admin",
+                            "label": "admin",
+                            "credentials": {"username": "admin", "password": "secret"},
+                            "auth_headers": {"Authorization": "Bearer old-token"},
+                        }
+                    ],
+                    "selected_login_account": "username:admin",
+                },
+            )
+            session = ChatSession(ChatConfig(kit_dir=kit, memory_enabled=False))
+
+            with patch(
+                "urllib.request.urlopen",
+                side_effect=[
+                    _http_error(401, {"code": 100002, "message": "Token expired"}),
+                    _FakeHTTPResponse({"access_token": "new-token"}),
+                    _FakeHTTPResponse({"items": []}),
+                ],
+            ) as urlopen:
+                response = session.process("/run list_chapter project_id=p1")
+
+            self.assertEqual(response.status, "tool_result")
+            self.assertIn("after refreshing authentication", response.message)
+            self.assertEqual(urlopen.call_count, 3)
+            login_request = urlopen.call_args_list[1].args[0]
+            retried_request = urlopen.call_args_list[2].args[0]
+            self.assertEqual(json.loads(login_request.data.decode("utf-8")), {"username": "admin", "password": "secret"})
+            self.assertEqual(retried_request.headers.get("Authorization"), "Bearer new-token")
+
+    def test_chat_reports_expired_token_when_no_saved_account_can_refresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            session = ChatSession(
+                ChatConfig(
+                    kit_dir=kit,
+                    base_url="http://example.test",
+                    headers={"Authorization": "Bearer old-token"},
+                    execute=True,
+                    memory_enabled=False,
+                )
+            )
+
+            with patch("urllib.request.urlopen", side_effect=_http_error(401, {"message": "Token expired"})):
+                response = session.process("/run list_chapter project_id=p1")
+
+            self.assertEqual(response.status, "tool_result")
+            self.assertIn("Authentication expired", response.message)
+            self.assertIn("saved account", response.message)
+
+    def test_chat_can_disable_saving_login_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            session = ChatSession(
+                ChatConfig(
+                    kit_dir=kit,
+                    base_url="http://example.test",
+                    execute=True,
+                    memory_enabled=False,
+                    save_login_account=False,
+                )
+            )
+
+            with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-123456"})):
+                response = session.process("/run login username=admin password=secret")
+
+            self.assertEqual(response.status, "tool_result")
+            runtime_state = load_kit_runtime_state(kit)
+            self.assertEqual(runtime_state.get("login_accounts"), [])
+            self.assertEqual(runtime_state.get("auth_headers", {}).get("Authorization"), "Bearer jwt-123456")
+
+    def test_chat_records_recent_token_usage_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            session = ChatSession(ChatConfig(kit_dir=kit, memory_enabled=False))
+
+            for index in range(105):
+                session._record_usage({"input_tokens": index, "output_tokens": 2, "total_tokens": index + 2, "cost_usd": 9})
+
+            self.assertEqual(len(session.usage["history"]), 100)
+            self.assertEqual(session.usage["history"][0]["input_tokens"], 5)
+            self.assertEqual(session.usage["history"][-1]["input_tokens"], 104)
+            self.assertNotIn("cost_usd", session.usage["history"][-1])
 
     def test_chat_reports_read_only_policy_block(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -523,6 +651,26 @@ class ChatSessionTests(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "done")
         self.assertEqual(events[-1]["message"], "你好世界")
 
+    def test_chat_stream_process_exposes_active_sdk_permission_for_state_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            runner = _PermissionStreamAgentRunner()
+            session = ChatSession(ChatConfig(kit_dir=kit, memory_enabled=False, agent_runner=runner))
+
+            stream = session.stream_process("看看已存储的账号有哪些")
+            next(stream)
+            permission = next(stream).to_dict()
+
+            self.assertEqual(permission["type"], "confirmation_required")
+            self.assertEqual(session.current_pending()["id"], "perm-1")
+            self.assertEqual(session.current_pending()["kind"], "agent_permission")
+
+            response = session.resolve_agent_permission("perm-1", allow=True)
+            self.assertEqual(response["status"], "approved")
+            self.assertIsNone(session.current_pending())
+            self.assertEqual(runner.resolutions, [("perm-1", True)])
+            stream.close()
+
     def test_chat_stream_process_surfaces_agent_stderr_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
@@ -694,6 +842,11 @@ class WebChatTests(unittest.TestCase):
             self.assertIn("currentPending.kind === 'agent_permission'", html)
             self.assertIn("document.getElementById('confirmBtn').onclick = () => resolvePending(true)", html)
             self.assertIn("document.getElementById('cancelBtn').onclick = () => resolvePending(false)", html)
+            self.assertIn("function setPendingBusy", html)
+            self.assertIn("setPendingBusy(true,", html)
+            self.assertIn("Permission resolve timed out", html)
+            self.assertIn("permission_id: currentPending.id", html)
+            self.assertIn("Authorization request failed", html)
             self.assertNotIn("document.getElementById('confirmBtn').onclick = () => sendMessage('confirm')", html)
 
     def test_rendered_web_ui_collapses_long_authorization_commands(self):
@@ -789,6 +942,11 @@ class WebChatTests(unittest.TestCase):
             self.assertIn("login_account_id: selectedLoginAccountId()", html)
             self.assertIn("function renderLoginAccounts", html)
             self.assertIn("els.loginAccount.addEventListener('change'", html)
+            self.assertIn('id="saveLoginAccount"', html)
+            self.assertIn('id="accountForm"', html)
+            self.assertIn("/api/login-account", html)
+            self.assertIn("save_login_account: els.saveLoginAccount.checked", html)
+            self.assertIn("deleteSelectedAccount", html)
 
     def test_rendered_web_ui_supports_clickable_tools_parameter_templates_and_usage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -804,10 +962,27 @@ class WebChatTests(unittest.TestCase):
             self.assertIn('id="usageButton"', html)
             self.assertIn('id="usagePanel"', html)
             self.assertIn("renderUsage", html)
-            self.assertIn("session_total_tokens", html)
+            self.assertIn('id="usageHistory"', html)
+            self.assertIn("usage.history", html)
+            self.assertNotIn("session_cost_usd", html)
+            insert_block = html[html.index("function insertToolCommand"):html.index("function renderTools")]
+            self.assertNotIn("closeDrawer();", insert_block)
             self.assertIn("approval-card", html)
             self.assertIn('id="confirmBtn"', html)
             self.assertIn('id="cancelBtn"', html)
+
+    def test_rendered_web_ui_supports_conversation_menu_actions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn('id="drawerNewChatBtn"', html)
+            self.assertIn("conversation-menu", html)
+            self.assertIn("renameConversation", html)
+            self.assertIn("deleteConversation", html)
+            self.assertIn("/api/conversation", html)
 
     def test_target_base_url_requires_http_or_https(self):
         self.assertEqual(normalize_target_base_url(" http://localhost:8080/ "), "http://localhost:8080")
@@ -929,6 +1104,37 @@ class WebChatTests(unittest.TestCase):
             self.assertNotIn("password", json.dumps(state["runtime"]))
             self.assertEqual(load_kit_runtime_state(kit)["selected_login_account"], "username:editor")
 
+    def test_web_api_can_manage_saved_login_accounts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            from http.server import ThreadingHTTPServer
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), build_handler(config))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.shutdown)
+            self.addCleanup(server.server_close)
+            base = f"http://127.0.0.1:{server.server_port}"
+
+            add_body = json.dumps({"action": "upsert", "label": "Admin", "username": "admin", "password": "secret"}).encode("utf-8")
+            add_req = urllib.request.Request(base + "/api/login-account", data=add_body, headers={"Content-Type": "application/json"}, method="POST")
+            added = json.loads(urllib.request.urlopen(add_req).read().decode("utf-8"))
+            account_id = added["runtime"]["selected_login_account"]
+
+            update_body = json.dumps({"action": "upsert", "account_id": account_id, "label": "Owner", "username": "owner", "password": "changed"}).encode("utf-8")
+            update_req = urllib.request.Request(base + "/api/login-account", data=update_body, headers={"Content-Type": "application/json"}, method="POST")
+            updated = json.loads(urllib.request.urlopen(update_req).read().decode("utf-8"))
+            self.assertEqual(updated["runtime"]["login_accounts"][0]["label"], "Owner")
+            self.assertNotIn("password", json.dumps(updated["runtime"]))
+
+            delete_body = json.dumps({"action": "delete", "account_id": updated["runtime"]["selected_login_account"]}).encode("utf-8")
+            delete_req = urllib.request.Request(base + "/api/login-account", data=delete_body, headers={"Content-Type": "application/json"}, method="POST")
+            deleted = json.loads(urllib.request.urlopen(delete_req).read().decode("utf-8"))
+            self.assertEqual(deleted["runtime"]["login_accounts"], [])
+            self.assertEqual(load_kit_runtime_state(kit).get("login_accounts"), [])
+
     def test_web_serves_local_markdown_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
@@ -987,6 +1193,45 @@ class WebChatTests(unittest.TestCase):
             self.assertEqual(set(sessions), {"first", "second"})
             self.assertEqual(sessions["first"]["preview"], "show chapters")
             self.assertTrue(sessions["second"]["has_pending"])
+
+    def test_web_api_can_rename_and_delete_conversations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            memory = kit / ".agentbridge-chat-memory.json"
+            _write_json(
+                memory,
+                {
+                    f"alice:first:{kit.resolve()}": {
+                        "history": [{"role": "user", "content": "show chapters"}],
+                        "pending": None,
+                    },
+                    f"alice:second:{kit.resolve()}": {
+                        "history": [{"role": "assistant", "content": "create chapter planned"}],
+                        "pending": None,
+                    },
+                },
+            )
+            config = ChatConfig(kit_dir=kit, user="alice")
+
+            from http.server import ThreadingHTTPServer
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), build_handler(config))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.shutdown)
+            self.addCleanup(server.server_close)
+            base = f"http://127.0.0.1:{server.server_port}"
+
+            rename_body = json.dumps({"action": "rename", "session_id": "first", "title": "Chapter review"}).encode("utf-8")
+            rename_req = urllib.request.Request(base + "/api/conversation", data=rename_body, headers={"Content-Type": "application/json"}, method="POST")
+            renamed = json.loads(urllib.request.urlopen(rename_req).read().decode("utf-8"))
+            first = next(item for item in renamed["conversations"] if item["session_id"] == "first")
+            self.assertEqual(first["title"], "Chapter review")
+
+            delete_body = json.dumps({"action": "delete", "session_id": "second"}).encode("utf-8")
+            delete_req = urllib.request.Request(base + "/api/conversation", data=delete_body, headers={"Content-Type": "application/json"}, method="POST")
+            deleted = json.loads(urllib.request.urlopen(delete_req).read().decode("utf-8"))
+            self.assertEqual({item["session_id"] for item in deleted["conversations"]}, {"first"})
 
     def test_web_api_accepts_attachment_metadata_with_chat_message(self):
         with tempfile.TemporaryDirectory() as tmp:

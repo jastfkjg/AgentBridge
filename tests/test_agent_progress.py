@@ -153,6 +153,74 @@ class AgentProgressTests(unittest.TestCase):
         self.assertNotEqual(actual_session_id, sdk_session_id)
         uuid.UUID(actual_session_id)
 
+    def test_agent_runner_system_prompt_instructs_auth_refresh_on_expired_tokens(self):
+        class FakeClaudeAgentOptions:
+            last_kwargs: dict[str, object] | None = None
+
+            def __init__(self, **kwargs: object) -> None:
+                FakeClaudeAgentOptions.last_kwargs = kwargs
+
+        class FakeClaudeSDKClient:
+            def __init__(self, options: object) -> None:
+                self.options = options
+
+            async def connect(self) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                pass
+
+        def fake_tool(_name: str, _description: str, _param_types: dict[str, type]):
+            def decorate(handler):
+                return handler
+
+            return decorate
+
+        fake_module = types.ModuleType("claude_agent_sdk")
+        fake_module.ClaudeAgentOptions = FakeClaudeAgentOptions
+        fake_module.ClaudeSDKClient = FakeClaudeSDKClient
+        fake_module.create_sdk_mcp_server = lambda **kwargs: kwargs
+        fake_module.tool = fake_tool
+
+        from agentbridge.agent import AgentRunner
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"claude_agent_sdk": fake_module}):
+            kit = Path(tmp) / "kit"
+            (kit / "prompts").mkdir(parents=True)
+            (kit / "prompts" / "system.md").write_text("Operate this system.", encoding="utf-8")
+            (kit / "capabilities.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "name": "login",
+                            "domain": "auth",
+                            "resource": "session",
+                            "action": "create",
+                            "description": "Login",
+                            "input_schema": {"type": "object", "properties": {}, "required": []},
+                            "risk": "external_side_effect",
+                            "confirm_required": False,
+                            "source": {"kind": "openapi", "path": "openapi.json", "location": "POST /auth/login"},
+                            "transport": {"type": "http", "method": "POST", "path": "/auth/login"},
+                            "dry_run_supported": True,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (kit / "guardrails").mkdir()
+            (kit / "guardrails" / "permissions.json").write_text(json.dumps({"tools": {}}), encoding="utf-8")
+            runner = AgentRunner(kit, api_key="sk-test", session_id="web-session")
+            loop = runner._ensure_client_loop()
+            future = asyncio.run_coroutine_threadsafe(runner._ensure_client_async(), loop)
+            future.result(timeout=5)
+            runner.close()
+
+        system_prompt = str(FakeClaudeAgentOptions.last_kwargs["system_prompt"])
+        self.assertIn("Token expired", system_prompt)
+        self.assertIn("login", system_prompt)
+        self.assertIn("Do not keep retrying the same expired token", system_prompt)
+
     def test_agent_runner_stream_messages_yields_before_response_completes(self):
         release_second_message = threading.Event()
 
@@ -296,6 +364,7 @@ class AgentProgressTests(unittest.TestCase):
             permission = next(stream)
             self.assertEqual(permission["type"], "agent_permission_required")
             self.assertEqual(permission["pending"]["tool"], "Bash")
+            self.assertEqual(permission["pending"]["operation"], "Login")
             self.assertIn("curl", permission["pending"]["input"]["command"])
 
             self.assertTrue(runner.resolve_permission(permission["pending"]["id"], allow=True))

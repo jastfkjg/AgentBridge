@@ -54,13 +54,15 @@ Open the printed URL in a browser. The UI exposes the parsed system capabilities
 - active kit display
 - Dry-run / Real system runtime selector
 - Base URL validation and target-system connectivity test
+- saved login-account selector, optional Save login toggle, and account add/edit/delete controls
 - clickable tool list that inserts `/run` commands and required parameters
 - chat transcript
-- visible Authorize/Cancel controls for pending operations
+- visible Authorize/Cancel controls for pending operations with operation summaries such as Login or Create script
 - SSE streaming for Agent replies and tool events
-- tool call timeline for tool use, tool results, confirmation waits, and interrupts
+- collapsible chat messages for concrete commands such as `curl` or `python`
 - interrupt control for the current Agent request
-- Claude Agent SDK model, token, and cost usage for the last response and current session
+- token usage totals and the most recent 100 token history entries
+- recent conversation new-chat, rename, and delete actions
 
 Run in execution mode:
 
@@ -72,7 +74,7 @@ agentbridge web .agentbridge/openapi-kit \
   --read-only
 ```
 
-The mode can also be changed directly in the Web UI. Real system mode requires an `http://` or `https://` Base URL. The connectivity test sends `HEAD` to the Base URL and falls back to `GET` when `HEAD` is not supported; any HTTP response means the system is reachable. Switching modes clears any pending confirmation before rebuilding the runtime, while guardrails and human confirmation remain enforced.
+The mode can also be changed directly in the Web UI. Real system mode requires an `http://` or `https://` Base URL. The connectivity test sends `HEAD` to the Base URL and falls back to `GET` when `HEAD` is not supported; any HTTP response means the system is reachable. Switching modes clears any pending confirmation before rebuilding the runtime, while guardrails and human confirmation remain enforced. The Web Chat server prints concise request, stream, permission, and error logs to the terminal with secrets redacted.
 
 Terminal chat exposes the same core workflows through `/use`, `/mode`, `/connect`, and `/usage`. `/use` lists numbered tools and prompts for required parameters. High-risk calls present an explicit Authorize/Cancel selection.
 
