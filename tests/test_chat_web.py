@@ -507,6 +507,80 @@ class ChatSessionTests(unittest.TestCase):
             self.assertIn("其他账号", response.message)
             self.assertEqual(runner.prompts, [])
 
+    def test_chat_uses_saved_account_selection_for_login_instead_of_agent_guessing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            save_kit_runtime_state(
+                kit,
+                {
+                    "login_accounts": [
+                        {"id": "username:admin", "label": "admin", "credentials": {"username": "admin", "password": "secret"}},
+                        {"id": "username:staff", "label": "staff", "credentials": {"username": "staff", "password": "staff-secret"}},
+                    ],
+                    "selected_login_account": "username:staff",
+                },
+            )
+            runner = _FakeAgentRunner("should not run")
+            session = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, agent_runner=runner, memory_enabled=False))
+
+            with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-admin"})) as urlopen:
+                response = session.process("admin")
+
+            self.assertEqual(response.status, "tool_result")
+            self.assertEqual(runner.prompts, [])
+            request = urlopen.call_args.args[0]
+            self.assertEqual(json.loads(request.data.decode("utf-8")), {"username": "admin", "password": "secret"})
+            self.assertEqual(load_kit_runtime_state(kit)["selected_login_account"], "username:admin")
+
+    def test_chat_stream_uses_saved_account_selection_for_login_instead_of_agent_guessing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            save_kit_runtime_state(
+                kit,
+                {
+                    "login_accounts": [
+                        {"id": "username:admin", "label": "admin", "credentials": {"username": "admin", "password": "secret"}},
+                        {"id": "username:staff", "label": "staff", "credentials": {"username": "staff", "password": "staff-secret"}},
+                    ],
+                    "selected_login_account": "username:staff",
+                },
+            )
+            runner = _FakeAgentRunner("should not run")
+            session = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, agent_runner=runner, memory_enabled=False))
+
+            with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-admin"})) as urlopen:
+                events = [event.to_dict() for event in session.stream_process("admin")]
+
+            self.assertEqual(events[-1]["type"], "done")
+            self.assertEqual(events[-1]["status"], "tool_result")
+            self.assertEqual(runner.prompts, [])
+            request = urlopen.call_args.args[0]
+            self.assertEqual(json.loads(request.data.decode("utf-8")), {"username": "admin", "password": "secret"})
+
+    def test_chat_uses_named_saved_account_in_login_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            save_kit_runtime_state(
+                kit,
+                {
+                    "login_accounts": [
+                        {"id": "username:admin", "label": "admin", "credentials": {"username": "admin", "password": "secret"}},
+                        {"id": "username:staff", "label": "staff", "credentials": {"username": "staff", "password": "staff-secret"}},
+                    ],
+                    "selected_login_account": "username:staff",
+                },
+            )
+            runner = _FakeAgentRunner("should not run")
+            session = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, agent_runner=runner, memory_enabled=False))
+
+            with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-admin"})) as urlopen:
+                response = session.process("用 admin 登录")
+
+            self.assertEqual(response.status, "tool_result")
+            self.assertEqual(runner.prompts, [])
+            request = urlopen.call_args.args[0]
+            self.assertEqual(json.loads(request.data.decode("utf-8")), {"username": "admin", "password": "secret"})
+
     def test_selected_login_account_auth_headers_win_over_stale_session_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
@@ -891,9 +965,14 @@ class WebChatTests(unittest.TestCase):
             config = ChatConfig(kit_dir=kit, memory_enabled=False)
 
             html = render_index(config, allow_kit_switch=False)
+            dedupe_function = html[html.index("function commandDedupeKey"):html.index("function commandTitle")]
 
             self.assertIn("let commandSummaryNode = null", html)
-            self.assertIn("const key = String(command).trim()", html)
+            self.assertIn("function commandDedupeKey(command)", dedupe_function)
+            self.assertIn(".replace(/\\\\\\s*\\n\\s*/g, ' ')", dedupe_function)
+            self.assertIn(".replace(/\\\\&/g, '&')", dedupe_function)
+            self.assertIn(".replace(/\\s+/g, ' ')", dedupe_function)
+            self.assertIn("const key = commandDedupeKey(command)", html)
             self.assertIn("renderedCommandKeys.has(key)", html)
             self.assertIn("appendCommandSummary(event, assistantNode)", html)
             self.assertIn("renderCommandDetails(node)", html)

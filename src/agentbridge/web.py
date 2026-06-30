@@ -2316,6 +2316,13 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       if (event.input) return event.input.command || event.input.pattern || event.input.path || '';
       return '';
     }}
+    function commandDedupeKey(command) {{
+      return String(command || '')
+        .replace(/\\\\\\s*\\n\\s*/g, ' ')
+        .replace(/\\\\&/g, '&')
+        .replace(/\\s+/g, ' ')
+        .trim();
+    }}
     function commandTitle(event, command) {{
       const summary = summarizeCommand(command);
       if (summary) return summary;
@@ -2355,7 +2362,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     function appendCommandSummary(event, targetNode = null) {{
       const command = commandFromEvent(event);
       if (!command) return targetNode;
-      const key = String(command).trim();
+      const key = commandDedupeKey(command);
       if (renderedCommandKeys.has(key)) return targetNode || commandSummaryNode;
       renderedCommandKeys.add(key);
       const node = targetNode || commandSummaryNode || addMessage('assistant', '');

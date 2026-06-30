@@ -263,6 +263,9 @@ class ChatSession:
         account_selection_message = self._saved_account_selection_message(text)
         if account_selection_message:
             return self._reply("account_selection_required", account_selection_message)
+        selected_account_id = self._saved_account_id_from_message(text)
+        if selected_account_id:
+            return self._login_with_saved_account(selected_account_id)
 
         parsed = parse_tool_request(text, self.capabilities)
         if not parsed:
@@ -284,6 +287,12 @@ class ChatSession:
         if account_selection_message:
             self._remember("user", text)
             response = self._reply("account_selection_required", account_selection_message)
+            yield from self._events_from_response(response)
+            return
+        selected_account_id = self._saved_account_id_from_message(text)
+        if selected_account_id:
+            self._remember("user", text)
+            response = self._login_with_saved_account(selected_account_id)
             yield from self._events_from_response(response)
             return
         should_stream_agent = (
@@ -506,6 +515,45 @@ class ChatSession:
             lines.append(f"- {label} ({username})")
         lines.append("- 其他账号：直接发送 username / password")
         return "\n".join(lines)
+
+    def _saved_account_id_from_message(self, text: str) -> str:
+        candidate = text.strip().casefold()
+        if not candidate or "\n" in candidate:
+            return ""
+        state = normalize_login_account_state(self.runtime_state)
+        partial_matches: list[str] = []
+        for account in state.get("login_accounts", []):
+            if not isinstance(account, dict):
+                continue
+            credentials = account.get("credentials", {})
+            if not isinstance(credentials, dict):
+                credentials = {}
+            values = {
+                str(account.get("id") or ""),
+                str(account.get("label") or ""),
+                str(credentials.get("username") or ""),
+                str(credentials.get("user") or ""),
+                str(credentials.get("email") or ""),
+            }
+            normalized_values = {value.strip().casefold() for value in values if value}
+            account_id = str(account.get("id") or "")
+            if candidate in normalized_values:
+                return account_id
+            if _is_generic_login_request(text) and any(value and value in candidate for value in normalized_values):
+                partial_matches.append(account_id)
+        if len(set(partial_matches)) == 1:
+            return partial_matches[0]
+        return ""
+
+    def _login_with_saved_account(self, account_id: str) -> ChatResponse:
+        try:
+            self.select_login_account(account_id)
+        except ValueError:
+            return self._reply("account_selection_failed", "Saved login account was not found.")
+        login_tool = self._login_tool_name()
+        if not login_tool:
+            return self._reply("account_selected", "Saved account selected, but this kit has no detected login tool.")
+        return self.call_tool(login_tool, {}, confirmed=False)
 
     def _agent_reply(self, text: str) -> ChatResponse:
         if not self.config.agent_enabled:
