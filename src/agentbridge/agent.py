@@ -7,7 +7,9 @@ import json
 import os
 import queue
 import re
+import shlex
 import threading
+import time
 import uuid
 from collections import Counter
 from pathlib import Path
@@ -644,6 +646,9 @@ class AgentRunner:
         self._permission_lock = threading.Lock()
         self._pending_permission: dict[str, Any] | None = None
         self._permission_events: queue.Queue[tuple[str, Any]] | None = None
+        self.stream_idle_timeout = (
+            llm_timeout if llm_timeout is not None else _env_float("AGENTBRIDGE_AGENT_STREAM_IDLE_TIMEOUT", 45.0)
+        )
 
     def _load_kit(self) -> None:
         caps_path = self.kit_dir / "capabilities.json"
@@ -670,10 +675,28 @@ class AgentRunner:
             loop = self._ensure_client_loop()
             events: queue.Queue[tuple[str, Any]] = queue.Queue()
             self._permission_events = events
-            asyncio.run_coroutine_threadsafe(self._stream_messages_async(prompt, events), loop)
+            stream_future = asyncio.run_coroutine_threadsafe(self._stream_messages_async(prompt, events), loop)
+            idle_timeout = self.stream_idle_timeout if self.stream_idle_timeout and self.stream_idle_timeout > 0 else None
+            last_stream_event_at = time.monotonic()
             try:
                 while True:
-                    kind, payload = events.get()
+                    try:
+                        kind, payload = events.get(timeout=0.25 if idle_timeout else None)
+                    except queue.Empty as exc:
+                        if self._has_pending_permission():
+                            last_stream_event_at = time.monotonic()
+                            continue
+                        if not idle_timeout or time.monotonic() - last_stream_event_at < idle_timeout:
+                            continue
+                        self._abort_active_stream()
+                        try:
+                            stream_future.result(timeout=1)
+                        except Exception:
+                            pass
+                        raise TimeoutError(
+                            f"Claude Agent SDK stream produced no events for {idle_timeout:g} seconds."
+                        ) from exc
+                    last_stream_event_at = time.monotonic()
                     if kind == "message":
                         yield payload
                     elif kind == "error":
@@ -682,6 +705,24 @@ class AgentRunner:
                         return
             finally:
                 self._permission_events = None
+
+    def _has_pending_permission(self) -> bool:
+        with self._permission_lock:
+            return self._pending_permission is not None
+
+    def _abort_active_stream(self) -> None:
+        try:
+            self.interrupt()
+        except Exception:
+            pass
+        loop = self._client_loop
+        if loop is None:
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(self._reset_client_async(), loop)
+            future.result(timeout=5)
+        except Exception:
+            pass
 
     def resolve_permission(self, request_id: str, allow: bool) -> bool:
         with self._permission_lock:
@@ -771,6 +812,8 @@ class AgentRunner:
     async def _stream_messages_async(self, prompt: str, events: queue.Queue[tuple[str, Any]]) -> None:
         try:
             async for msg in self._stream_messages_once_async(prompt):
+                if _is_agent_stream_event(msg) and not _extract_agent_stream_text_delta(msg):
+                    continue
                 events.put(("message", msg))
         except Exception as exc:
             if not _is_agent_session_retryable_error(exc):
@@ -781,6 +824,8 @@ class AgentRunner:
                 await self._reset_client_async()
                 self.sdk_session_id = _temporary_sdk_session_id(self._stable_sdk_session_id)
                 async for msg in self._stream_messages_once_async(prompt):
+                    if _is_agent_stream_event(msg) and not _extract_agent_stream_text_delta(msg):
+                        continue
                     events.put(("message", msg))
             except Exception as retry_exc:
                 events.put(("error", retry_exc))
@@ -1036,7 +1081,40 @@ def _is_read_only_permission_request(tool_name: str, tool_input: dict[str, Any])
         return False
     if any(marker in lowered for marker in ["/auth/login", "/login", "signin", "sign_in"]):
         return False
-    return "curl " in lowered and not any(method in lowered for method in ["post", "put", "patch", "delete"])
+    if "curl " in lowered and not any(method in lowered for method in ["post", "put", "patch", "delete"]):
+        return True
+    return _is_read_only_local_shell_command(command)
+
+
+def _is_read_only_local_shell_command(command: str) -> bool:
+    normalized = re.sub(r"\s*2>\s*/dev/null", "", command).strip()
+    if not normalized:
+        return False
+    lowered = normalized.lower()
+    if re.search(r"(^|[;&|]\s*)(sudo|rm|mv|cp|chmod|chown|mkdir|touch|tee|python\s+-c|python3\s+-c|node\s+-e)\b", lowered):
+        return False
+    if re.search(r"(^|[^0-9])>>?", normalized):
+        return False
+    parts = [part.strip() for part in re.split(r"\s*(?:&&|\|\||;|\|)\s*", normalized) if part.strip()]
+    if not parts:
+        return False
+    allowed_commands = {"cat", "echo", "ls", "find", "grep", "rg", "head", "tail", "pwd", "wc", "jq"}
+    for part in parts:
+        try:
+            tokens = shlex.split(part)
+        except ValueError:
+            return False
+        if not tokens:
+            return False
+        executable = Path(tokens[0]).name.lower()
+        if executable in allowed_commands:
+            continue
+        if executable in {"python", "python3"} and tokens[1:4] == ["-m", "json.tool"]:
+            continue
+        if executable == "sed" and len(tokens) > 1 and tokens[1] == "-n":
+            continue
+        return False
+    return True
 
 
 def _summarize_permission_operation(tool_name: str, tool_input: dict[str, Any], context: Any) -> str:

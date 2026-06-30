@@ -483,6 +483,30 @@ class ChatSessionTests(unittest.TestCase):
             request = urlopen.call_args.args[0]
             self.assertEqual(json.loads(request.data.decode("utf-8")), {"username": "admin", "password": "secret"})
 
+    def test_chat_asks_which_saved_account_to_use_before_generic_login(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            save_kit_runtime_state(
+                kit,
+                {
+                    "login_accounts": [
+                        {"id": "username:admin", "label": "admin", "credentials": {"username": "admin", "password": "secret"}},
+                        {"id": "username:staff", "label": "staff", "credentials": {"username": "staff", "password": "staff-secret"}},
+                    ],
+                    "selected_login_account": "username:staff",
+                },
+            )
+            runner = _FakeAgentRunner("should not run")
+            session = ChatSession(ChatConfig(kit_dir=kit, agent_runner=runner, memory_enabled=False))
+
+            response = session.process("登录")
+
+            self.assertEqual(response.status, "account_selection_required")
+            self.assertIn("admin", response.message)
+            self.assertIn("staff", response.message)
+            self.assertIn("其他账号", response.message)
+            self.assertEqual(runner.prompts, [])
+
     def test_selected_login_account_auth_headers_win_over_stale_session_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
@@ -808,6 +832,37 @@ class WebChatTests(unittest.TestCase):
         self.assertIn(b'data: {"text": "hi", "type": "assistant_text"}\n\n', fake.wfile.getvalue())
         self.assertEqual(fake.flushes, 1)
 
+    def test_handler_logs_terminal_server_sent_events_without_colliding_on_event_field(self):
+        handler_cls = build_handler(ChatConfig(kit_dir=Path("/tmp/kit"), memory_enabled=False))
+
+        class FakeHandler:
+            def __init__(self) -> None:
+                self.headers: list[tuple[str, str]] = []
+                self.wfile = BytesIO()
+                self.status = None
+
+            def send_response(self, status: int) -> None:
+                self.status = status
+
+            def send_header(self, key: str, value: str) -> None:
+                self.headers.append((key, value))
+
+            def end_headers(self) -> None:
+                return
+
+        fake = FakeHandler()
+        event = {
+            "type": "confirmation_required",
+            "message": "Authorization requested.",
+            "pending": {"id": "perm-1", "operation": "Check account state"},
+        }
+
+        handler_cls._send_sse(fake, [event])
+
+        self.assertEqual(fake.status, 200)
+        self.assertIn(b"event: confirmation_required\n", fake.wfile.getvalue())
+        self.assertIn(b'"operation": "Check account state"', fake.wfile.getvalue())
+
     def test_rendered_web_ui_blocks_duplicate_send_while_request_is_in_flight(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
@@ -816,7 +871,7 @@ class WebChatTests(unittest.TestCase):
             html = render_index(config, allow_kit_switch=False)
 
             self.assertIn("let sendInFlight = false", html)
-            self.assertIn("if (sendInFlight) return", html)
+            self.assertIn("if (sendInFlight || awaitingAuthorization) return", html)
             self.assertIn("setSending(true)", html)
             self.assertIn("setSending(false)", html)
             self.assertIn("els.send.disabled = sending", html)
@@ -829,6 +884,61 @@ class WebChatTests(unittest.TestCase):
             self.assertIn("setSending(false);", html[html.index("event.type === 'error'"):html.index("event.type === 'done'")])
             done_block = html[html.index("event.type === 'done'"):html.index("if (!sawDone")]
             self.assertIn("setSending(false);", done_block)
+
+    def test_rendered_web_ui_groups_and_deduplicates_agent_command_details(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("let commandSummaryNode = null", html)
+            self.assertIn("const key = String(command).trim()", html)
+            self.assertIn("renderedCommandKeys.has(key)", html)
+            self.assertIn("appendCommandSummary(event, assistantNode)", html)
+            self.assertIn("renderCommandDetails(node)", html)
+            self.assertIn("command-run-group", html)
+            self.assertIn("command-run-count", html)
+            self.assertIn("'Ran ' + entries.length + ' command'", html)
+            self.assertIn("entry.title", html)
+            self.assertNotIn("Authorization requested: ", html)
+
+    def test_rendered_web_ui_shows_send_button_while_waiting_for_authorization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("let awaitingAuthorization = false", html)
+            self.assertIn("function setAwaitingAuthorization(awaiting)", html)
+            self.assertIn("if (sendInFlight || awaitingAuthorization) return", html)
+            confirmation_block = html[html.index("event.type === 'confirmation_required'"):html.index("event.type === 'tool_use'")]
+            self.assertIn("setAwaitingAuthorization(true);", confirmation_block)
+            self.assertIn("setSending(false);", confirmation_block)
+
+    def test_rendered_web_ui_aborts_stream_without_visible_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("const STREAM_VISIBLE_IDLE_TIMEOUT_MS = 20000", html)
+            self.assertIn("function startVisibleIdleTimer()", html)
+            self.assertIn("function markVisibleStreamProgress()", html)
+            self.assertIn("AI agent request timed out after 20 seconds without visible progress.", html)
+            self.assertIn("activeStreamController.abort()", html)
+            self.assertIn("markVisibleStreamProgress();", html[html.index("event.type === 'assistant_text'"):html.index("event.type === 'confirmation_required'")])
+
+    def test_rendered_web_ui_reports_incomplete_stream_after_partial_response(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("if (!sawDone) addMessage('assistant', 'Request ended before AgentBridge returned a response.');", html)
 
     def test_rendered_web_ui_resolves_pending_with_buttons_without_sending_chat_message(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -944,9 +1054,16 @@ class WebChatTests(unittest.TestCase):
             self.assertIn("els.loginAccount.addEventListener('change'", html)
             self.assertIn('id="saveLoginAccount"', html)
             self.assertIn('id="accountForm"', html)
+            self.assertIn('id="accountList"', html)
+            self.assertIn('id="accountEditor"', html)
+            self.assertIn("renderAccountList", html)
+            self.assertIn("openAccountEditor", html)
+            self.assertIn("deleteLoginAccount(account.id)", html)
+            self.assertIn("account-popover", html)
+            self.assertIn("accountForm.hidden = true", html)
             self.assertIn("/api/login-account", html)
             self.assertIn("save_login_account: els.saveLoginAccount.checked", html)
-            self.assertIn("deleteSelectedAccount", html)
+            self.assertIn("deleteLoginAccount", html)
 
     def test_rendered_web_ui_supports_clickable_tools_parameter_templates_and_usage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1100,6 +1217,7 @@ class WebChatTests(unittest.TestCase):
             state = json.loads(urllib.request.urlopen(base + "/api/state?login_account_id=username:editor").read().decode("utf-8"))
             self.assertEqual(state["runtime"]["selected_login_account"], "username:editor")
             self.assertEqual([account["label"] for account in state["runtime"]["login_accounts"]], ["admin", "editor"])
+            self.assertEqual([account["username"] for account in state["runtime"]["login_accounts"]], ["admin", "editor"])
             self.assertNotIn("credentials", state["runtime"]["login_accounts"][0])
             self.assertNotIn("password", json.dumps(state["runtime"]))
             self.assertEqual(load_kit_runtime_state(kit)["selected_login_account"], "username:editor")

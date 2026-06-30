@@ -451,6 +451,258 @@ class AgentProgressTests(unittest.TestCase):
         self.assertEqual([message.result for message in messages], ["allowed"])
         self.assertIsInstance(callback_result["result"], FakePermissionResultAllow)
 
+    def test_agent_runner_stream_messages_times_out_when_sdk_stream_goes_idle(self):
+        release_stream = threading.Event()
+        interrupted = threading.Event()
+
+        class FakeResultMessage:
+            content = []
+
+            def __init__(self, result: str) -> None:
+                self.result = result
+
+        class FakeClaudeAgentOptions:
+            last_kwargs: dict[str, object] | None = None
+
+            def __init__(self, **kwargs: object) -> None:
+                FakeClaudeAgentOptions.last_kwargs = kwargs
+
+        class FakeClaudeSDKClient:
+            def __init__(self, options: object) -> None:
+                self.options = options
+
+            async def connect(self) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                release_stream.set()
+
+            async def interrupt(self) -> None:
+                interrupted.set()
+                release_stream.set()
+
+            async def query(self, _prompt: str, session_id: str = "__not_passed__") -> None:
+                pass
+
+            async def receive_response(self):
+                yield FakeResultMessage("first")
+                await asyncio.to_thread(release_stream.wait)
+
+        def fake_tool(_name: str, _description: str, _param_types: dict[str, type]):
+            def decorate(handler):
+                return handler
+
+            return decorate
+
+        fake_module = types.ModuleType("claude_agent_sdk")
+        fake_module.ClaudeAgentOptions = FakeClaudeAgentOptions
+        fake_module.ClaudeSDKClient = FakeClaudeSDKClient
+        fake_module.create_sdk_mcp_server = lambda **kwargs: kwargs
+        fake_module.tool = fake_tool
+
+        from agentbridge.agent import AgentRunner
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"claude_agent_sdk": fake_module}):
+            kit = Path(tmp) / "kit"
+            kit.mkdir()
+            (kit / "capabilities.json").write_text("[]", encoding="utf-8")
+            (kit / "guardrails").mkdir()
+            (kit / "guardrails" / "permissions.json").write_text(json.dumps({"tools": {}}), encoding="utf-8")
+
+            runner = AgentRunner(kit, api_key="sk-test", session_id="web-session", llm_timeout=0.05)
+            stream = runner.stream_messages("hello")
+            self.assertEqual(next(stream).result, "first")
+            with self.assertRaisesRegex(TimeoutError, "stream produced no events"):
+                next(stream)
+            runner.close()
+
+        self.assertTrue(interrupted.is_set())
+
+    def test_agent_runner_stream_messages_ignores_nonvisible_sdk_stream_events_for_idle_timeout(self):
+        release_stream = threading.Event()
+        interrupted = threading.Event()
+
+        class FakeClaudeAgentOptions:
+            last_kwargs: dict[str, object] | None = None
+
+            def __init__(self, **kwargs: object) -> None:
+                FakeClaudeAgentOptions.last_kwargs = kwargs
+
+        class FakeClaudeSDKClient:
+            def __init__(self, options: object) -> None:
+                self.options = options
+
+            async def connect(self) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                release_stream.set()
+
+            async def interrupt(self) -> None:
+                interrupted.set()
+                release_stream.set()
+
+            async def query(self, _prompt: str, session_id: str = "__not_passed__") -> None:
+                pass
+
+            async def receive_response(self):
+                for _ in range(5):
+                    yield {"type": "stream_event", "event": {"type": "message_delta"}}
+                    await asyncio.sleep(0.01)
+                await asyncio.to_thread(release_stream.wait)
+
+        def fake_tool(_name: str, _description: str, _param_types: dict[str, type]):
+            def decorate(handler):
+                return handler
+
+            return decorate
+
+        fake_module = types.ModuleType("claude_agent_sdk")
+        fake_module.ClaudeAgentOptions = FakeClaudeAgentOptions
+        fake_module.ClaudeSDKClient = FakeClaudeSDKClient
+        fake_module.create_sdk_mcp_server = lambda **kwargs: kwargs
+        fake_module.tool = fake_tool
+
+        from agentbridge.agent import AgentRunner
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"claude_agent_sdk": fake_module}):
+            kit = Path(tmp) / "kit"
+            kit.mkdir()
+            (kit / "capabilities.json").write_text("[]", encoding="utf-8")
+            (kit / "guardrails").mkdir()
+            (kit / "guardrails" / "permissions.json").write_text(json.dumps({"tools": {}}), encoding="utf-8")
+
+            runner = AgentRunner(kit, api_key="sk-test", session_id="web-session", llm_timeout=0.05)
+            stream = runner.stream_messages("hello")
+            with self.assertRaisesRegex(TimeoutError, "stream produced no events"):
+                next(stream)
+            runner.close()
+
+        self.assertTrue(interrupted.is_set())
+
+    def test_agent_runner_does_not_idle_timeout_while_waiting_for_permission(self):
+        class FakeResultMessage:
+            content = []
+            usage = {}
+
+            def __init__(self, result: str) -> None:
+                self.result = result
+
+        class FakeClaudeAgentOptions:
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+
+        class FakeClaudeSDKClient:
+            def __init__(self, options: FakeClaudeAgentOptions) -> None:
+                self.options = options
+
+            async def connect(self) -> None:
+                pass
+
+            async def disconnect(self) -> None:
+                pass
+
+            async def interrupt(self) -> None:
+                pass
+
+            async def query(self, _prompt: str, session_id: str = "__not_passed__") -> None:
+                pass
+
+            async def receive_response(self):
+                can_use_tool = self.options.kwargs["can_use_tool"]
+                context = types.SimpleNamespace(
+                    title="Authorize Bash",
+                    display_name="Bash",
+                    description="Check Claude settings for saved accounts",
+                    tool_use_id="tool-1",
+                )
+                await can_use_tool(
+                    "Bash",
+                    {"command": "rm /tmp/agentbridge-permission-test"},
+                    context,
+                )
+                yield FakeResultMessage("permission resolved")
+
+        def fake_tool(_name: str, _description: str, _param_types: dict[str, type]):
+            def decorate(handler):
+                return handler
+
+            return decorate
+
+        fake_module = types.ModuleType("claude_agent_sdk")
+        fake_module.ClaudeAgentOptions = FakeClaudeAgentOptions
+        fake_module.ClaudeSDKClient = FakeClaudeSDKClient
+        fake_module.create_sdk_mcp_server = lambda **kwargs: kwargs
+        fake_module.tool = fake_tool
+        fake_module.PermissionResultAllow = lambda: types.SimpleNamespace(allowed=True)
+        fake_module.PermissionResultDeny = lambda message="": types.SimpleNamespace(allowed=False, message=message)
+
+        from agentbridge.agent import AgentRunner
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(sys.modules, {"claude_agent_sdk": fake_module}):
+            kit = Path(tmp) / "kit"
+            kit.mkdir()
+            (kit / "capabilities.json").write_text("[]", encoding="utf-8")
+            (kit / "guardrails").mkdir()
+            (kit / "guardrails" / "permissions.json").write_text(json.dumps({"tools": {}}), encoding="utf-8")
+
+            runner = AgentRunner(kit, api_key="sk-test", session_id="web-session", llm_timeout=0.05)
+            stream = runner.stream_messages("hello")
+            pending = next(stream)
+            self.assertEqual(pending["type"], "agent_permission_required")
+
+            result: list[object] = []
+            errors: list[BaseException] = []
+
+            def read_next() -> None:
+                try:
+                    result.append(next(stream))
+                except BaseException as exc:
+                    errors.append(exc)
+
+            worker = threading.Thread(target=read_next)
+            worker.start()
+            worker.join(timeout=0.2)
+            self.assertTrue(worker.is_alive())
+            self.assertEqual(errors, [])
+
+            self.assertTrue(runner.resolve_permission(pending["pending"]["id"], True))
+            worker.join(timeout=2)
+            runner.close()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(getattr(result[0], "result"), "permission resolved")
+
+    def test_agent_runner_treats_local_read_only_bash_commands_as_read_only(self):
+        from agentbridge.agent import _is_read_only_permission_request
+
+        self.assertTrue(
+            _is_read_only_permission_request(
+                "Bash",
+                {
+                    "command": 'find ~/.claude -name "*.json" -path "*account*" -o -name "*.json" -path "*auth*" 2>/dev/null; ls -la ~/.claude/ 2>/dev/null | head -20'
+                },
+            )
+        )
+        self.assertTrue(
+            _is_read_only_permission_request(
+                "Bash",
+                {"command": "cat ~/.claude/settings.local.json 2>/dev/null"},
+            )
+        )
+        self.assertTrue(
+            _is_read_only_permission_request(
+                "Bash",
+                {"command": 'cat ~/.claude/settings.json 2>/dev/null || echo "No settings.json found"'},
+            )
+        )
+        self.assertFalse(
+            _is_read_only_permission_request(
+                "Bash",
+                {"command": "cat ~/.claude/settings.local.json > /tmp/settings-copy.json"},
+            )
+        )
+
     def test_agent_runner_uses_fresh_sdk_session_for_each_runner(self):
         from agentbridge.agent import AgentRunner, _agent_sdk_session_id
 

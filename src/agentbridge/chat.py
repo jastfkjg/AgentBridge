@@ -260,6 +260,9 @@ class ChatSession:
             return self._reply("cancelled", "Pending operation cleared.")
         if lowered.startswith("confirm") or lowered == "/confirm":
             return self.confirm()
+        account_selection_message = self._saved_account_selection_message(text)
+        if account_selection_message:
+            return self._reply("account_selection_required", account_selection_message)
 
         parsed = parse_tool_request(text, self.capabilities)
         if not parsed:
@@ -277,6 +280,12 @@ class ChatSession:
             return
         lowered = text.lower()
         parsed = parse_tool_request(text, self.capabilities)
+        account_selection_message = self._saved_account_selection_message(text)
+        if account_selection_message:
+            self._remember("user", text)
+            response = self._reply("account_selection_required", account_selection_message)
+            yield from self._events_from_response(response)
+            return
         should_stream_agent = (
             not parsed
             and not text.startswith("/")
@@ -474,6 +483,29 @@ class ChatSession:
             if is_login_tool(name, capability):
                 return name
         return ""
+
+    def _saved_account_selection_message(self, text: str) -> str:
+        if not _is_generic_login_request(text):
+            return ""
+        state = normalize_login_account_state(self.runtime_state)
+        accounts = state.get("login_accounts", [])
+        if len(accounts) < 2:
+            return ""
+        lowered = text.casefold()
+        for account in accounts:
+            label = str(account.get("label") or "")
+            credentials = account.get("credentials", {}) if isinstance(account, dict) else {}
+            username = str(credentials.get("username") or credentials.get("user") or credentials.get("email") or "")
+            if (label and label.casefold() in lowered) or (username and username.casefold() in lowered):
+                return ""
+        lines = ["请选择要用于登录的已保存账号，或提供其他账号："]
+        for account in accounts:
+            label = str(account.get("label") or "Saved account")
+            credentials = account.get("credentials", {}) if isinstance(account, dict) else {}
+            username = str(credentials.get("username") or credentials.get("user") or credentials.get("email") or label)
+            lines.append(f"- {label} ({username})")
+        lines.append("- 其他账号：直接发送 username / password")
+        return "\n".join(lines)
 
     def _agent_reply(self, text: str) -> ChatResponse:
         if not self.config.agent_enabled:
@@ -1088,7 +1120,25 @@ def normalize_login_account_state(state: dict[str, Any]) -> dict[str, Any]:
 
 def public_login_accounts(state: dict[str, Any]) -> list[dict[str, str]]:
     normalized = normalize_login_account_state(state)
-    return [{"id": str(account["id"]), "label": str(account["label"])} for account in normalized.get("login_accounts", [])]
+    public_accounts: list[dict[str, str]] = []
+    for account in normalized.get("login_accounts", []):
+        credentials = account.get("credentials", {}) if isinstance(account, dict) else {}
+        public_accounts.append(
+            {
+                "id": str(account["id"]),
+                "label": str(account["label"]),
+                "username": _public_login_username(credentials if isinstance(credentials, dict) else {}),
+            }
+        )
+    return public_accounts
+
+
+def _public_login_username(credentials: dict[str, Any]) -> str:
+    for key in USERNAME_KEYS:
+        value = credentials.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return ""
 
 
 def selected_login_account(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -1179,6 +1229,30 @@ def login_account_label(credentials: dict[str, Any]) -> str:
         if value not in (None, ""):
             return str(value)
     return "Saved account"
+
+
+def _is_generic_login_request(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", text.strip().casefold())
+    if not normalized:
+        return False
+    if "/" in normalized or "password" in normalized or "密码" in normalized:
+        return False
+    exact = {
+        "login",
+        "log in",
+        "signin",
+        "sign in",
+        "登录",
+        "登陆",
+        "重新登录",
+        "重新登陆",
+        "切换账号",
+        "换个账号",
+        "换个账号登录",
+    }
+    if normalized in exact:
+        return True
+    return ("登录" in normalized or "登陆" in normalized or "login" in normalized) and len(normalized) <= 16
 
 
 def is_login_tool(tool_name: str, capability: dict[str, Any]) -> bool:

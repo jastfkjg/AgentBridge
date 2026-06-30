@@ -414,7 +414,7 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                     pending = payload.get("pending") if isinstance(payload.get("pending"), dict) else {}
                     web_log(
                         "sse_event",
-                        event=event_type,
+                        sse_type=event_type,
                         status=payload.get("status"),
                         permission_id=pending.get("id") if isinstance(pending, dict) else "",
                         operation=pending.get("operation") if isinstance(pending, dict) else "",
@@ -1180,45 +1180,169 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       font-size: 12px;
       font-variant-numeric: tabular-nums;
     }}
-    .save-login-toggle {{
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      width: auto;
-      margin: 0;
-      color: var(--muted);
-      font-size: 12px;
-      text-transform: none;
-      white-space: nowrap;
-    }}
-    .save-login-toggle input {{
-      width: auto;
-      margin: 0;
-    }}
     .account-manager {{
       margin-top: 18px;
       padding-top: 14px;
       border-top: 1px solid var(--line);
     }}
-    .command-disclosure {{
+    .drawer-pane[data-pane="accounts"] .account-manager {{
+      margin-top: 0;
+      padding-top: 0;
+      border-top: 0;
+    }}
+    .account-toolbar {{
+      margin-top: 14px;
+    }}
+    .account-toolbar button {{
+      min-height: 34px;
+      padding: 7px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+    }}
+    .account-list {{
+      margin-top: 12px;
+      display: grid;
+      gap: 6px;
+    }}
+    .account-row {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 34px;
+      align-items: start;
+      gap: 4px;
+      border-radius: 10px;
+      position: relative;
+    }}
+    .account-card {{
+      width: 100%;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--ink);
+      text-align: left;
+      padding: 8px 9px;
+    }}
+    .account-card:hover, .account-card.active {{
+      background: #e5ebe7;
+      transform: none;
+    }}
+    .account-card strong {{
+      display: block;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }}
+    .account-card .subtle {{
+      display: block;
+      margin-top: 1px;
+      overflow-wrap: anywhere;
+    }}
+    .account-menu {{
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border-radius: 9px;
+      background: transparent;
+      color: var(--muted);
+    }}
+    .account-menu:hover {{
+      background: #e8eee9;
+      color: var(--ink);
+      transform: none;
+    }}
+    .account-popover {{
+      position: absolute;
+      right: 0;
+      top: 34px;
+      z-index: 4;
+      min-width: 132px;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      box-shadow: 0 14px 30px rgba(22,30,25,.16);
+    }}
+    .account-popover[hidden] {{
+      display: none;
+    }}
+    .account-popover button {{
+      width: 100%;
+      display: block;
+      padding: 8px 9px;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--ink);
+      text-align: left;
+      font-size: 13px;
+    }}
+    .account-popover button:hover {{
+      background: #eef3f0;
+      transform: none;
+    }}
+    .account-popover button.danger-text {{
+      color: var(--danger);
+    }}
+    .account-editor {{
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+    }}
+    .account-editor[hidden] {{
+      display: none;
+    }}
+    .command-run-group {{
       margin-top: 8px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: #fbfbf8;
-      padding: 7px 8px;
+      padding: 0;
     }}
-    .command-disclosure summary {{
+    .command-run-group summary {{
       cursor: pointer;
       color: var(--muted);
       font-size: 12px;
       font-weight: 650;
+      list-style: none;
+      padding: 7px 8px;
     }}
-    .command-disclosure pre {{
+    .command-run-group summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .command-run-count {{
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }}
+    .command-run-count::before {{
+      content: "▸";
+      color: #8b928d;
+      font-size: 11px;
+    }}
+    .command-run-group[open] .command-run-count::before {{
+      content: "▾";
+    }}
+    .command-run-list {{
+      display: grid;
+      gap: 8px;
+      padding: 0 8px 8px;
+    }}
+    .command-run-item {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 8px;
+    }}
+    .command-run-title {{
+      margin-bottom: 6px;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 650;
+      overflow-wrap: anywhere;
+    }}
+    .command-run-item pre {{
       max-height: 160px;
       overflow: auto;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
-      margin: 8px 0 0;
+      margin: 0;
       font-size: 12px;
     }}
     .actions {{
@@ -1347,6 +1471,10 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       align-items: center;
       gap: 7px;
       min-width: 0;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #f7f8f5;
     }}
     .runtime-target[hidden] {{
       display: none;
@@ -1359,6 +1487,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       padding: 7px 9px;
       border-radius: 8px;
       font-size: 13px;
+      background: #fff;
     }}
     .login-account-select {{
       width: min(20vw, 180px);
@@ -1370,7 +1499,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       font-size: 13px;
     }}
     .connection-button {{
-      min-width: 92px;
+      min-width: 86px;
       height: 36px;
       padding: 7px 10px;
       border-radius: 8px;
@@ -1384,12 +1513,16 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       background: #dbe4de;
     }}
     .connection-status {{
-      max-width: 220px;
+      width: 24px;
+      height: 24px;
+      display: inline-grid;
+      place-items: center;
+      flex: 0 0 24px;
       color: var(--muted);
-      font-size: 12px;
+      font-size: 17px;
+      font-weight: 800;
       overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      line-height: 1;
     }}
     .connection-status.success {{
       color: #08705a;
@@ -1668,6 +1801,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       }}
       .runtime-target {{
         width: 100%;
+        flex-wrap: wrap;
       }}
       .runtime-target input {{
         width: 100%;
@@ -1675,8 +1809,8 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         flex: 1;
       }}
       .connection-status {{
-        width: 100%;
-        max-width: none;
+        width: 24px;
+        max-width: 24px;
         padding-left: 2px;
       }}
       .messages, .message-stream {{
@@ -1781,10 +1915,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
             <select class="login-account-select" id="loginAccount" aria-label="Saved login account">
               <option value="">No saved account</option>
             </select>
-            <label class="save-login-toggle" title="Store login credentials in this local kit runtime state">
-              <input id="saveLoginAccount" type="checkbox" checked>
-              Save login
-            </label>
+            <input id="saveLoginAccount" type="checkbox" checked hidden>
             <button class="connection-button" id="manageAccountsBtn" type="button">Accounts</button>
             <button class="connection-button" id="testConnectionBtn" type="button">Test connection</button>
             <span class="connection-status" id="connectionStatus" aria-live="polite"></span>
@@ -1866,10 +1997,17 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
           <label for="kit">Kit</label>
           <input id="kit" value="{escape_attr(kit)}" {"disabled" if not allow_kit_switch else ""}>
           <div class="field-help">{kit_help}</div>
-          <div class="account-manager">
+        </section>
+        <section class="drawer-pane" data-pane="accounts">
+          <div class="account-manager" id="accountManager">
             <strong>Saved accounts</strong>
-            <div class="field-help">Add, edit, or remove login credentials stored in this kit runtime state.</div>
-            <form id="accountForm">
+            <div class="field-help">Choose a saved login, edit it, delete it, or add another account.</div>
+            <div class="account-toolbar">
+              <button id="newAccountFormBtn" type="button">New account</button>
+            </div>
+            <div class="account-list" id="accountList"></div>
+            <form class="account-editor" id="accountForm" hidden>
+              <strong id="accountEditor">New account</strong>
               <label for="accountLabel">Label</label>
               <input id="accountLabel" autocomplete="off" placeholder="Admin">
               <label for="accountUsername">Username</label>
@@ -1878,8 +2016,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
               <input id="accountPassword" type="password" autocomplete="current-password" placeholder="Leave blank to keep current password">
               <div class="account-actions">
                 <button id="saveAccountBtn" type="submit">Save account</button>
-                <button class="secondary" id="newAccountFormBtn" type="button">Add account</button>
-                <button class="secondary" id="deleteAccountBtn" type="button">Delete selected</button>
+                <button class="secondary" id="cancelAccountEditBtn" type="button">Cancel</button>
               </div>
             </form>
           </div>
@@ -1935,12 +2072,15 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       loginAccount: document.getElementById('loginAccount'),
       saveLoginAccount: document.getElementById('saveLoginAccount'),
       manageAccounts: document.getElementById('manageAccountsBtn'),
+      accountList: document.getElementById('accountList'),
       accountForm: document.getElementById('accountForm'),
+      accountEditor: document.getElementById('accountEditor'),
       accountLabel: document.getElementById('accountLabel'),
       accountUsername: document.getElementById('accountUsername'),
       accountPassword: document.getElementById('accountPassword'),
+      saveAccount: document.getElementById('saveAccountBtn'),
       newAccountForm: document.getElementById('newAccountFormBtn'),
-      deleteAccount: document.getElementById('deleteAccountBtn'),
+      cancelAccountEdit: document.getElementById('cancelAccountEditBtn'),
       drawerNewChat: document.getElementById('drawerNewChatBtn'),
       testConnection: document.getElementById('testConnectionBtn'),
       connectionStatus: document.getElementById('connectionStatus'),
@@ -1954,10 +2094,16 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     let loginAccountsCache = [];
     let attachments = [];
     let sendInFlight = false;
+    let awaitingAuthorization = false;
     let activeStreamController = null;
+    let visibleIdleTimer = null;
     let runtimeExecute = initialExecuteMode;
     let currentPending = null;
+    let editingAccountId = '';
+    let commandSummaryNode = null;
     const renderedCommandKeys = new Set();
+    const commandDetailsByNode = new WeakMap();
+    const STREAM_VISIBLE_IDLE_TIMEOUT_MS = 20000;
     const markdownRenderer = window.markdownit ? window.markdownit({{
       html: false,
       linkify: true,
@@ -1972,6 +2118,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     const drawerTitles = {{
       conversations: 'Recent conversations',
       context: 'Chat context',
+      accounts: 'Saved accounts',
       tools: 'Available tools',
       usage: 'AI usage'
     }};
@@ -2000,8 +2147,10 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       return qs;
     }}
     function setConnectionStatus(message = '', state = '') {{
-      els.connectionStatus.textContent = message;
+      els.connectionStatus.textContent = state === 'success' ? '✓' : (state === 'error' ? '×' : '');
       els.connectionStatus.className = 'connection-status' + (state ? ' ' + state : '');
+      els.connectionStatus.title = message;
+      els.connectionStatus.setAttribute('aria-label', message || 'Connection status');
     }}
     function validRuntimeBaseUrl(showError = true) {{
       if (!runtimeExecute) return true;
@@ -2034,7 +2183,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     async function testConnectivity() {{
       if (!validRuntimeBaseUrl(true)) return;
       els.testConnection.disabled = true;
-      setConnectionStatus('Testing...');
+      setConnectionStatus();
       try {{
         const data = await post('/api/connectivity', {{ base_url: els.baseUrl.value.trim() }});
         if (data.error) {{
@@ -2123,6 +2272,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     function updateAssistantMessage(node, text) {{
       const bubble = node.querySelector('.bubble');
       bubble.replaceChildren(renderMarkdown(text));
+      renderCommandDetails(node);
       els.messages.scrollTop = els.messages.scrollHeight;
     }}
     function humanizeIdentifier(value) {{
@@ -2135,7 +2285,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       if (pending.kind === 'agent_permission') {{
         return summarizeCommand((pending.input || {{}}).command || '') || humanizeIdentifier(pending.display_name || pending.tool || pending.title);
       }}
-      return humanizeIdentifier(pending.tool || 'System operation');
+      return humanizeIdentifier(pending.display_name || pending.name || pending.tool || 'System operation');
     }}
     function summarizeCommand(command) {{
       const text = String(command || '');
@@ -2166,30 +2316,56 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       if (event.input) return event.input.command || event.input.pattern || event.input.path || '';
       return '';
     }}
-    function addCommandSummaryMessage(event) {{
-      const command = commandFromEvent(event);
-      if (!command) return;
-      const pending = event.pending || {{}};
-      const key = (pending.id || event.id || '') + ':' + command;
-      if (renderedCommandKeys.has(key)) return;
-      renderedCommandKeys.add(key);
-      const node = addMessage('assistant', '');
+    function commandTitle(event, command) {{
+      const summary = summarizeCommand(command);
+      if (summary) return summary;
+      const pending = event.pending || event || {{}};
+      return pendingOperation(pending) || summarizeCommand(command) || 'Command';
+    }}
+    function renderCommandDetails(node) {{
+      const entries = commandDetailsByNode.get(node) || [];
+      if (!entries.length) return;
       const bubble = node.querySelector('.bubble');
-      const title = pendingOperation(pending) || summarizeCommand(command);
-      bubble.replaceChildren();
-      const summary = document.createElement('p');
-      summary.textContent = 'Authorization requested: ' + title;
+      bubble.querySelectorAll('.command-run-group').forEach(detail => detail.remove());
       const details = document.createElement('details');
-      details.className = 'command-disclosure';
+      details.className = 'command-run-group';
       const detailsSummary = document.createElement('summary');
-      detailsSummary.textContent = 'Command details';
-      const pre = document.createElement('pre');
-      pre.textContent = command;
+      const count = document.createElement('span');
+      count.className = 'command-run-count';
+      count.textContent = 'Ran ' + entries.length + ' command' + (entries.length === 1 ? '' : 's');
+      detailsSummary.appendChild(count);
       details.appendChild(detailsSummary);
-      details.appendChild(pre);
-      bubble.appendChild(summary);
+      const list = document.createElement('div');
+      list.className = 'command-run-list';
+      entries.forEach((entry, index) => {{
+        const item = document.createElement('div');
+        item.className = 'command-run-item';
+        const title = document.createElement('div');
+        title.className = 'command-run-title';
+        title.textContent = (index + 1) + '. ' + (entry.title || 'Command');
+        const pre = document.createElement('pre');
+        pre.textContent = entry.command;
+        item.appendChild(title);
+        item.appendChild(pre);
+        list.appendChild(item);
+      }});
+      details.appendChild(list);
       bubble.appendChild(details);
+    }}
+    function appendCommandSummary(event, targetNode = null) {{
+      const command = commandFromEvent(event);
+      if (!command) return targetNode;
+      const key = String(command).trim();
+      if (renderedCommandKeys.has(key)) return targetNode || commandSummaryNode;
+      renderedCommandKeys.add(key);
+      const node = targetNode || commandSummaryNode || addMessage('assistant', '');
+      if (!targetNode) commandSummaryNode = node;
+      const entries = commandDetailsByNode.get(node) || [];
+      entries.push({{ title: commandTitle(event, command), command }});
+      commandDetailsByNode.set(node, entries);
+      renderCommandDetails(node);
       els.messages.scrollTop = els.messages.scrollHeight;
+      return node;
     }}
     function setDrawer(name, open = true) {{
       document.querySelectorAll('.drawer-pane').forEach(pane => {{
@@ -2206,6 +2382,9 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       els.contextDrawer.classList.remove('open');
       els.drawerBackdrop.classList.remove('show');
       document.querySelectorAll('[data-drawer]').forEach(button => button.classList.remove('active'));
+    }}
+    function openAccountManager() {{
+      setDrawer('accounts', true);
     }}
     async function post(url, body, timeoutMs = 0) {{
       const controller = timeoutMs ? new AbortController() : null;
@@ -2267,14 +2446,50 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       els.interrupt.hidden = !sending;
       els.send.setAttribute('aria-busy', sending ? 'true' : 'false');
     }}
+    function clearVisibleIdleTimer() {{
+      if (visibleIdleTimer) clearTimeout(visibleIdleTimer);
+      visibleIdleTimer = null;
+    }}
+    function startVisibleIdleTimer() {{
+      clearVisibleIdleTimer();
+      visibleIdleTimer = setTimeout(() => {{
+        if (!sendInFlight && !awaitingAuthorization) return;
+        if (activeStreamController) activeStreamController.abort();
+        addMessage('assistant', 'AI agent request timed out after 20 seconds without visible progress.');
+        setAwaitingAuthorization(false);
+        setSending(false);
+      }}, STREAM_VISIBLE_IDLE_TIMEOUT_MS);
+    }}
+    function markVisibleStreamProgress() {{
+      if (sendInFlight) startVisibleIdleTimer();
+    }}
+    function setAwaitingAuthorization(awaiting) {{
+      awaitingAuthorization = awaiting;
+      if (awaiting) {{
+        clearVisibleIdleTimer();
+        sendInFlight = false;
+        els.send.disabled = true;
+        els.send.hidden = false;
+        els.interrupt.hidden = true;
+        els.send.setAttribute('aria-busy', 'false');
+      }} else if (!sendInFlight) {{
+        els.send.disabled = false;
+        els.send.hidden = false;
+        els.interrupt.hidden = true;
+        els.send.setAttribute('aria-busy', 'false');
+      }}
+    }}
     async function sendMessage(text) {{
-      if (sendInFlight) return;
+      if (sendInFlight || awaitingAuthorization) return;
       if (!text.trim() && !attachments.length) return;
       if (!validRuntimeBaseUrl(true)) {{
         els.baseUrl.focus();
         return;
       }}
       try {{
+        setAwaitingAuthorization(false);
+        commandSummaryNode = null;
+        renderedCommandKeys.clear();
         addMessage('user', displayTextWithAttachments(text));
         const outgoingAttachments = attachments;
         els.message.value = '';
@@ -2282,6 +2497,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         renderAttachments();
         renderCommandMenu();
         setSending(true);
+        startVisibleIdleTimer();
         let assistantNode = null;
         let assistantText = '';
         let sawDone = false;
@@ -2298,42 +2514,62 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
             assistantText += event.text || '';
             if (!assistantNode) assistantNode = addMessage('assistant', '');
             updateAssistantMessage(assistantNode, assistantText);
+            markVisibleStreamProgress();
           }} else if (event.type === 'confirmation_required') {{
             renderPending(event.pending);
-            addCommandSummaryMessage(event);
+            assistantNode = appendCommandSummary(event, assistantNode) || assistantNode;
+            setSending(false);
+            setAwaitingAuthorization(true);
             if (event.message && !assistantNode && !commandFromEvent(event)) assistantNode = addMessage('assistant', event.message);
           }} else if (event.type === 'tool_use') {{
-            if (commandFromEvent(event)) addCommandSummaryMessage(event);
+            if (commandFromEvent(event)) {{
+              assistantNode = appendCommandSummary(event, assistantNode) || assistantNode;
+              markVisibleStreamProgress();
+            }}
           }} else if (event.type === 'tool_result' && event.message && !assistantNode) {{
             assistantNode = addMessage('assistant', event.message);
+            markVisibleStreamProgress();
           }} else if (event.type === 'tools') {{
             renderTools(event.tools || []);
-            if (event.message && !assistantNode) assistantNode = addMessage('assistant', event.message);
+            if (event.message && !assistantNode) {{
+              assistantNode = addMessage('assistant', event.message);
+              markVisibleStreamProgress();
+            }}
           }} else if (event.type === 'usage') {{
             renderUsage(event.usage || {{}});
           }} else if (event.type === 'error') {{
+            clearVisibleIdleTimer();
             addMessage('assistant', event.message || 'Request failed.');
+            sawDone = true;
+            setAwaitingAuthorization(false);
             setSending(false);
           }} else if (event.type === 'interrupted') {{
+            clearVisibleIdleTimer();
             addMessage('assistant', event.message || 'Current Agent request interrupted.');
+            sawDone = true;
+            setAwaitingAuthorization(false);
             setSending(false);
           }} else if (event.type === 'done') {{
+            clearVisibleIdleTimer();
             sawDone = true;
             if (event.pending) renderPending(event.pending);
             if (event.usage) renderUsage(event.usage);
             if (event.tools && event.tools.length) renderTools(event.tools);
             if (event.conversations) renderConversations(event.conversations);
             if (!assistantText && event.message && !assistantNode) assistantNode = addMessage('assistant', event.message);
+            setAwaitingAuthorization(false);
             setSending(false);
           }}
         }});
-        if (!sawDone && !assistantNode) addMessage('assistant', 'Request ended before AgentBridge returned a response.');
+        if (!sawDone) addMessage('assistant', 'Request ended before AgentBridge returned a response.');
       }} catch (error) {{
         if (!(error && error.name === 'AbortError')) {{
           addMessage('assistant', 'Request failed: ' + (error && error.message ? error.message : error));
         }}
       }} finally {{
         activeStreamController = null;
+        clearVisibleIdleTimer();
+        setAwaitingAuthorization(false);
         setSending(false);
       }}
     }}
@@ -2345,7 +2581,9 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         // The in-flight stream may already be closing.
       }}
       if (activeStreamController) activeStreamController.abort();
+      clearVisibleIdleTimer();
       addMessage('assistant', 'Current Agent request interrupted.');
+      setAwaitingAuthorization(false);
       setSending(false);
     }}
     function renderChatResponse(data) {{
@@ -2472,21 +2710,101 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       }}
       els.loginAccount.disabled = accounts.length === 0;
       els.loginAccount.title = accounts.length ? 'Saved account for login tools' : 'Run a login tool once to save an account';
-      fillAccountForm();
+      renderAccountList();
+      if (editingAccountId && !accounts.some(account => account.id === editingAccountId)) closeAccountEditor();
     }}
     function selectedAccount() {{
       return loginAccountsCache.find(account => account.id === selectedLoginAccountId()) || null;
     }}
-    function fillAccountForm(clear = false) {{
-      const account = clear ? null : selectedAccount();
+    function renderAccountList() {{
+      els.accountList.innerHTML = '';
+      if (!loginAccountsCache.length) {{
+        const empty = document.createElement('div');
+        empty.className = 'subtle';
+        empty.textContent = 'No saved accounts.';
+        els.accountList.appendChild(empty);
+        return;
+      }}
+      loginAccountsCache.forEach(account => {{
+        const row = document.createElement('div');
+        row.className = 'account-row';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'account-card' + (account.id === selectedLoginAccountId() ? ' active' : '');
+        button.innerHTML = '<strong></strong><span class="subtle"></span>';
+        button.querySelector('strong').textContent = account.label || account.id || 'Saved account';
+        button.querySelector('.subtle').textContent = account.username || account.id || '';
+        button.onclick = () => selectLoginAccount(account.id);
+        const menu = document.createElement('button');
+        menu.type = 'button';
+        menu.className = 'account-menu';
+        menu.title = 'Account actions';
+        menu.textContent = '...';
+        const popover = document.createElement('div');
+        popover.className = 'account-popover';
+        popover.hidden = true;
+        const editButton = document.createElement('button');
+        editButton.type = 'button';
+        editButton.textContent = 'Edit';
+        const deleteButton = document.createElement('button');
+        deleteButton.type = 'button';
+        deleteButton.className = 'danger-text';
+        deleteButton.textContent = 'Delete';
+        popover.appendChild(editButton);
+        popover.appendChild(deleteButton);
+        menu.onclick = (event) => {{
+          event.stopPropagation();
+          document.querySelectorAll('.account-popover').forEach(node => {{
+            if (node !== popover) node.hidden = true;
+          }});
+          popover.hidden = !popover.hidden;
+        }};
+        editButton.onclick = (event) => {{
+          event.stopPropagation();
+          popover.hidden = true;
+          openAccountEditor(account);
+        }};
+        deleteButton.onclick = (event) => {{
+          event.stopPropagation();
+          popover.hidden = true;
+          deleteLoginAccount(account.id);
+        }};
+        row.appendChild(button);
+        row.appendChild(menu);
+        row.appendChild(popover);
+        els.accountList.appendChild(row);
+      }});
+    }}
+    async function selectLoginAccount(accountId) {{
+      if (!accountId) return;
+      els.loginAccount.value = accountId;
+      const data = await post('/api/login-account', payload({{ action: 'select', account_id: accountId }}));
+      if (data.runtime) {{
+        renderLoginAccounts(data.runtime.login_accounts || [], data.runtime.selected_login_account || '');
+        setConnectionStatus('Selected saved account.', 'success');
+      }}
+    }}
+    function openAccountEditor(account = null) {{
+      editingAccountId = account ? (account.id || '') : '';
+      els.accountForm.hidden = false;
+      els.accountEditor.textContent = account ? 'Edit account' : 'New account';
       els.accountLabel.value = account ? (account.label || '') : '';
-      els.accountUsername.value = account ? (account.label || '') : '';
+      els.accountUsername.value = account ? (account.username || account.label || '') : '';
+      els.accountPassword.value = '';
+      els.saveAccount.textContent = account ? 'Save changes' : 'Save new account';
+      els.accountUsername.focus();
+    }}
+    function closeAccountEditor() {{
+      editingAccountId = '';
+      els.accountForm.hidden = true;
+      els.accountLabel.value = '';
+      els.accountUsername.value = '';
       els.accountPassword.value = '';
     }}
     function accountPayload(action, extra = {{}}) {{
       return payload(Object.assign({{
         action,
-        account_id: selectedLoginAccountId(),
+        account_id: editingAccountId,
         label: els.accountLabel.value.trim(),
         username: els.accountUsername.value.trim(),
         password: els.accountPassword.value
@@ -2497,20 +2815,19 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       const data = await post('/api/login-account', accountPayload('upsert'));
       if (data.runtime) {{
         renderLoginAccounts(data.runtime.login_accounts || [], data.runtime.selected_login_account || '');
+        closeAccountEditor();
         setConnectionStatus('Saved account updated.', 'success');
       }}
     }}
     function newAccountForm() {{
-      els.loginAccount.value = '';
-      fillAccountForm(true);
-      els.accountUsername.focus();
+      openAccountEditor(null);
     }}
-    async function deleteSelectedAccount() {{
-      const accountId = selectedLoginAccountId();
+    async function deleteLoginAccount(accountId) {{
       if (!accountId) return;
       const data = await post('/api/login-account', payload({{ action: 'delete', account_id: accountId }}));
       if (data.runtime) {{
         renderLoginAccounts(data.runtime.login_accounts || [], data.runtime.selected_login_account || '');
+        if (editingAccountId === accountId) closeAccountEditor();
         setConnectionStatus('Saved account deleted.', 'success');
       }}
     }}
@@ -2736,17 +3053,16 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       button.addEventListener('click', () => applyRuntimeMode(button.dataset.mode));
     }});
     els.testConnection.onclick = testConnectivity;
-    els.manageAccounts.onclick = () => setDrawer('context', true);
+    els.manageAccounts.onclick = openAccountManager;
     els.accountForm.addEventListener('submit', saveAccountForm);
     els.newAccountForm.onclick = newAccountForm;
-    els.deleteAccount.onclick = deleteSelectedAccount;
+    els.cancelAccountEdit.onclick = closeAccountEditor;
     els.drawerNewChat.onclick = () => startNewChat(false);
     els.baseUrl.addEventListener('input', () => setConnectionStatus());
     els.baseUrl.addEventListener('change', () => {{
       if (runtimeExecute && validRuntimeBaseUrl(true)) loadState(true);
     }});
     els.loginAccount.addEventListener('change', () => {{
-      fillAccountForm();
       loadState(true);
     }});
     document.querySelectorAll('[data-drawer]').forEach(button => {{
