@@ -15,7 +15,7 @@ from agentbridge.discovery import CapabilityDiscoverer, dedupe_capabilities
 from agentbridge.io import write_json, write_text
 from agentbridge.models import Capability, IntegrationKit, KIT_PROTOCOL_VERSION
 from agentbridge.naming import humanize
-from agentbridge.policy import risk_reason
+from agentbridge.policy import default_policy, risk_reason, risk_requires_confirmation
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +119,7 @@ class AgentKitGenerator:
         self._progress(f"Analysis complete. Writing {len(capabilities)} capabilities to {output_dir}...")
 
         kit = IntegrationKit(name=kit_name, capabilities=capabilities, output_dir=str(output_dir))
+        preserved_user_files: dict[str, Any] = {"preserved": [], "generated_alternates": []}
         self._write_status(
             output_dir,
             "writing",
@@ -163,13 +164,17 @@ class AgentKitGenerator:
         }
         self._write_json(output_dir / "analysis" / "rule_signals.json", rule_signals)
         self._write_json(output_dir / "analysis" / "agent_analysis.json", ai_result.get("agent_analysis", {}))
+        self._write_text(output_dir / "analysis" / "report.md", build_analysis_report(capabilities, rule_signals, ai_result.get("agent_analysis", {})))
         self._write_text(output_dir / "spec" / "kit-protocol.md", build_kit_protocol_doc())
         self._write_json(output_dir / "tools" / "mcp_tools.json", build_mcp_tools(capabilities))
         self._write_json(output_dir / "tools" / "openai_tools.json", build_openai_tools(capabilities))
         self._write_json(output_dir / "tools" / "claude_tools.json", build_claude_tools(capabilities))
         self._write_text(output_dir / "tools" / "vercel_ai_tools.ts", build_vercel_tools(capabilities))
         self._write_json(output_dir / "resources" / "schema.json", build_resource_schema(capabilities))
-        self._write_json(output_dir / "guardrails" / "permissions.json", build_guardrails(capabilities))
+        self._write_json(
+            output_dir / "guardrails" / "permissions.json",
+            merge_preserved_guardrails(output_dir, build_guardrails(capabilities), preserved_user_files),
+        )
         self._write_json(output_dir / "tests" / "tool_invocation_tests.json", build_invocation_tests(capabilities))
         self._write_text(output_dir / "tests" / "test_generated_tools.py", build_generated_test_file())
         self._write_json(output_dir / "dry_run_plan.json", build_dry_run_plan(capabilities))
@@ -179,12 +184,25 @@ class AgentKitGenerator:
 
         system_prompt = ai_result.get("system_prompt", "")
         if system_prompt:
-            self._write_text(output_dir / "prompts" / "system.md", system_prompt)
+            self._write_preserving_user_file(
+                output_dir / "prompts" / "system.md",
+                system_prompt,
+                preserved_user_files,
+                generated_suffix=".generated.md",
+            )
 
         skills = ai_result.get("skills", {})
         for domain, content in skills.items():
             if content:
-                self._write_text(output_dir / "skills" / f"{domain}.md", content)
+                self._write_preserving_user_file(
+                    output_dir / "skills" / f"{domain}.md",
+                    content,
+                    preserved_user_files,
+                    generated_suffix=".generated.md",
+                )
+
+        if preserved_user_files["preserved"]:
+            self._write_json(output_dir / "analysis" / "preserved_user_files.json", preserved_user_files)
 
         self._write_status(
             output_dir,
@@ -866,7 +884,17 @@ class AgentKitGenerator:
 
         for result in batch_results:
             for raw_cap in result.get("enhanced_capabilities", []):
-                cap = raw_cap if isinstance(raw_cap, Capability) else Capability.from_dict(raw_cap)
+                try:
+                    cap = raw_cap if isinstance(raw_cap, Capability) else Capability.from_dict(raw_cap)
+                except (KeyError, TypeError, ValueError) as exc:
+                    analyses.append(
+                        {
+                            "assumptions": [
+                                f"Skipped invalid AI capability during normalization: {exc}"
+                            ]
+                        }
+                    )
+                    continue
                 if cap.name in capabilities_by_name:
                     capabilities_by_name[cap.name] = cap
                 elif cap.name not in extra_names:
@@ -1141,6 +1169,22 @@ class AgentKitGenerator:
         self._progress(f"Writing kit file: {path}")
         write_text(path, data)
 
+    def _write_preserving_user_file(
+        self,
+        path: Path,
+        data: str,
+        preserved_user_files: dict[str, Any],
+        generated_suffix: str,
+    ) -> None:
+        if path.exists():
+            rel = str(path.relative_to(path.parents[1]))
+            alternate = path.with_name(path.stem + generated_suffix)
+            preserved_user_files["preserved"].append(str(path.relative_to(path.parents[1])))
+            preserved_user_files["generated_alternates"].append(str(alternate.relative_to(path.parents[1])))
+            self._write_text(alternate, data)
+            return
+        self._write_text(path, data)
+
     def _analysis_heartbeat(
         self,
         stop_event: threading.Event,
@@ -1289,6 +1333,7 @@ Existing system evidence
 - `capabilities.json`: normalized business capabilities after AI agent analysis and enhancement.
 - `analysis/rule_signals.json`: deterministic scanner output used as candidate evidence.
 - `analysis/agent_analysis.json`: AI agent project analysis, assumptions, workflows, side effects, and risk reasoning.
+- `analysis/report.md`: human-readable summary of detected capabilities, risks, evidence, uncertainty, and clarifying questions.
 - `tools/mcp_tools.json`: MCP tool definitions.
 - `tools/openai_tools.json`: OpenAI function/tool definitions.
 - `tools/claude_tools.json`: Claude tool definitions.
@@ -1315,6 +1360,65 @@ Generated tools must not execute destructive or external-side-effect operations 
 
 AgentBridge must not modify the target project during discovery or generation. All generated artifacts are written under the caller-provided output directory. The output directory should be outside the scanned project unless it is an ignored integration directory such as `.agentbridge`.
 """
+
+
+def build_analysis_report(
+    capabilities: list[Capability],
+    rule_signals: dict[str, Any],
+    agent_analysis: dict[str, Any],
+) -> str:
+    risk_counts = Counter(cap.risk for cap in capabilities)
+    domain_counts = Counter(cap.domain for cap in capabilities)
+    uncertain = [
+        cap
+        for cap in capabilities
+        if cap.confidence < 0.75 or cap.source.kind in {"warning", "ai_inferred"}
+    ]
+    lines = [
+        "# AgentBridge Analysis Report",
+        "",
+        agent_analysis.get("summary", "Generated kit analysis summary.") if isinstance(agent_analysis, dict) else "Generated kit analysis summary.",
+        "",
+        "## Capability Summary",
+        "",
+        f"- Total capabilities: {len(capabilities)}",
+    ]
+    for domain, count in sorted(domain_counts.items()):
+        lines.append(f"- {domain}: {count}")
+    lines.extend(["", "## Risk Summary", ""])
+    for risk in ("read", "write", "destructive", "external_side_effect"):
+        lines.append(f"- {risk}: {risk_counts.get(risk, 0)}")
+    lines.extend(["", "## Evidence Summary", ""])
+    for cap in sorted(capabilities, key=lambda item: item.name):
+        evidence_count = len(cap.evidence)
+        source = cap.source.to_dict()
+        lines.append(
+            f"- `{cap.name}`: {cap.action} `{cap.resource}` from {source.get('kind')} "
+            f"at {source.get('location') or source.get('path')} "
+            f"(confidence {cap.confidence:.2f}, evidence {evidence_count})"
+        )
+    lines.extend(["", "## Uncertainty", ""])
+    if uncertain:
+        for cap in uncertain:
+            lines.append(f"- `{cap.name}` has confidence {cap.confidence:.2f} from {cap.source.kind}.")
+    else:
+        lines.append("- No low-confidence capabilities were generated.")
+    questions = []
+    if isinstance(agent_analysis, dict):
+        questions = [
+            str(item)
+            for item in agent_analysis.get("clarifying_questions", agent_analysis.get("questions", [])) or []
+            if str(item).strip()
+        ]
+    lines.extend(["", "## Clarifying Questions", ""])
+    if questions:
+        for question in questions:
+            lines.append(f"- {question}")
+    else:
+        lines.append("- No outstanding clarifying questions were recorded.")
+    candidates = rule_signals.get("candidate_capabilities", []) if isinstance(rule_signals, dict) else []
+    lines.extend(["", "## Scanner Coverage", "", f"- Candidate capabilities from deterministic discovery: {len(candidates)}", ""])
+    return "\n".join(lines)
 
 
 def validate_output_boundary(input_paths: list[Path], output_dir: Path) -> None:
@@ -1440,18 +1544,21 @@ def build_resource_schema(capabilities: list[Capability]) -> dict[str, Any]:
 
 
 def build_guardrails(capabilities: list[Capability]) -> dict[str, Any]:
+    policy = default_policy()
+    guardrail_context = {"policy": policy}
     return {
         "default_mode": "dry_run_first",
+        "policy": policy,
         "risk_policy": {
             "read": {"confirm_required": False, "allow_dry_run": True},
-            "write": {"confirm_required": False, "allow_dry_run": True},
-            "destructive": {"confirm_required": True, "allow_dry_run": True},
+            "write": {"confirm_required": True, "allow_dry_run": True},
+            "destructive": {"confirm_required": False, "allow_dry_run": True, "default_action": "deny"},
             "external_side_effect": {"confirm_required": True, "allow_dry_run": True},
         },
         "tools": {
             cap.name: {
                 "risk": cap.risk,
-                "confirm_required": cap.confirm_required,
+                "confirm_required": risk_requires_confirmation(guardrail_context, cap.risk, cap.confirm_required),
                 "dry_run_supported": cap.dry_run_supported,
                 "reason": risk_reason(cap.risk),
                 "resource": cap.resource,
@@ -1461,6 +1568,41 @@ def build_guardrails(capabilities: list[Capability]) -> dict[str, Any]:
             for cap in capabilities
         },
     }
+
+
+def merge_preserved_guardrails(
+    output_dir: Path,
+    generated: dict[str, Any],
+    preserved_user_files: dict[str, Any],
+) -> dict[str, Any]:
+    path = output_dir / "guardrails" / "permissions.json"
+    if not path.exists():
+        return generated
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return generated
+    if not isinstance(existing, dict):
+        return generated
+    merged = dict(generated)
+    if isinstance(existing.get("policy"), dict):
+        policy = default_policy()
+        existing_policy = existing["policy"]
+        for key, value in existing_policy.items():
+            if isinstance(value, dict) and isinstance(policy.get(key), dict):
+                policy[key] = {**policy[key], **value}
+            else:
+                policy[key] = value
+        merged["policy"] = policy
+    generated_tools = dict(merged.get("tools", {}))
+    existing_tools = existing.get("tools", {})
+    if isinstance(existing_tools, dict):
+        for name, rule in existing_tools.items():
+            if name in generated_tools and isinstance(rule, dict):
+                generated_tools[name] = {**generated_tools[name], **rule}
+        merged["tools"] = generated_tools
+    preserved_user_files["preserved"].append("guardrails/permissions.json")
+    return merged
 
 
 def build_invocation_tests(capabilities: list[Capability]) -> list[dict[str, Any]]:
@@ -1501,9 +1643,33 @@ class GeneratedToolContractTests(unittest.TestCase):
             self.assertIn(tool["name"], guardrail_tools)
 
     def test_high_risk_tools_require_confirmation(self):
+        policy = self.guardrails.get("policy", {})
+        risk_actions = policy.get("risk_actions", {})
         for name, rule in self.guardrails["tools"].items():
             if rule["risk"] in {"destructive", "external_side_effect"}:
-                self.assertTrue(rule["confirm_required"], name)
+                self.assertIn(risk_actions.get(rule["risk"]), {"confirm", "deny"}, name)
+
+    def test_mutating_tools_are_protected_by_policy(self):
+        policy = self.guardrails.get("policy", {})
+        risk_actions = policy.get("risk_actions", {})
+        self.assertEqual(risk_actions.get("read"), "allow")
+        self.assertIn(risk_actions.get("write"), {"confirm", "deny"})
+        self.assertIn(risk_actions.get("destructive"), {"confirm", "deny"})
+        self.assertIn(risk_actions.get("external_side_effect"), {"confirm", "deny"})
+
+    def test_permission_denied_policy_is_represented(self):
+        policy = self.guardrails.get("policy", {})
+        risk_actions = policy.get("risk_actions", {})
+        denied = [risk for risk, action in risk_actions.items() if action == "deny"]
+        self.assertTrue(denied or any(rule.get("confirm_required") for rule in self.guardrails["tools"].values()))
+        expected_error_code = "permission_denied"
+        self.assertEqual(expected_error_code, "permission_denied")
+
+    def test_invocation_expectations_include_dry_run_contract(self):
+        for invocation in self.invocations:
+            expect = invocation.get("expect", {})
+            self.assertIn("dry_run_allowed", expect)
+            self.assertIs(expect["dry_run_allowed"], True)
 
     def test_invocation_tests_reference_existing_tools(self):
         names = {tool["name"] for tool in self.tools["tools"]}

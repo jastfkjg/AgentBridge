@@ -37,39 +37,93 @@ AgentBridge 的目标：通过 Claude Agent SDK 解析已有项目或系统，�
 
 ## P2：安全与治理
 
-- [ ] 强确认机制：高风险操作要求输入 tool name、对象 ID 或确认短语
-- [ ] per-user / per-role / per-environment 权限策略
-- [ ] 支持 read 自动执行、write 确认、destructive 拒绝的 human-in-the-loop policy
-- [ ] 审计日志增强：session id、user、model、tool call id、确认来源、脱敏策略
-- [ ] Web UI 支持查看和编辑权限策略
-- [ ] 统一失败返回格式：timeout、HTTP error、schema mismatch、permission denied
+- [x] 支持 read 自动执行、write 确认、destructive 拒绝的 human-in-the-loop policy
+- [x] Web UI 支持查看和编辑权限策略
+- [x] 统一失败返回格式：timeout、HTTP error、schema mismatch、permission denied
+- [x] 支持敏感字段脱敏策略，避免 token、cookie、password、secret 出现在 kit、日志或测试里
+- [x] 为 external side effect 操作增加强制人工确认策略
+- [x] 审计日志支持按用户、时间、tool、风险等级、执行结果过滤
 
 ## P3：项目理解增强
 
-- [ ] 更完整的 OpenAPI `$ref` 展开和 JSON Schema 支持
-- [ ] Python/TypeScript/Java AST 扫描，减少正则误判
-- [ ] 分析 controller → service → repository 链路
-- [ ] 识别 auth middleware、permission annotation、tenant boundary
-- [ ] 生成人类可读的 analysis report，说明检测到的系统、能力、风险和缺失上下文
-- [ ] 在分析不确定时支持交互式澄清问题，而不是直接猜测
-- [ ] 使用结构化输出 / JSON Schema 提升 AI 分析结果稳定性
+- [x] 更完整的 OpenAPI `$ref` 展开和 JSON Schema 支持
+- [x] 支持 `oneOf`、`anyOf`、`nullable`、`enum`、数组 item、format、examples 等复杂 schema
+- [x] Python AST 扫描与 TypeScript/Java 结构化源码扫描，减少正则误判
+- [x] 分析 controller → service → repository 链路
+- [x] 生成人类可读的 analysis report，说明检测到的系统、能力、风险和缺失上下文
+- [x] 在分析不确定时支持交互式澄清问题，而不是直接猜测
+- [x] 使用结构化输出 / JSON Schema 提升 AI 分析结果稳定性
+- [x] 每个 capability 关联来源证据：文件、行号、schema path 或 OpenAPI operationId
 
 ## P4：Kit 质量与持续集成
 
-- [ ] Capability diff：比较两次生成的新增、变更、删除和风险变化
-- [ ] Kit migration：支持未来 `agentbridge-kit/v2` 升级
-- [ ] 重新生成时保留用户手写 prompts、skills、guardrails
-- [ ] 更精确生成 input schema：enum、nullable、array items、format、examples
-- [ ] Vercel AI SDK 从 JSON Schema 生成精确 Zod schema
-- [ ] `agentbridge generate --check` / `agentbridge diff` 支持 CI 检查
+- [x] Capability diff：比较两次生成的新增、变更、删除和风险变化
+- [x] Kit migration：为未来 `agentbridge-kit/v2` 升级提供 `v1` 增量迁移基础
+- [x] 重新生成时保留用户手写 prompts、skills、guardrails
+- [x] 更精确生成 input schema：enum、nullable、array items、format、examples
+- [x] `agentbridge generate --check` / `agentbridge diff` 支持 CI 检查
+- [x] 生成更强的 tool invocation 测试，覆盖参数 schema、权限拒绝、dry-run 不执行、确认流程
+- [x] 支持 kit migration 测试，保证旧版本 kit 可平滑升级
 
 ## P5：工作流与产品化
 
 - [ ] 支持多步 workflow：Agent 自动编排多个 tools 完成排查或操作
 - [ ] Workflow recording：将一次成功聊天过程保存为可复用流程
+- [ ] Workflow replay：一键复用成功流程，但仍受 guardrail 控制
+- [ ] Workflow 参数化：将用户输入映射到多个 tool call
+- [ ] Workflow test：生成模拟输入，验证流程不会越权或执行危险操作
+- [ ] Workflow approval：整个流程先 dry-run，用户确认后逐步执行
 - [ ] Tool playground：每个 tool 可在 Web UI 中 dry-run / execute 测试
 - [ ] System Control Console：集成工具列表、会话、审计、请求预览和确认面板
+- [ ] Capability Explorer：浏览能力、来源证据、transport、schema、风险解释
+- [ ] 登录账号管理支持环境维度，例如 local、staging、prod
+- [ ] 请求预览支持 curl、Python、JS fetch，并显示最终 headers/body/path/query
+- [ ] 会话 tool timeline 可展开查看每一步输入、输出、确认状态和失败原因
 - [ ] 端到端示例：mock HTTP API + MCP client + CLI/Web Chat 完成一次真实操作
+
+## P6：更多 Adapter 与系统集成
+
+- [ ] PostgreSQL / MySQL read-only adapter：先只允许 SELECT，并自动 LIMIT
+- [ ] Redis read-only adapter：支持 key scan、get、ttl 等只读操作
+- [ ] Queue / Job adapter：支持 Celery、Sidekiq、BullMQ、RQ 等后台任务系统
+- [ ] Kubernetes / Docker adapter：默认只读，写操作强确认
+- [ ] Observability adapter：支持 Prometheus、Grafana、Loki、Sentry、Datadog 等观测系统
+- [ ] Auth provider adapter：识别 OAuth、JWT、API key、session cookie 的运行时配置方式
+
+## P7：AI 分析稳定性与成本控制
+
+- [ ] 所有 AI 输出尽量使用 JSON Schema 结构化输出
+- [ ] 对 AI 产物执行 normalize、validate、repair，再写入 kit
+- [ ] AI 可建议风险等级变化，但最终必须通过 policy contract 校验
+- [ ] 大型项目支持分层分析：架构摘要、模块分析、能力归并
+- [ ] 支持缓存分析结果，减少重复读取和 token 成本
+- [ ] 分析批次输出可追踪：记录输入证据、模型响应摘要、修复步骤和最终产物
+
+## 建议优先级
+
+短期优先：
+
+- [ ] `agentbridge diff` / `agentbridge generate --check`
+- [ ] 更完整的 OpenAPI `$ref` 和 input schema 生成
+- [ ] 统一错误返回格式
+- [ ] Web Tool Playground
+- [ ] analysis report + evidence linking
+
+中期重点：
+
+- [ ] AST 扫描和调用链分析
+- [ ] per-user / per-role 权限策略
+- [ ] workflow recording / replay
+- [ ] PostgreSQL / MySQL read-only adapter
+- [ ] 重新生成时保留用户手写配置
+
+长期方向：
+
+- [ ] System Control Console
+- [ ] 多环境治理：local / staging / prod
+- [ ] 企业级审计、权限、合规脱敏
+- [ ] workflow marketplace 或团队共享流程
+- [ ] 多 Agent 协作分析大型系统
 
 ## 当前注意事项
 

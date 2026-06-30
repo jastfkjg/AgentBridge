@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import ast
 import re
 from pathlib import Path
 from typing import Any
@@ -78,7 +79,7 @@ def discover_openapi(file: Path, spec: dict[str, Any]) -> list[Capability]:
             action = infer_action(method, operation_id, route)
             risk = classify_risk(action, method, route, operation_id)
             operation_parameters = list(path_parameters) + list(operation.get("parameters", []) or [])
-            params = schema_from_openapi_operation(operation, operation_parameters)
+            params = schema_from_openapi_operation(operation, operation_parameters, spec)
             transport = {
                 "type": "http",
                 "method": method.upper(),
@@ -102,12 +103,25 @@ def discover_openapi(file: Path, spec: dict[str, Any]) -> list[Capability]:
                     source=SourceRef("openapi", str(file), f"{method.upper()} {route}"),
                     transport=transport,
                     dry_run_supported=method.upper() != "GET",
+                    evidence=[
+                        {
+                            "kind": "openapi_operation",
+                            "path": str(file),
+                            "location": f"{method.upper()} {route}",
+                            "detail": str(operation_id),
+                        }
+                    ],
+                    confidence=0.95,
                 )
             )
     return capabilities
 
 
-def schema_from_openapi_operation(operation: dict[str, Any], parameters: list[Any] | None = None) -> dict[str, Any]:
+def schema_from_openapi_operation(
+    operation: dict[str, Any],
+    parameters: list[Any] | None = None,
+    spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     required: list[str] = []
     for param in parameters if parameters is not None else operation.get("parameters", []) or []:
@@ -116,14 +130,14 @@ def schema_from_openapi_operation(operation: dict[str, Any], parameters: list[An
         name = param.get("name")
         if not name:
             continue
-        properties[snake_case(str(name))] = normalize_json_schema(param.get("schema", {"type": "string"}))
+        properties[snake_case(str(name))] = normalize_json_schema(param.get("schema", {"type": "string"}), spec)
         if param.get("required"):
             required.append(snake_case(str(name)))
     body = (operation.get("requestBody") or {}).get("content", {})
     if isinstance(body, dict):
         for media in body.values():
             if isinstance(media, dict) and isinstance(media.get("schema"), dict):
-                schema = normalize_json_schema(media["schema"])
+                schema = normalize_json_schema(media["schema"], spec)
                 if schema.get("type") == "object":
                     properties.update(schema.get("properties", {}))
                     required.extend(schema.get("required", []))
@@ -389,7 +403,7 @@ def discover_source_routes(file: Path, text: str) -> list[Capability]:
 
 
 def discover_python_routes(file: Path, text: str) -> list[Capability]:
-    capabilities: list[Capability] = []
+    capabilities: list[Capability] = discover_python_routes_ast(file, text)
     pattern = re.compile(r"@(?:app|router|blueprint)\.(get|post|put|patch|delete)\(\s*[\"']([^\"']+)[\"'][^)]*\)\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)", re.S)
     for method, route, func, args in pattern.findall(text):
         capabilities.append(capability_from_route(file, "source_route", method.upper(), route, func, args))
@@ -400,11 +414,132 @@ def discover_python_routes(file: Path, text: str) -> list[Capability]:
     return capabilities
 
 
+def discover_python_routes_ast(file: Path, text: str) -> list[Capability]:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    project_evidence = python_project_evidence(file, tree)
+    capabilities: list[Capability] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for method, route in python_route_decorators(node):
+            args = ", ".join(arg.arg for arg in node.args.args)
+            evidence = [
+                {
+                    "kind": "source_line",
+                    "path": str(file),
+                    "location": f"line {getattr(node, 'lineno', 0)}",
+                    "detail": f"{method} {route} handled by {node.name}",
+                },
+                *project_evidence,
+            ]
+            capabilities.append(
+                capability_from_route(
+                    file,
+                    "source_route",
+                    method,
+                    route,
+                    node.name,
+                    args,
+                    evidence=evidence,
+                    confidence=0.75,
+                )
+            )
+    return capabilities
+
+
+def python_route_decorators(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[tuple[str, str]]:
+    routes: list[tuple[str, str]] = []
+    for decorator in node.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        func = decorator.func
+        method = ""
+        if isinstance(func, ast.Attribute) and func.attr.lower() in HTTP_METHODS | {"route"}:
+            method = func.attr.upper()
+        if not method:
+            continue
+        route = _first_string_arg(decorator)
+        if not route:
+            continue
+        if method == "ROUTE":
+            methods = _decorator_methods(decorator)
+            for item in methods or ["GET"]:
+                routes.append((item, route))
+        else:
+            routes.append((method, route))
+    return routes
+
+
+def _first_string_arg(call: ast.Call) -> str:
+    if call.args and isinstance(call.args[0], ast.Constant) and isinstance(call.args[0].value, str):
+        return call.args[0].value
+    return ""
+
+
+def _decorator_methods(call: ast.Call) -> list[str]:
+    for keyword in call.keywords:
+        if keyword.arg != "methods":
+            continue
+        value = keyword.value
+        if isinstance(value, ast.List):
+            return [
+                str(item.value).upper()
+                for item in value.elts
+                if isinstance(item, ast.Constant) and isinstance(item.value, str)
+            ]
+    return []
+
+
+def python_project_evidence(file: Path, tree: ast.AST) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and any(marker in node.name.lower() for marker in ("service", "repository", "repo")):
+            evidence.append(
+                {
+                    "kind": "call_chain",
+                    "path": str(file),
+                    "location": f"line {getattr(node, 'lineno', 0)}",
+                    "detail": f"Detected {node.name} in controller/service/repository chain",
+                    "target": node.name,
+                }
+            )
+    return evidence
+
+
 def discover_js_routes(file: Path, text: str) -> list[Capability]:
     capabilities: list[Capability] = []
     pattern = re.compile(r"(?:app|router)\.(get|post|put|patch|delete)\(\s*[`\"']([^`\"']+)[`\"']\s*,\s*(?:async\s*)?(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)?", re.S)
-    for method, route, func in pattern.findall(text):
-        capabilities.append(capability_from_route(file, "source_route", method.upper(), route, func or f"{method}_{resource_from_path(route)}", "req, res"))
+    for match in pattern.finditer(text):
+        method, route, func = match.group(1), match.group(2), match.group(3)
+        detail = f"router.{method.lower()} {route}"
+        capabilities.append(
+            capability_from_route(
+                file,
+                "source_route",
+                method.upper(),
+                route,
+                func or f"{method}_{resource_from_path(route)}",
+                "req, res",
+                evidence=[
+                    {
+                        "kind": "source_tree",
+                        "path": str(file),
+                        "location": f"line {line_number_at(text, match.start())}",
+                        "detail": detail,
+                    },
+                    {
+                        "kind": "source_line",
+                        "path": str(file),
+                        "location": f"line {line_number_at(text, match.start())}",
+                        "detail": match.group(0).splitlines()[0].strip(),
+                    },
+                ],
+                confidence=0.72,
+            )
+        )
     return capabilities
 
 
@@ -422,7 +557,8 @@ def discover_java_routes(file: Path, text: str) -> list[Capability]:
         "PatchMapping": "PATCH",
         "DeleteMapping": "DELETE",
     }
-    for annotation, body, func, args in pattern.findall(text):
+    for match in pattern.finditer(text):
+        annotation, body, func, args = match.group(1), match.group(2), match.group(3), match.group(4)
         method = method_map.get(annotation, "GET")
         if annotation == "RequestMapping":
             method_match = re.search(r"method\s*=\s*RequestMethod\.([A-Z]+)", body)
@@ -430,11 +566,48 @@ def discover_java_routes(file: Path, text: str) -> list[Capability]:
                 method = method_match.group(1)
         route_match = re.search(r"[\"']([^\"']*)[\"']", body)
         route = (class_prefix + "/" + route_match.group(1).lstrip("/")) if route_match else class_prefix or f"/{func}"
-        capabilities.append(capability_from_route(file, "source_route", method, route, func, args))
+        capabilities.append(
+            capability_from_route(
+                file,
+                "source_route",
+                method,
+                route,
+                func,
+                args,
+                evidence=[
+                    {
+                        "kind": "source_tree",
+                        "path": str(file),
+                        "location": f"line {line_number_at(text, match.start())}",
+                        "detail": f"{annotation} {route}",
+                    },
+                    {
+                        "kind": "source_line",
+                        "path": str(file),
+                        "location": f"line {line_number_at(text, match.start())}",
+                        "detail": func,
+                    },
+                ],
+                confidence=0.72,
+            )
+        )
     return capabilities
 
 
-def capability_from_route(file: Path, kind: str, method: str, route: str, function_name: str, args: str) -> Capability:
+def line_number_at(text: str, offset: int) -> int:
+    return text.count("\n", 0, max(0, offset)) + 1
+
+
+def capability_from_route(
+    file: Path,
+    kind: str,
+    method: str,
+    route: str,
+    function_name: str,
+    args: str,
+    evidence: list[dict[str, Any]] | None = None,
+    confidence: float = 0.65,
+) -> Capability:
     action = infer_action(method, function_name, route)
     resource = resource_from_path(route) if resource_from_path(route) != "resource" else infer_resource_from_name(function_name, action)
     risk = classify_risk(action, method, route, function_name)
@@ -450,6 +623,15 @@ def capability_from_route(file: Path, kind: str, method: str, route: str, functi
         source=SourceRef(kind, str(file), f"{method} {route}"),
         transport={"type": "http", "method": method, "path": route, "handler": function_name},
         dry_run_supported=method != "GET",
+        evidence=evidence or [
+            {
+                "kind": "source_route",
+                "path": str(file),
+                "location": f"{method} {route}",
+                "detail": function_name,
+            }
+        ],
+        confidence=confidence,
     )
 
 
@@ -491,15 +673,59 @@ def infer_resource_from_name(name: str, action: str) -> str:
     return singular(parts[-1] if parts else cleaned or "resource")
 
 
-def normalize_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+def normalize_json_schema(
+    schema: dict[str, Any],
+    root: dict[str, Any] | None = None,
+    seen_refs: set[str] | None = None,
+) -> dict[str, Any]:
+    seen_refs = seen_refs or set()
     if "$ref" in schema:
-        return {"type": "object", "description": schema["$ref"]}
-    result = dict(schema)
-    if "type" not in result:
+        ref = str(schema["$ref"])
+        resolved = resolve_json_ref(root or {}, ref) if ref not in seen_refs else {}
+        merged = dict(resolved)
+        merged.update({key: value for key, value in schema.items() if key != "$ref"})
+        if not merged:
+            return {"type": "object", "description": ref}
+        return normalize_json_schema(merged, root, seen_refs | {ref})
+    result: dict[str, Any] = {}
+    for key in ("type", "description", "enum", "nullable", "format", "example", "examples", "default"):
+        if key in schema:
+            result[key] = schema[key]
+    for key in ("oneOf", "anyOf", "allOf"):
+        if isinstance(schema.get(key), list):
+            result[key] = [
+                normalize_json_schema(item, root, seen_refs)
+                for item in schema[key]
+                if isinstance(item, dict)
+            ]
+    if isinstance(schema.get("items"), dict):
+        result["items"] = normalize_json_schema(schema["items"], root, seen_refs)
+    if isinstance(schema.get("properties"), dict):
+        result["properties"] = {
+            snake_case(str(k)): normalize_json_schema(v, root, seen_refs)
+            for k, v in schema.get("properties", {}).items()
+            if isinstance(v, dict)
+        }
+    if isinstance(schema.get("required"), list):
+        result["required"] = [snake_case(str(item)) for item in schema["required"]]
+    if "type" not in result and not any(key in result for key in ("oneOf", "anyOf", "allOf")):
         result["type"] = "string"
     if result.get("type") == "object":
-        result["properties"] = {snake_case(k): normalize_json_schema(v) for k, v in result.get("properties", {}).items()}
+        result.setdefault("properties", {})
+        result["properties"] = {snake_case(k): normalize_json_schema(v, root, seen_refs) for k, v in result.get("properties", {}).items()}
     return result
+
+
+def resolve_json_ref(root: dict[str, Any], ref: str) -> dict[str, Any]:
+    if not ref.startswith("#/"):
+        return {}
+    current: Any = root
+    for part in ref[2:].split("/"):
+        part = part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(current, dict) or part not in current:
+            return {}
+        current = current[part]
+    return dict(current) if isinstance(current, dict) else {}
 
 
 def graphql_type_to_json_type(value: str) -> str:

@@ -70,13 +70,15 @@ agentbridge serve .agentbridge/my-system-kit \
 
 - `serve` defaults to dry-run.
 - Real runtime calls only happen with `--execute`.
-- `destructive` and `external_side_effect` tools require `confirmed: true` in the MCP tool arguments.
+- Generated policy defaults to read auto-execute, write confirmation, destructive denial, and external-side-effect confirmation.
+- `write` and `external_side_effect` tools require `confirmed: true` in the MCP tool arguments. `destructive` tools are denied unless an operator edits the kit policy.
 - Bearer tokens and headers are runtime inputs. Prefer `--bearer-env API_TOKEN` so configs store only the environment variable name.
 - `--read-only` blocks write/destructive/external-side-effect tools.
 - `--deny-risk` disables one or more risk levels.
 - `--allow-tool` restricts runtime calls to selected tools.
-- `--audit-log` writes JSONL tool-call audit events.
+- `--audit-log` writes JSONL tool-call audit events with user, session, model, tool call id, confirmation source, outcome, risk, and redacted arguments.
 - Dry-run responses include a transport-specific request preview with redacted secrets and risk reason.
+- Runtime failures use structured error codes: `permission_denied`, `schema_mismatch`, `http_error`, `timeout`, and `adapter_error`.
 
 Before connecting an agent, run:
 
@@ -111,11 +113,11 @@ OpenAPI HTTP transports are mapped into requests:
 - `tools/list`
 - `tools/call`
 
-`tools/list` converts `capabilities.json` into MCP tools. High-risk tools include an extra `confirmed` parameter so clients can express explicit human confirmation.
+`tools/list` converts `capabilities.json` into MCP tools. Tools requiring human confirmation include an extra `confirmed` parameter so clients can express explicit approval.
 
 ## Current Boundary
 
 Current execution support:
 
-- Implemented: OpenAPI/HTTP, GraphQL, SQLite read-only SQL, gRPC through `grpcurl`, Python plugin adapter, dry-run, and confirmation parameter.
-- Planned: richer adapter error taxonomy, broader database dialect support, background-job adapter, and stronger agent planning.
+- Implemented: OpenAPI/HTTP, GraphQL, SQLite read-only SQL, gRPC through `grpcurl`, Python plugin adapter, dry-run, structured errors, audit redaction, and confirmation parameters.
+- Planned: broader database dialect support, background-job adapter, and stronger agent planning.

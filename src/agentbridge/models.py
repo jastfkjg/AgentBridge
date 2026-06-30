@@ -30,6 +30,8 @@ class Capability:
     source: SourceRef
     transport: dict[str, Any] = field(default_factory=dict)
     dry_run_supported: bool = True
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+    confidence: float = 0.6
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -44,6 +46,8 @@ class Capability:
             "source": self.source.to_dict(),
             "transport": self.transport,
             "dry_run_supported": self.dry_run_supported,
+            "evidence": self.evidence,
+            "confidence": self.confidence,
         }
 
     @classmethod
@@ -65,6 +69,8 @@ class Capability:
             ),
             transport=data.get("transport", {}),
             dry_run_supported=bool(data.get("dry_run_supported", True)),
+            evidence=[item for item in data.get("evidence", []) if isinstance(item, dict)],
+            confidence=float(data.get("confidence", 0.6) or 0.0),
         )
 
 
@@ -91,6 +97,7 @@ class IntegrationKit:
                 "capabilities": "capabilities.json",
                 "rule_signals": "analysis/rule_signals.json",
                 "ai_analysis": "analysis/agent_analysis.json",
+                "analysis_report": "analysis/report.md",
                 "kit_protocol": "spec/kit-protocol.md",
                 "mcp_tools": "tools/mcp_tools.json",
                 "openai_tools": "tools/openai_tools.json",

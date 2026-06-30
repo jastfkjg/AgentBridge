@@ -14,7 +14,7 @@ import json
 from agentbridge import cli
 from agentbridge.agent import AIGenerator
 from agentbridge.discovery import CapabilityDiscoverer
-from agentbridge.generator import AgentKitGenerator, GenerationBoundaryError, validate_output_boundary
+from agentbridge.generator import AgentKitGenerator, GenerationBoundaryError, build_generated_test_file, validate_output_boundary
 from agentbridge.models import Capability, SourceRef
 from agentbridge.runtime import dry_run
 
@@ -88,6 +88,7 @@ class GeneratorRuntimeTests(unittest.TestCase):
             self.assertTrue((output / "tools" / "mcp_tools.json").exists())
             self.assertTrue((output / "analysis" / "rule_signals.json").exists())
             self.assertTrue((output / "analysis" / "agent_analysis.json").exists())
+            self.assertTrue((output / "analysis" / "report.md").exists())
             self.assertTrue((output / "spec" / "kit-protocol.md").exists())
             self.assertTrue((output / "prompts" / "system.md").exists())
             self.assertTrue((output / "guardrails" / "permissions.json").exists())
@@ -98,6 +99,10 @@ class GeneratorRuntimeTests(unittest.TestCase):
             self.assertEqual(manifest["protocol"], "agentbridge-kit/v1")
             self.assertEqual(manifest["outputs"]["ai_analysis"], "analysis/agent_analysis.json")
             self.assertEqual(manifest["outputs"]["client_configs"], "clients/mcp-client-configs.json")
+            self.assertEqual(manifest["outputs"]["analysis_report"], "analysis/report.md")
+            report = (output / "analysis" / "report.md").read_text(encoding="utf-8")
+            self.assertIn("Capability Summary", report)
+            self.assertIn("Risk Summary", report)
 
     def test_dry_run_blocks_unconfirmed_destructive_action(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -113,9 +118,10 @@ class GeneratorRuntimeTests(unittest.TestCase):
             )
 
             self.assertFalse(result["allowed"])
-            self.assertTrue(result["requires_confirmation"])
+            self.assertFalse(result["requires_confirmation"])
+            self.assertEqual(result["error"]["code"], "permission_denied")
 
-    def test_dry_run_allows_confirmed_destructive_action(self):
+    def test_dry_run_denies_confirmed_destructive_action_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "kit"
             gen = _make_mock_generator()
@@ -128,7 +134,8 @@ class GeneratorRuntimeTests(unittest.TestCase):
                 confirmed=True,
             )
 
-            self.assertTrue(result["allowed"])
+            self.assertFalse(result["allowed"])
+            self.assertEqual(result["error"]["code"], "permission_denied")
             self.assertEqual(result["would_execute"], False)
 
     def test_generator_requires_ai_generator(self):
@@ -170,6 +177,39 @@ class GeneratorRuntimeTests(unittest.TestCase):
             AgentKitGenerator(ai_generator=gen).generate([EXAMPLE], output, name="writing-kit")
             gen.generate_all.assert_called_once()
 
+    def test_generator_repairs_or_skips_invalid_ai_capability_objects(self):
+        gen = _make_mock_generator()
+        discoverer = CapabilityDiscoverer()
+        raw_caps = discoverer.discover([EXAMPLE])
+
+        def generate_all(caps, _kit_name, input_paths=None):
+            valid_extra = raw_caps[0].to_dict()
+            valid_extra["name"] = "inspect_project_health"
+            valid_extra["domain"] = "inspection"
+            valid_extra["resource"] = "project_health"
+            valid_extra["action"] = "inspect"
+            valid_extra["source"] = {"kind": "ai_inferred", "path": "", "location": "mock"}
+            valid_extra["transport"] = {"type": "inferred", "operation": "inspect_project_health"}
+            return {
+                "enhanced_capabilities": [
+                    {"description": "missing required fields"},
+                    valid_extra,
+                ],
+                "rule_signals": {"candidate_capabilities": [cap.to_dict() for cap in caps]},
+                "agent_analysis": {"summary": "mock", "assumptions": []},
+                "system_prompt": "",
+                "skills": {},
+            }
+
+        gen.generate_all.side_effect = generate_all
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            kit = AgentKitGenerator(ai_generator=gen).generate([EXAMPLE], output, name="writing-kit")
+            analysis = json.loads((output / "analysis" / "agent_analysis.json").read_text(encoding="utf-8"))
+
+        self.assertIn("inspect_project_health", {cap.name for cap in kit.capabilities})
+        self.assertTrue(any("Skipped invalid AI capability" in item for item in analysis["assumptions"]))
+
     def test_generator_merges_existing_kit_capabilities_before_ai_analysis(self):
         gen = _make_mock_generator()
         captured: list[Capability] = []
@@ -206,6 +246,48 @@ class GeneratorRuntimeTests(unittest.TestCase):
             ).generate([EXAMPLE], output, name="writing-kit")
 
         self.assertIn("legacy_workflow", {cap.name for cap in captured})
+
+    def test_generator_preserves_user_authored_prompt_and_policy_overrides(self):
+        gen = _make_mock_generator()
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "kit"
+            (output / "prompts").mkdir(parents=True)
+            (output / "guardrails").mkdir(parents=True)
+            (output / "prompts" / "system.md").write_text("# User Prompt\n\nKeep this.", encoding="utf-8")
+            (output / "guardrails" / "permissions.json").write_text(
+                json.dumps(
+                    {
+                        "policy": {"risk_actions": {"destructive": "confirm"}},
+                        "tools": {
+                            "delete_character": {
+                                "risk": "destructive",
+                                "confirm_required": True,
+                                "reason": "User override",
+                                "transport": {"type": "http", "method": "DELETE", "path": "/characters/{character_id}"},
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            AgentKitGenerator(ai_generator=gen).generate([EXAMPLE], output, name="writing-kit")
+
+            prompt = (output / "prompts" / "system.md").read_text(encoding="utf-8")
+            guardrails = json.loads((output / "guardrails" / "permissions.json").read_text(encoding="utf-8"))
+            preserved = json.loads((output / "analysis" / "preserved_user_files.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(prompt, "# User Prompt\n\nKeep this.")
+        self.assertEqual(guardrails["policy"]["risk_actions"]["destructive"], "confirm")
+        self.assertIn("prompts/system.md", preserved["preserved"])
+
+    def test_generated_tool_contract_tests_cover_policy_and_dry_run(self):
+        content = build_generated_test_file()
+
+        self.assertIn("permission_denied", content)
+        self.assertIn("dry_run", content)
+        self.assertIn("write", content)
+        self.assertIn("destructive", content)
 
     def test_parser_exposes_existing_kit_enhance_command(self):
         args = cli.build_parser().parse_args(

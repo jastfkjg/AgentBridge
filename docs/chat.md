@@ -6,7 +6,7 @@ AgentBridge chat entrypoints are Claude Agent control surfaces over a generated 
 - guardrails from `guardrails/permissions.json`
 - tool calls through the AgentBridge runtime
 - optional runtime execution through `--execute`
-- session memory and pending high-risk confirmations
+- session memory and pending confirmations for operations that policy marks as confirm-required
 
 The goal is to let users talk to a Claude-powered agent that can inspect, plan, dry-run, and safely operate the existing system through the generated tool layer.
 
@@ -40,7 +40,7 @@ cancel
 /history
 ```
 
-High-risk operations pause before execution and show the planned call, risk reason, request URL, redacted headers, body, and arguments. Type `confirm` to continue or `cancel` to clear the pending operation.
+Operations marked `confirm` by policy pause before execution and show the planned call, risk reason, request URL, redacted headers, body, and arguments. Type `confirm` to continue or `cancel` to clear the pending operation. The generated default policy allows reads, requires confirmation for writes and external side effects, and denies destructive tools.
 
 ## Web Chat
 
@@ -55,6 +55,7 @@ Open the printed URL in a browser. The UI exposes the parsed system capabilities
 - Dry-run / Real system runtime selector
 - Base URL validation and target-system connectivity test
 - saved login-account selector, optional Save login toggle, and account add/edit/delete controls
+- permission policy drawer for viewing and editing `guardrails/permissions.json`
 - clickable tool list that inserts `/run` commands and required parameters
 - chat transcript
 - visible Authorize/Cancel controls for pending operations with operation summaries such as Login or Create script
@@ -74,9 +75,9 @@ agentbridge web .agentbridge/openapi-kit \
   --read-only
 ```
 
-The mode can also be changed directly in the Web UI. Real system mode requires an `http://` or `https://` Base URL. The connectivity test sends `HEAD` to the Base URL and falls back to `GET` when `HEAD` is not supported; any HTTP response means the system is reachable. Switching modes clears any pending confirmation before rebuilding the runtime, while guardrails and human confirmation remain enforced. The Web Chat server prints concise request, stream, permission, and error logs to the terminal with secrets redacted.
+The mode can also be changed directly in the Web UI. Real system mode requires an `http://` or `https://` Base URL. The connectivity test sends `HEAD` to the Base URL and falls back to `GET` when `HEAD` is not supported; any HTTP response means the system is reachable. Switching modes clears any pending confirmation before rebuilding the runtime, while guardrails and human confirmation remain enforced. Policy edits in the Web UI are written back to `guardrails/permissions.json`. The Web Chat server prints concise request, stream, permission, and error logs to the terminal with secrets redacted.
 
-Terminal chat exposes the same core workflows through `/use`, `/mode`, `/connect`, and `/usage`. `/use` lists numbered tools and prompts for required parameters. High-risk calls present an explicit Authorize/Cancel selection.
+Terminal chat exposes the same core workflows through `/use`, `/mode`, `/connect`, and `/usage`. `/use` lists numbered tools and prompts for required parameters. Confirm-required calls present an explicit Authorize/Cancel selection.
 
 GraphQL, SQL, and gRPC runtime targets can be supplied when starting CLI or Web Chat:
 
@@ -109,11 +110,11 @@ agentbridge chat .agentbridge/openapi-kit --memory-file /tmp/agentbridge-memory.
 agentbridge chat .agentbridge/openapi-kit --no-memory
 ```
 
-Memory stores the recent transcript and any pending high-risk operation for the user/session/kit tuple.
+Memory stores the recent transcript and any pending confirm-required operation for the user/session/kit tuple.
 
 ## Confirmation Flow
 
-1. The user asks for a high-risk operation.
+1. The user asks for an operation that policy marks as `confirm`.
 2. AgentBridge validates arguments and builds a dry-run plan.
 3. The pending operation is stored in session memory.
 4. CLI or Web UI shows risk, method/path, and arguments.
@@ -129,3 +130,16 @@ agentbridge chat .agentbridge/openapi-kit --deny-risk destructive --deny-risk ex
 agentbridge chat .agentbridge/openapi-kit --allow-tool list_chapter
 agentbridge chat .agentbridge/openapi-kit --audit-log .agentbridge/audit.jsonl
 ```
+
+Generated kit policy lives in `guardrails/permissions.json`. Its default `risk_actions` are:
+
+```json
+{
+  "read": "allow",
+  "write": "confirm",
+  "destructive": "deny",
+  "external_side_effect": "confirm"
+}
+```
+
+Runtime errors use structured codes such as `permission_denied`, `schema_mismatch`, `http_error`, `timeout`, and `adapter_error`. Audit JSONL events include user/session/model/tool-call metadata and redact secrets before writing.

@@ -14,6 +14,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen as url_open
 
 from agentbridge.chat import ChatConfig, ChatSession, public_login_accounts
+from agentbridge.io import write_json
+from agentbridge.policy import normalize_permissions_policy
 
 
 class ChatWebError(ValueError):
@@ -122,6 +124,33 @@ def runtime_payload(session: ChatSession) -> dict[str, Any]:
     }
 
 
+def load_permissions_payload(kit_dir: Path) -> dict[str, Any]:
+    path = kit_dir / "guardrails" / "permissions.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data["policy"] = normalize_permissions_policy(data)
+    tools = data.get("tools", {})
+    data["tools"] = tools if isinstance(tools, dict) else {}
+    return data
+
+
+def save_permissions_payload(kit_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ChatWebError("Policy payload must be a JSON object.")
+    current = load_permissions_payload(kit_dir)
+    next_data = dict(current)
+    if isinstance(payload.get("policy"), dict):
+        next_data["policy"] = normalize_permissions_policy(payload)
+    if isinstance(payload.get("tools"), dict):
+        next_data["tools"] = payload["tools"]
+    write_json(kit_dir / "guardrails" / "permissions.json", next_data)
+    return load_permissions_payload(kit_dir)
+
+
 def rename_conversation(config: ChatConfig, user: str, kit_dir: Path, session_id: str, title: str) -> None:
     title = title.strip()
     if not title:
@@ -196,6 +225,11 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                 session = self._session_from_query(parsed.query)
                 self._send_json({"tools": session.tool_summaries()})
                 return
+            if parsed.path == "/api/policy":
+                values = parse_qs(parsed.query)
+                kit_dir = values.get("kit", [str(base_config.kit_dir)])[0] if allow_kit_switch else str(base_config.kit_dir)
+                self._send_json(load_permissions_payload(Path(kit_dir)))
+                return
             if parsed.path == "/api/conversations":
                 values = parse_qs(parsed.query)
                 user = values.get("user", [base_config.user])[0] or base_config.user
@@ -219,7 +253,7 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            if parsed.path not in {"/api/chat", "/api/chat/stream", "/api/chat/interrupt", "/api/chat/agent-permission", "/api/chat/pending", "/api/tool", "/api/connectivity", "/api/login-account", "/api/conversation"}:
+            if parsed.path not in {"/api/chat", "/api/chat/stream", "/api/chat/interrupt", "/api/chat/agent-permission", "/api/chat/pending", "/api/tool", "/api/connectivity", "/api/login-account", "/api/conversation", "/api/policy"}:
                 self._send_error(HTTPStatus.NOT_FOUND, "Not found")
                 return
             try:
@@ -236,6 +270,9 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                 session = self._session_from_body(body)
                 if parsed.path == "/api/login-account":
                     self._handle_login_account(session, body)
+                    return
+                if parsed.path == "/api/policy":
+                    self._handle_policy(body)
                     return
                 if parsed.path == "/api/conversation":
                     self._handle_conversation(body)
@@ -321,6 +358,12 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
             else:
                 raise ChatWebError("Unsupported conversation action.")
             self._send_json({"conversations": conversation_summaries(base_config, user, kit_dir)})
+
+        def _handle_policy(self, body: dict[str, Any]) -> None:
+            kit_dir = Path(str(body.get("kit_dir") or base_config.kit_dir)) if allow_kit_switch else base_config.kit_dir
+            updated = save_permissions_payload(kit_dir, body)
+            web_log("policy_update", kit=str(kit_dir))
+            self._send_json(updated)
 
         def _session_from_query(self, query: str) -> ChatSession:
             values = parse_qs(query)
@@ -1880,6 +1923,9 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       <button class="rail-button" type="button" data-drawer="tools" title="Available tools" aria-label="Available tools">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.7 6.3 3-3a4.2 4.2 0 0 1-5.4 5.4l-7.6 7.6a2.1 2.1 0 0 0 3 3l7.6-7.6a4.2 4.2 0 0 0 5.4-5.4l-3 3"></path></svg>
       </button>
+      <button class="rail-button" type="button" data-drawer="policy" title="Permission policy" aria-label="Permission policy">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.4 2.9 8.4 7 10 4.1-1.6 7-5.6 7-10V6l-7-3Z"></path><path d="m9 12 2 2 4-5"></path></svg>
+      </button>
       <button class="rail-button" id="usageButton" type="button" data-drawer="usage" title="AI usage" aria-label="AI usage">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V9m7 10V5m7 14v-7"></path></svg>
       </button>
@@ -2025,13 +2071,21 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
           <div class="subtle">Select a tool to insert a runnable command and its required parameters.</div>
           <div class="tools" id="tools"></div>
         </section>
+        <section class="drawer-pane" data-pane="policy" id="policyPanel">
+          <div class="subtle">Review or edit the kit permission policy used by dry-run, MCP, and chat execution.</div>
+          <label for="policyJson">Policy JSON</label>
+          <textarea id="policyJson" rows="16" spellcheck="false"></textarea>
+          <div class="drawer-action-row">
+            <button id="savePolicyBtn" type="button">Save policy</button>
+            <button class="secondary" id="reloadPolicyBtn" type="button">Reload</button>
+          </div>
+          <div class="field-help" id="policyStatus"></div>
+        </section>
         <section class="drawer-pane" data-pane="usage" id="usagePanel">
           <div class="subtle">Claude Agent SDK token usage for the current session.</div>
           <div class="usage-grid">
-            <div class="usage-stat"><span class="subtle">Last input</span><strong id="usageInput">0</strong></div>
-            <div class="usage-stat"><span class="subtle">Last output</span><strong id="usageOutput">0</strong></div>
-            <div class="usage-stat"><span class="subtle">Last total</span><strong id="usageTotal">0</strong></div>
-            <div class="usage-stat"><span class="subtle">Session total</span><strong id="usageSessionTotal">0</strong></div>
+            <div class="usage-stat"><span class="subtle">Session input</span><strong id="usageInput">0.0k</strong></div>
+            <div class="usage-stat"><span class="subtle">Session output</span><strong id="usageOutput">0.0k</strong></div>
           </div>
           <div class="usage-history" id="usageHistory"></div>
         </section>
@@ -2086,9 +2140,11 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       connectionStatus: document.getElementById('connectionStatus'),
       usageInput: document.getElementById('usageInput'),
       usageOutput: document.getElementById('usageOutput'),
-      usageTotal: document.getElementById('usageTotal'),
-      usageSessionTotal: document.getElementById('usageSessionTotal'),
-      usageHistory: document.getElementById('usageHistory')
+      usageHistory: document.getElementById('usageHistory'),
+      policyJson: document.getElementById('policyJson'),
+      savePolicy: document.getElementById('savePolicyBtn'),
+      reloadPolicy: document.getElementById('reloadPolicyBtn'),
+      policyStatus: document.getElementById('policyStatus')
     }};
     let toolsCache = [];
     let loginAccountsCache = [];
@@ -2120,6 +2176,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       context: 'Chat context',
       accounts: 'Saved accounts',
       tools: 'Available tools',
+      policy: 'Permission policy',
       usage: 'AI usage'
     }};
     function payload(extra = {{}}) {{
@@ -2145,6 +2202,24 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         if (selectedLoginAccountId()) qs.set('login_account_id', selectedLoginAccountId());
       }}
       return qs;
+    }}
+    async function loadPolicy() {{
+      const data = await fetch('/api/policy?' + stateQuery(false).toString()).then(r => r.json());
+      els.policyJson.value = JSON.stringify(data, null, 2);
+      els.policyStatus.textContent = 'Policy loaded.';
+    }}
+    async function savePolicy() {{
+      let parsed;
+      try {{
+        parsed = JSON.parse(els.policyJson.value || '{{}}');
+      }} catch (error) {{
+        els.policyStatus.textContent = 'Policy JSON is invalid.';
+        return;
+      }}
+      const data = await post('/api/policy', payload(parsed));
+      els.policyJson.value = JSON.stringify(data, null, 2);
+      els.policyStatus.textContent = 'Policy saved.';
+      loadState(false);
     }}
     function setConnectionStatus(message = '', state = '') {{
       els.connectionStatus.textContent = state === 'success' ? '✓' : (state === 'error' ? '×' : '');
@@ -2384,6 +2459,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       els.drawerTitle.textContent = drawerTitles[name] || 'Workspace details';
       els.contextDrawer.classList.toggle('open', open);
       els.drawerBackdrop.classList.toggle('show', open);
+      if (open && name === 'policy') loadPolicy();
     }}
     function closeDrawer() {{
       els.contextDrawer.classList.remove('open');
@@ -2686,11 +2762,12 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     function formatNumber(value) {{
       return new Intl.NumberFormat().format(Number(value || 0));
     }}
+    function formatTokenK(value) {{
+      return (Number(value || 0) / 1000).toFixed(1) + 'k';
+    }}
     function renderUsage(usage = {{}}) {{
-      els.usageInput.textContent = formatNumber(usage.input_tokens);
-      els.usageOutput.textContent = formatNumber(usage.output_tokens);
-      els.usageTotal.textContent = formatNumber(usage.total_tokens);
-      els.usageSessionTotal.textContent = formatNumber(usage.session_total_tokens);
+      els.usageInput.textContent = formatTokenK(usage.session_input_tokens);
+      els.usageOutput.textContent = formatTokenK(usage.session_output_tokens);
       els.usageHistory.innerHTML = '';
       const history = Array.isArray(usage.history) ? usage.history.slice(-100).reverse() : [];
       if (!history.length) {{
@@ -3077,6 +3154,8 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       button.addEventListener('click', () => applyRuntimeMode(button.dataset.mode));
     }});
     els.testConnection.onclick = testConnectivity;
+    els.savePolicy.onclick = savePolicy;
+    els.reloadPolicy.onclick = loadPolicy;
     els.manageAccounts.onclick = openAccountManager;
     els.accountForm.addEventListener('submit', saveAccountForm);
     els.newAccountForm.onclick = newAccountForm;

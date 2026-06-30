@@ -239,7 +239,7 @@ class ChatSessionTests(unittest.TestCase):
             self.assertEqual(list_chapter["required"], ["project_id"])
             self.assertEqual(list_chapter["property_schemas"]["project_id"]["type"], "string")
 
-    def test_chat_stores_pending_high_risk_tool_and_confirms(self):
+    def test_chat_stores_pending_external_side_effect_tool_and_confirms(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
             memory = Path(tmp) / "memory.json"
@@ -253,11 +253,11 @@ class ChatSessionTests(unittest.TestCase):
                 )
             )
 
-            response = session.process("/run delete_character project_id=p1 character_id=c1")
+            response = session.process("/run login username=admin password=secret")
 
             self.assertEqual(response.status, "needs_confirmation")
             self.assertIsNotNone(response.pending)
-            self.assertIn("DELETE http://example.test/projects/p1/characters/c1", response.message)
+            self.assertIn("POST http://example.test/auth/login", response.message)
             self.assertIn("<redacted>", response.message)
             self.assertIn("Reason:", response.message)
 
@@ -293,7 +293,9 @@ class ChatSessionTests(unittest.TestCase):
             ]
 
             with patch("urllib.request.urlopen", side_effect=responses) as urlopen:
-                login = session.process("/run login username=admin password=secret")
+                pending = session.process("/run login username=admin password=secret")
+                self.assertEqual(pending.status, "needs_confirmation")
+                login = session.process("confirm")
                 listed = session.process("/run list_chapter project_id=p1")
 
             self.assertEqual(login.status, "tool_result")
@@ -377,7 +379,9 @@ class ChatSessionTests(unittest.TestCase):
             )
 
             with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-123456"})):
-                response = session.process("/run login username=admin password=secret")
+                pending = session.process("/run login username=admin password=secret")
+                self.assertEqual(pending.status, "needs_confirmation")
+                response = session.process("confirm")
 
             self.assertEqual(response.status, "tool_result")
             runtime_state = load_kit_runtime_state(kit)
@@ -404,9 +408,8 @@ class ChatSessionTests(unittest.TestCase):
 
             response = session.process("/run delete_character project_id=p1 character_id=c1")
 
-            self.assertEqual(response.status, "needs_confirmation")
-            confirmed = session.process("confirm")
-            self.assertIn("blocked by runtime policy", confirmed.message)
+            self.assertEqual(response.status, "tool_result")
+            self.assertIn("denied by kit policy", response.message)
 
     def test_chat_runtime_switch_clears_pending_and_updates_server(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -441,11 +444,15 @@ class ChatSessionTests(unittest.TestCase):
             session = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, memory_enabled=False))
 
             with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-123456"})):
-                login = session.process("/run login username=admin password=secret")
+                pending = session.process("/run login username=admin password=secret")
+                self.assertEqual(pending.status, "needs_confirmation")
+                login = session.process("confirm")
 
             restored = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, memory_enabled=False))
             with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-789"})) as urlopen:
-                reused = restored.process("/run login")
+                pending = restored.process("/run login")
+                self.assertEqual(pending.status, "needs_confirmation")
+                reused = restored.process("confirm")
 
             self.assertEqual(login.status, "tool_result")
             self.assertEqual(reused.status, "tool_result")
@@ -464,8 +471,12 @@ class ChatSessionTests(unittest.TestCase):
                     _FakeHTTPResponse({"access_token": "jwt-editor"}),
                 ],
             ):
-                admin_login = session.process("/run login username=admin password=secret")
-                editor_login = session.process("/run login username=editor password=edit")
+                admin_pending = session.process("/run login username=admin password=secret")
+                self.assertEqual(admin_pending.status, "needs_confirmation")
+                admin_login = session.process("confirm")
+                editor_pending = session.process("/run login username=editor password=edit")
+                self.assertEqual(editor_pending.status, "needs_confirmation")
+                editor_login = session.process("confirm")
 
             state = load_kit_runtime_state(kit)
             accounts = {account["label"]: account for account in state["login_accounts"]}
@@ -477,7 +488,9 @@ class ChatSessionTests(unittest.TestCase):
             restored = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, memory_enabled=False))
             restored.select_login_account(accounts["admin"]["id"])
             with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-admin-2"})) as urlopen:
-                reused = restored.process("/run login")
+                pending = restored.process("/run login")
+                self.assertEqual(pending.status, "needs_confirmation")
+                reused = restored.process("confirm")
 
             self.assertEqual(reused.status, "tool_result")
             request = urlopen.call_args.args[0]
@@ -524,7 +537,9 @@ class ChatSessionTests(unittest.TestCase):
             session = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, agent_runner=runner, memory_enabled=False))
 
             with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-admin"})) as urlopen:
-                response = session.process("admin")
+                pending = session.process("admin")
+                self.assertEqual(pending.status, "needs_confirmation")
+                response = session.process("confirm")
 
             self.assertEqual(response.status, "tool_result")
             self.assertEqual(runner.prompts, [])
@@ -550,9 +565,12 @@ class ChatSessionTests(unittest.TestCase):
 
             with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-admin"})) as urlopen:
                 events = [event.to_dict() for event in session.stream_process("admin")]
+                confirm_events = [event.to_dict() for event in session.stream_process("confirm")]
 
             self.assertEqual(events[-1]["type"], "done")
-            self.assertEqual(events[-1]["status"], "tool_result")
+            self.assertEqual(events[-1]["status"], "needs_confirmation")
+            self.assertEqual(confirm_events[-1]["type"], "done")
+            self.assertEqual(confirm_events[-1]["status"], "tool_result")
             self.assertEqual(runner.prompts, [])
             request = urlopen.call_args.args[0]
             self.assertEqual(json.loads(request.data.decode("utf-8")), {"username": "admin", "password": "secret"})
@@ -574,7 +592,9 @@ class ChatSessionTests(unittest.TestCase):
             session = ChatSession(ChatConfig(kit_dir=kit, base_url="http://example.test", execute=True, agent_runner=runner, memory_enabled=False))
 
             with patch("urllib.request.urlopen", return_value=_FakeHTTPResponse({"access_token": "jwt-admin"})) as urlopen:
-                response = session.process("用 admin 登录")
+                pending = session.process("用 admin 登录")
+                self.assertEqual(pending.status, "needs_confirmation")
+                response = session.process("confirm")
 
             self.assertEqual(response.status, "tool_result")
             self.assertEqual(runner.prompts, [])
@@ -1161,6 +1181,15 @@ class WebChatTests(unittest.TestCase):
             self.assertIn('id="usageButton"', html)
             self.assertIn('id="usagePanel"', html)
             self.assertIn("renderUsage", html)
+            self.assertIn("Session input", html)
+            self.assertIn("Session output", html)
+            self.assertIn("formatTokenK", html)
+            self.assertIn("usage.session_input_tokens", html)
+            self.assertIn("usage.session_output_tokens", html)
+            self.assertNotIn("Last input", html)
+            self.assertNotIn("Last output", html)
+            self.assertNotIn("Last total", html)
+            self.assertNotIn("usage.total_tokens", html)
             self.assertIn('id="usageHistory"', html)
             self.assertIn("usage.history", html)
             self.assertNotIn("session_cost_usd", html)
@@ -1182,6 +1211,19 @@ class WebChatTests(unittest.TestCase):
             self.assertIn("renameConversation", html)
             self.assertIn("deleteConversation", html)
             self.assertIn("/api/conversation", html)
+
+    def test_rendered_web_ui_supports_policy_editor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn('data-drawer="policy"', html)
+            self.assertIn('id="policyPanel"', html)
+            self.assertIn('id="policyJson"', html)
+            self.assertIn('id="savePolicyBtn"', html)
+            self.assertIn("/api/policy", html)
 
     def test_target_base_url_requires_http_or_https(self):
         self.assertEqual(normalize_target_base_url(" http://localhost:8080/ "), "http://localhost:8080")
@@ -1214,6 +1256,38 @@ class WebChatTests(unittest.TestCase):
 
             self.assertEqual(response["status"], "tools")
             self.assertIn("list_chapter", response["message"])
+
+    def test_web_policy_api_loads_and_updates_permissions_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            from http.server import ThreadingHTTPServer
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), build_handler(config))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.shutdown)
+            self.addCleanup(server.server_close)
+            base = f"http://127.0.0.1:{server.server_port}"
+
+            policy = json.loads(urllib.request.urlopen(base + "/api/policy").read().decode("utf-8"))
+            self.assertEqual(policy["policy"]["risk_actions"]["write"], "confirm")
+            self.assertIn("delete_character", policy["tools"])
+
+            policy["policy"]["risk_actions"]["destructive"] = "confirm"
+            body = json.dumps(policy).encode("utf-8")
+            req = urllib.request.Request(
+                base + "/api/policy",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            updated = json.loads(urllib.request.urlopen(req).read().decode("utf-8"))
+            saved = json.loads((kit / "guardrails" / "permissions.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(updated["policy"]["risk_actions"]["destructive"], "confirm")
+            self.assertEqual(saved["policy"]["risk_actions"]["destructive"], "confirm")
 
     def test_web_api_rejects_execute_mode_without_base_url(self):
         with tempfile.TemporaryDirectory() as tmp:

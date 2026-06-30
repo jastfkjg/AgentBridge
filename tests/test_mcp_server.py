@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from agentbridge.audit import read_audit_events
 from agentbridge.mcp_server import AgentBridgeMCPServer, MCPServerConfig
 from agentbridge.kit import validate_kit
 
@@ -17,6 +18,24 @@ def _write_json(path: Path, data: object) -> None:
 def _make_kit(root: Path) -> Path:
     kit = root / "kit"
     capabilities = [
+        {
+            "name": "login",
+            "domain": "auth",
+            "resource": "session",
+            "action": "create",
+            "description": "Log in and capture runtime authentication headers",
+            "input_schema": {
+                "type": "object",
+                "properties": {"username": {"type": "string"}, "password": {"type": "string"}},
+                "required": ["username", "password"],
+                "additionalProperties": False,
+            },
+            "risk": "external_side_effect",
+            "confirm_required": False,
+            "source": {"kind": "openapi", "path": "openapi.json", "location": "POST /auth/login"},
+            "transport": {"type": "http", "method": "POST", "path": "/auth/login"},
+            "dry_run_supported": True,
+        },
         {
             "name": "list_chapter",
             "domain": "writing",
@@ -126,6 +145,14 @@ def _make_kit(root: Path) -> Path:
     _write_json(
         kit / "guardrails" / "permissions.json",
         {
+            "policy": {
+                "risk_actions": {
+                    "read": "allow",
+                    "write": "confirm",
+                    "destructive": "deny",
+                    "external_side_effect": "confirm",
+                }
+            },
             "tools": {
                 item["name"]: {
                     "risk": item["risk"],
@@ -155,6 +182,18 @@ class _FakeHTTPResponse:
         return b'{"ok": true}'
 
 
+def _call_payload(server: AgentBridgeMCPServer, name: str, arguments: dict[str, object]) -> dict[str, object]:
+    response = server.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": name,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        }
+    )
+    return json.loads(response["result"]["content"][0]["text"])
+
+
 class MCPServerTests(unittest.TestCase):
     def test_tools_list_includes_confirmation_parameter_for_high_risk_tools(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,8 +203,9 @@ class MCPServerTests(unittest.TestCase):
             response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
 
             tools = {tool["name"]: tool for tool in response["result"]["tools"]}
-            self.assertIn("confirmed", tools["delete_character"]["inputSchema"]["properties"])
-            self.assertNotIn("confirmed", tools["create_chapter"]["inputSchema"]["properties"])
+            self.assertNotIn("confirmed", tools["delete_character"]["inputSchema"]["properties"])
+            self.assertIn("confirmed", tools["create_chapter"]["inputSchema"]["properties"])
+            self.assertIn("confirmed", tools["login"]["inputSchema"]["properties"])
 
     def test_call_tool_returns_dry_run_plan_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -183,7 +223,7 @@ class MCPServerTests(unittest.TestCase):
                     "jsonrpc": "2.0",
                     "id": 2,
                     "method": "tools/call",
-                    "params": {"name": "create_chapter", "arguments": {"project_id": "p1", "title": "Opening"}},
+            "params": {"name": "create_chapter", "arguments": {"project_id": "p1", "title": "Opening", "confirmed": True}},
                 }
             )
 
@@ -206,7 +246,7 @@ class MCPServerTests(unittest.TestCase):
                         "jsonrpc": "2.0",
                         "id": 3,
                         "method": "tools/call",
-                        "params": {"name": "create_chapter", "arguments": {"project_id": "p1", "title": "Opening"}},
+                        "params": {"name": "create_chapter", "arguments": {"project_id": "p1", "title": "Opening", "confirmed": True}},
                     }
                 )
 
@@ -309,7 +349,7 @@ class MCPServerTests(unittest.TestCase):
                     "jsonrpc": "2.0",
                     "id": 5,
                     "method": "tools/call",
-                    "params": {"name": "create_chapter", "arguments": {"project_id": "p1", "title": "Opening"}},
+                    "params": {"name": "create_chapter", "arguments": {"project_id": "p1", "title": "Opening", "confirmed": True}},
                 }
             )
 
@@ -318,6 +358,77 @@ class MCPServerTests(unittest.TestCase):
             event = json.loads(audit_log.read_text(encoding="utf-8").splitlines()[0])
             self.assertEqual(event["outcome"], "blocked")
             self.assertEqual(event["tool"], "create_chapter")
+
+    def test_default_hitl_policy_requires_write_confirmation_and_denies_destructive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            server = AgentBridgeMCPServer(MCPServerConfig(kit_dir=kit, base_url="http://example.test", execute=True))
+
+            write_payload = _call_payload(
+                server,
+                "create_chapter",
+                {"project_id": "p1", "title": "Opening"},
+            )
+            destructive_payload = _call_payload(
+                server,
+                "delete_character",
+                {"project_id": "p1", "character_id": "c1", "confirmed": True},
+            )
+
+            self.assertFalse(write_payload["allowed"])
+            self.assertTrue(write_payload["requires_confirmation"])
+            self.assertEqual(write_payload["error"]["code"], "permission_denied")
+            self.assertEqual(destructive_payload["error"]["code"], "permission_denied")
+            self.assertIn("denied", destructive_payload["error"]["message"])
+
+    def test_external_side_effect_requires_confirmation_even_when_tool_rule_does_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            server = AgentBridgeMCPServer(MCPServerConfig(kit_dir=kit, base_url="http://example.test", execute=True))
+
+            payload = _call_payload(server, "login", {"username": "admin", "password": "secret"})
+
+            self.assertFalse(payload["allowed"])
+            self.assertTrue(payload["requires_confirmation"])
+            self.assertEqual(payload["risk"], "external_side_effect")
+            self.assertEqual(payload["error"]["code"], "permission_denied")
+
+    def test_structured_schema_mismatch_error_is_returned_for_invalid_arguments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            server = AgentBridgeMCPServer(MCPServerConfig(kit_dir=kit))
+
+            payload = _call_payload(server, "list_chapter", {})
+
+            self.assertFalse(payload["allowed"])
+            self.assertEqual(payload["error"]["code"], "schema_mismatch")
+            self.assertEqual(payload["error"]["category"], "validation")
+
+    def test_audit_log_redacts_sensitive_args_and_supports_filtering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kit = _make_kit(root)
+            audit_log = root / "audit.jsonl"
+            server = AgentBridgeMCPServer(
+                MCPServerConfig(
+                    kit_dir=kit,
+                    audit_log=audit_log,
+                    user="alice",
+                    session_id="s1",
+                    model="mock-model",
+                )
+            )
+
+            _call_payload(server, "login", {"username": "alice", "password": "secret"})
+
+            events = read_audit_events(audit_log, user="alice", tool="login", risk="external_side_effect", outcome="blocked")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["user"], "alice")
+            self.assertEqual(events[0]["session_id"], "s1")
+            self.assertEqual(events[0]["model"], "mock-model")
+            self.assertEqual(events[0]["args"]["username"], "alice")
+            self.assertEqual(events[0]["args"]["password"], "<redacted>")
+            self.assertIn("tool_call_id", events[0])
 
     def test_validate_kit_reports_ok_for_valid_fixture(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -336,7 +447,7 @@ class MCPServerTests(unittest.TestCase):
             report = validate_kit(kit)
 
             self.assertTrue(report.ok)
-            self.assertEqual(report.summary["capability_count"], 5)
+            self.assertEqual(report.summary["capability_count"], 6)
 
 
 if __name__ == "__main__":

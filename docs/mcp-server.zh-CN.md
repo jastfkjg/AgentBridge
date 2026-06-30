@@ -70,13 +70,15 @@ agentbridge serve .agentbridge/my-system-kit \
 
 - `serve` 默认 dry-run，这是安全默认值。
 - 只有显式传入 `--execute` 才会发起真实运行时调用。
-- `destructive` 和 `external_side_effect` 工具必须由 MCP caller 在参数中传入 `confirmed: true`。
+- 生成策略默认是 read 自动执行、write 需要确认、destructive 拒绝、external-side-effect 需要确认。
+- `write` 和 `external_side_effect` 工具必须由 MCP caller 在参数中传入 `confirmed: true`。`destructive` 工具默认拒绝，除非操作者修改 Kit 策略。
 - Bearer token 和 header 只通过运行时参数传入。推荐使用 `--bearer-env API_TOKEN`，让配置文件只保存环境变量名。
 - `--read-only` 会阻断 write/destructive/external-side-effect 工具。
 - `--deny-risk` 可禁用一个或多个风险等级。
 - `--allow-tool` 可限制运行时只允许指定工具。
-- `--audit-log` 会写入 JSONL 工具调用审计日志。
+- `--audit-log` 会写入 JSONL 工具调用审计日志，包含 user、session、model、tool call id、确认来源、outcome、risk 和脱敏参数。
 - dry-run 响应会包含 transport 专属请求预览、脱敏后的密钥信息和风险理由。
+- 运行时失败使用结构化错误码：`permission_denied`、`schema_mismatch`、`http_error`、`timeout`、`adapter_error`。
 
 连接 agent 前建议先运行：
 
@@ -111,11 +113,11 @@ OpenAPI 中的 HTTP transport 会被映射为真实请求：
 - `tools/list`
 - `tools/call`
 
-`tools/list` 会把 `capabilities.json` 中的能力转换为 MCP tools。高风险工具会额外暴露 `confirmed` 参数，方便 client 在调用时表达人工确认。
+`tools/list` 会把 `capabilities.json` 中的能力转换为 MCP tools。需要人工确认的工具会额外暴露 `confirmed` 参数，方便 client 在调用时表达明确授权。
 
 ## 当前边界
 
 当前执行支持：
 
-- 已支持：OpenAPI/HTTP、GraphQL、SQLite read-only SQL、基于 `grpcurl` 的 gRPC、Python plugin adapter、dry-run 和确认参数。
-- 后续扩展：更统一的 adapter 错误分类、更广的数据库方言、后台任务 adapter 和更强的 agent planning。
+- 已支持：OpenAPI/HTTP、GraphQL、SQLite read-only SQL、基于 `grpcurl` 的 gRPC、Python plugin adapter、dry-run、结构化错误、审计脱敏和确认参数。
+- 后续扩展：更广的数据库方言、后台任务 adapter 和更强的 agent planning。

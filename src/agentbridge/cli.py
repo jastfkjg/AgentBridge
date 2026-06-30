@@ -6,15 +6,17 @@ import importlib.util
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from agentbridge.agent import AIGenerator
 from agentbridge.chat import ChatConfig, ChatSession, parse_scalar
 from agentbridge.client_config import MCPClientConfig, build_mcp_client_configs, format_mcp_client_configs
+from agentbridge.diff import diff_kits, format_diff
 from agentbridge.discovery import CapabilityDiscoverer
 from agentbridge.generator import AgentKitGenerator
-from agentbridge.kit import doctor_kit, format_report, validate_kit
+from agentbridge.kit import doctor_kit, format_report, migrate_kit, validate_kit
 from agentbridge.models import Capability
 from agentbridge.mcp_server import MCPServerConfig, run_stdio_server
 from agentbridge.runtime import DryRunError, dry_run
@@ -31,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps([cap.to_dict() for cap in capabilities], indent=2, sort_keys=True))
             return 0
         if args.command == "generate":
+            if getattr(args, "check", False):
+                return _run_generate_check(args)
             paths = [Path(p) for p in args.paths]
             _print_progress(
                 f"Starting generation for {len(paths)} input path(s); output={Path(args.output)}."
@@ -61,9 +65,20 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0 if result["allowed"] or result["requires_confirmation"] else 2
         if args.command == "validate":
+            if getattr(args, "migrate", False):
+                migration = migrate_kit(Path(args.kit))
+                if migration["changed"]:
+                    print(json.dumps(migration, indent=2, sort_keys=True))
             report = validate_kit(Path(args.kit))
             _print_report(report, args.json)
             return 0 if report.ok else 2
+        if args.command == "diff":
+            diff = diff_kits(Path(args.old_kit), Path(args.new_kit))
+            if args.json:
+                print(json.dumps(diff, indent=2, sort_keys=True))
+            else:
+                print(format_diff(diff))
+            return 2 if diff["has_changes"] else 0
         if args.command == "doctor":
             report = doctor_kit(Path(args.kit), base_url=args.base_url or "", execute=args.execute)
             _print_report(report, args.json)
@@ -341,6 +356,27 @@ def _run_enhance(args: argparse.Namespace) -> int:
     )
     print(json.dumps(kit.to_manifest(), indent=2, sort_keys=True))
     return 0
+
+
+def _run_generate_check(args: argparse.Namespace) -> int:
+    paths = [Path(p) for p in args.paths]
+    output = Path(args.output)
+    with tempfile.TemporaryDirectory() as tmp:
+        generated = Path(tmp) / "kit"
+        ai_gen = _create_ai_generator(args, paths)
+        AgentKitGenerator(
+            ai_generator=ai_gen,
+            progress=_print_progress,
+            progress_interval=getattr(args, "progress_interval", None),
+            analysis_batch_size=getattr(args, "batch_size", None),
+            resume=bool(getattr(args, "resume", False)),
+        ).generate(paths, generated, args.name)
+        diff = diff_kits(output, generated)
+    if getattr(args, "json", False):
+        print(json.dumps(diff, indent=2, sort_keys=True))
+    else:
+        print(format_diff(diff))
+    return 2 if diff["has_changes"] else 0
 
 
 def _headers_from_args(args: argparse.Namespace) -> dict[str, str]:
@@ -657,6 +693,8 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--output", "-o", required=True, help="Output directory for the generated kit.")
     generate.add_argument("--name", help="Kit name. Defaults to the input directory name.")
     generate.add_argument("--no-ai", action="store_true", help="Generate deterministically without LLM enrichment; intended for schema-only kits such as OpenAPI-to-MCP.")
+    generate.add_argument("--check", action="store_true", help="Generate to a temporary directory and fail if the existing output kit is stale.")
+    generate.add_argument("--json", action="store_true", help="Print machine-readable check output when used with --check.")
     _add_llm_options(generate)
 
     enhance = subparsers.add_parser(
@@ -685,6 +723,12 @@ def build_parser() -> argparse.ArgumentParser:
     validate = subparsers.add_parser("validate", help="Validate a generated kit before connecting it to agents.")
     validate.add_argument("kit", help="Generated kit directory.")
     validate.add_argument("--json", action="store_true", help="Print machine-readable JSON report.")
+    validate.add_argument("--migrate", action="store_true", help="Apply additive v1 kit migrations before validating.")
+
+    diff = subparsers.add_parser("diff", help="Compare two generated kits for CI review.")
+    diff.add_argument("old_kit", help="Existing or baseline kit directory.")
+    diff.add_argument("new_kit", help="Newly generated kit directory.")
+    diff.add_argument("--json", action="store_true", help="Print machine-readable diff output.")
 
     doctor = subparsers.add_parser("doctor", help="Diagnose kit readiness and runtime safety configuration.")
     doctor.add_argument("kit", help="Generated kit directory.")

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from agentbridge.models import KIT_PROTOCOL_VERSION
+from agentbridge.policy import default_policy, normalize_permissions_policy, risk_is_denied, risk_requires_confirmation
 
 SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
@@ -86,6 +87,8 @@ def validate_kit(kit_dir: Path) -> KitReport:
     if isinstance(guardrails, dict):
         guardrail_tools = guardrails.get("tools", {})
         report.add("guardrails:tools", isinstance(guardrail_tools, dict), "Guardrails contain a tools object")
+        policy = normalize_permissions_policy(guardrails)
+        report.add("guardrails:policy", isinstance(policy.get("risk_actions"), dict), "Guardrails contain a normalized permission policy")
     if isinstance(guardrail_tools, dict):
         for name, cap in caps_by_name.items():
             rule = guardrail_tools.get(name)
@@ -93,8 +96,13 @@ def validate_kit(kit_dir: Path) -> KitReport:
             if not isinstance(rule, dict):
                 continue
             risk = rule.get("risk", cap.get("risk"))
-            if risk in {"destructive", "external_side_effect"}:
-                report.add(f"guardrail:{name}:confirmation", bool(rule.get("confirm_required")), "High-risk tool requires confirmation")
+            if risk in {"write", "destructive", "external_side_effect"}:
+                protected = risk_is_denied(guardrails if isinstance(guardrails, dict) else {}, str(risk)) or risk_requires_confirmation(
+                    guardrails if isinstance(guardrails, dict) else {},
+                    str(risk),
+                    bool(rule.get("confirm_required")),
+                )
+                report.add(f"guardrail:{name}:policy", protected, "Mutating or side-effect tool is denied or requires confirmation")
             transport = rule.get("transport", cap.get("transport", {}))
             if isinstance(transport, dict) and transport.get("type") == "http":
                 report.add(f"transport:{name}:method", bool(transport.get("method")), "HTTP transport has method")
@@ -130,6 +138,46 @@ def doctor_kit(kit_dir: Path, base_url: str = "", execute: bool = False) -> KitR
     return report
 
 
+def migrate_kit(kit_dir: Path) -> dict[str, Any]:
+    changed: list[str] = []
+    manifest_path = kit_dir / "manifest.json"
+    manifest = _load_json_no_report(manifest_path)
+    if not isinstance(manifest, dict):
+        manifest = {"protocol": KIT_PROTOCOL_VERSION, "name": kit_dir.name}
+    manifest.setdefault("protocol", KIT_PROTOCOL_VERSION)
+    outputs = manifest.setdefault("outputs", {})
+    if isinstance(outputs, dict) and outputs.get("analysis_report") != "analysis/report.md":
+        outputs["analysis_report"] = "analysis/report.md"
+        changed.append("manifest.outputs.analysis_report")
+    if manifest.get("protocol") != KIT_PROTOCOL_VERSION:
+        manifest["protocol"] = KIT_PROTOCOL_VERSION
+        changed.append("manifest.protocol")
+    _write_json_if_changed(manifest_path, manifest, changed, "manifest.json")
+
+    guardrails_path = kit_dir / "guardrails" / "permissions.json"
+    guardrails = _load_json_no_report(guardrails_path)
+    if not isinstance(guardrails, dict):
+        guardrails = {"tools": {}}
+    if "policy" not in guardrails:
+        guardrails["policy"] = default_policy()
+        changed.append("guardrails.policy")
+    else:
+        normalized = normalize_permissions_policy(guardrails)
+        if guardrails.get("policy") != normalized:
+            guardrails["policy"] = normalized
+            changed.append("guardrails.policy")
+    guardrails.setdefault("tools", {})
+    _write_json_if_changed(guardrails_path, guardrails, changed, "guardrails/permissions.json")
+
+    report_path = kit_dir / "analysis" / "report.md"
+    if not report_path.exists():
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text("# AgentBridge Analysis Report\n\nMigrated legacy kit. Regenerate to refresh detailed analysis.\n", encoding="utf-8")
+        changed.append("analysis/report.md")
+
+    return {"changed": bool(changed), "changes": changed}
+
+
 def load_json_file(path: Path, report: KitReport, name: str) -> Any:
     if not path.exists():
         report.add(name, False, f"{path.relative_to(report.kit_dir)} is missing")
@@ -141,6 +189,27 @@ def load_json_file(path: Path, report: KitReport, name: str) -> Any:
         return None
     report.add(name, True, f"{path.relative_to(report.kit_dir)} is readable")
     return data
+
+
+def _load_json_no_report(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _write_json_if_changed(path: Path, data: Any, changed: list[str], label: str) -> None:
+    serialized = json.dumps(data, indent=2, sort_keys=True) + "\n"
+    try:
+        current = path.read_text(encoding="utf-8")
+    except OSError:
+        current = ""
+    if current == serialized:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(serialized, encoding="utf-8")
+    if label not in changed:
+        changed.append(label)
 
 
 def scan_for_secrets(kit_dir: Path) -> list[str]:

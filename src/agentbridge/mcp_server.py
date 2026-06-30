@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import hashlib
 import sys
+import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
+from agentbridge.audit import append_audit_event
 from agentbridge.adapters import (
     AdapterError,
     AdapterRuntimeConfig,
@@ -21,6 +23,8 @@ from agentbridge.adapters import (
     format_http_response,
     redact_headers,
 )
+from agentbridge.errors import error_code_for_exception, structured_error
+from agentbridge.policy import risk_is_denied, risk_requires_confirmation
 from agentbridge.runtime import dry_run, load_runtime_kit
 
 
@@ -35,6 +39,9 @@ class MCPServerConfig:
     deny_risks: set[str] = field(default_factory=set)
     allow_tools: set[str] = field(default_factory=set)
     audit_log: Path | None = None
+    user: str = "local"
+    session_id: str = "default"
+    model: str = ""
     graphql_endpoint: str = ""
     database_url: str = ""
     grpc_target: str = ""
@@ -86,7 +93,13 @@ class AgentBridgeMCPServer:
             if self.config.saved_credentials and _is_login_tool(name, cap):
                 required = [item for item in schema.get("required", []) if item not in self.config.saved_credentials]
                 schema["required"] = required
-            if rule.get("confirm_required"):
+            risk = str(rule.get("risk", cap.get("risk", "read")))
+            requires_confirmation = False if risk_is_denied(self.guardrails, risk) else risk_requires_confirmation(
+                self.guardrails,
+                risk,
+                bool(rule.get("confirm_required", False)),
+            )
+            if requires_confirmation:
                 schema["properties"]["confirmed"] = {
                     "type": "boolean",
                     "description": "Set true only after the user explicitly confirms this high-risk operation.",
@@ -97,8 +110,8 @@ class AgentBridgeMCPServer:
                     "description": cap.get("description", name),
                     "inputSchema": schema,
                     "annotations": {
-                        "risk": rule.get("risk", cap.get("risk", "read")),
-                        "confirm_required": bool(rule.get("confirm_required", False)),
+                        "risk": risk,
+                        "confirm_required": requires_confirmation,
                         "execution_mode": "execute" if self.config.execute else "dry_run",
                     },
                 }
@@ -123,60 +136,80 @@ class AgentBridgeMCPServer:
         plan = dry_run(self.config.kit_dir, name, args, confirmed=confirmed)
         capability = self.capabilities[name]
         self._attach_request_preview(plan, capability, args)
+        if plan.get("error"):
+            self._audit(name, args, "blocked", plan, confirmed=confirmed)
+            return _tool_text(plan, is_error=True)
         policy_error = self._policy_error(name, plan)
         if policy_error:
             plan = dict(plan)
             plan["allowed"] = False
-            plan["policy_error"] = policy_error
-            self._audit(name, args, "blocked", plan)
+            plan["policy_error"] = policy_error["message"]
+            plan["error"] = policy_error
+            self._audit(name, args, "blocked", plan, confirmed=confirmed)
             return _tool_text(plan, is_error=True)
 
         if not self.config.execute:
-            self._audit(name, args, "dry_run", plan)
+            self._audit(name, args, "dry_run", plan, confirmed=confirmed)
             return _tool_text(plan, is_error=False)
         if not plan["allowed"]:
-            self._audit(name, args, "blocked", plan)
+            self._audit(name, args, "blocked", plan, confirmed=confirmed)
             return _tool_text(plan, is_error=True)
 
         try:
             result = execute_tool(capability, args, self._adapter_config())
         except AdapterError as exc:
-            raise MCPServerError(str(exc)) from exc
+            message = str(exc)
+            code = error_code_for_exception(message)
+            result = {
+                "tool": name,
+                "status": code,
+                "error": structured_error(code, message, "adapter"),
+            }
+            self._audit(name, args, "error", result, confirmed=confirmed)
+            return _tool_text(result, is_error=True)
+        if result.get("status") == "http_error" and isinstance(result.get("error"), str):
+            result["error"] = structured_error("http_error", str(result["error"]), "transport")
+        elif result.get("status") in {"grpc_error"} and isinstance(result.get("error"), str):
+            result["error"] = structured_error("adapter_error", str(result["error"]), "adapter")
         capture_auth_headers_from_result(result, self.config.headers)
         if result.get("status") == "executed":
             if _is_login_tool(name, capability):
                 self.config.saved_credentials.update(_login_credentials_from_args(args))
             _save_runtime_state_from_tool(self.config.kit_dir, name, capability, args, self.config.headers)
-        self._audit(name, args, "executed" if not result.get("error") else "error", result)
+        self._audit(name, args, "executed" if not result.get("error") else "error", result, confirmed=confirmed)
         return _tool_text(result, is_error=bool(result.get("error")))
 
-    def _policy_error(self, name: str, plan: dict[str, Any]) -> str:
+    def _policy_error(self, name: str, plan: dict[str, Any]) -> dict[str, Any] | None:
         risk = str(plan.get("risk", "read"))
         if self.config.allow_tools and name not in self.config.allow_tools:
-            return f"Tool {name} is not in the allowlist."
+            return structured_error("permission_denied", f"Tool {name} is not in the allowlist.", "policy")
         if risk in self.config.deny_risks:
-            return f"Risk level {risk} is disabled by runtime policy."
+            return structured_error("permission_denied", f"Risk level {risk} is disabled by runtime policy.", "policy")
         if self.config.read_only and risk != "read":
-            return f"Read-only mode blocks {risk} tool {name}."
-        return ""
+            return structured_error("permission_denied", f"Read-only mode blocks {risk} tool {name}.", "policy")
+        return None
 
-    def _audit(self, name: str, args: dict[str, Any], outcome: str, payload: dict[str, Any]) -> None:
+    def _audit(self, name: str, args: dict[str, Any], outcome: str, payload: dict[str, Any], confirmed: bool = False) -> None:
         if not self.config.audit_log:
             return
+        error = payload.get("error")
         event = {
             "ts": datetime.now(timezone.utc).isoformat(),
+            "user": self.config.user,
+            "session_id": self.config.session_id,
+            "model": self.config.model,
+            "tool_call_id": str(uuid.uuid4()),
             "tool": name,
             "outcome": outcome,
             "risk": payload.get("risk"),
             "execute": self.config.execute,
             "read_only": self.config.read_only,
+            "confirmation_source": "explicit" if confirmed else "",
             "args": args,
             "transport": payload.get("request_preview") or payload.get("transport") or payload.get("request"),
-            "error": payload.get("error") or payload.get("policy_error"),
+            "error": error.get("message") if isinstance(error, dict) else error or payload.get("policy_error"),
         }
-        self.config.audit_log.parent.mkdir(parents=True, exist_ok=True)
-        with self.config.audit_log.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, sort_keys=True) + "\n")
+        append_audit_event(self.config.audit_log, event)
 
     def _attach_request_preview(self, plan: dict[str, Any], capability: dict[str, Any], args: dict[str, Any]) -> None:
         try:

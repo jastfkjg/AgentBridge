@@ -20,7 +20,9 @@ Existing project/system
 - A stable `agentbridge-kit/v1` contract containing capabilities, tools, prompts, skills, schemas, guardrails, dry-run plans, client configs, and tests.
 - Claude Agent SDK, MCP, Claude, OpenAI, and Vercel AI tool definitions generated from the same capability model.
 - Browser and terminal chat control surfaces over the generated tool layer.
-- Dry-run by default, runtime policy controls, and explicit authorization for high-risk operations.
+- Dry-run by default, runtime policy controls, structured runtime errors, audit redaction, and human-in-the-loop authorization.
+- Richer project understanding: OpenAPI `$ref`/JSON Schema normalization, AST-backed Python route discovery, structured TypeScript/Java source scanning, evidence links, confidence scores, and human-readable analysis reports.
+- CI-oriented kit quality: `agentbridge diff`, `generate --check`, additive kit migration, and preservation of user-authored prompts, skills, and guardrails during regeneration.
 - Session history, streaming Web Chat responses, tool timelines, clickable tool invocation, required-parameter guidance, file attachments, and AI token usage/cost metadata.
 - In-place re-analysis of an existing kit when the source system changes.
 
@@ -69,6 +71,21 @@ Validate the result:
 agentbridge validate .agentbridge/my-system-kit
 ```
 
+Check whether an existing generated kit is stale without rewriting it:
+
+```bash
+agentbridge generate ./openapi.json \
+  --output .agentbridge/openapi-kit \
+  --no-ai \
+  --check
+```
+
+Compare two generated kits for CI review:
+
+```bash
+agentbridge diff .agentbridge/old-kit .agentbridge/new-kit
+```
+
 ## Enhance an Existing Kit
 
 Re-analyze the current project and update the existing kit in place:
@@ -96,11 +113,12 @@ Open the printed URL. The Web UI acts as a Claude Agent chat control surface ove
 - Dry-run and real-system mode switching.
 - Base URL validation and connectivity testing.
 - Saved login-account selection and management per kit, with an optional Save login toggle.
+- A permission-policy drawer for reviewing and editing `guardrails/permissions.json`.
 - Clickable tools that insert `/run` commands and required parameters.
 - Visible authorization buttons for high-risk operations and Claude Agent SDK tool permission prompts, including business-operation summaries such as Login or Create script.
 - Real-time SSE streaming, collapsible command details in chat, interrupt control, recent conversation rename/delete/new-chat actions, file attachments, Markdown responses, and token usage history.
 
-Real-system mode still enforces generated guardrails and confirmation requirements.
+Real-system mode still enforces generated guardrails and confirmation requirements. By default, read tools may execute when execute mode is enabled, write tools require confirmation, destructive tools are denied, and external-side-effect tools require confirmation.
 
 Runtime credentials can be supplied when starting the server:
 
@@ -174,7 +192,12 @@ agentbridge mcp-config .agentbridge/my-system-kit --write
 ## Safety Defaults
 
 - Dry-run never executes the target operation.
-- Destructive and external-side-effect tools require explicit confirmation.
+- Read tools may execute in execute mode.
+- Write tools require explicit confirmation.
+- Destructive tools are denied by the generated policy unless an operator changes the kit policy.
+- External-side-effect tools require explicit confirmation.
+- Runtime failures use structured error codes such as `permission_denied`, `schema_mismatch`, `http_error`, `timeout`, and `adapter_error`.
+- Audit logs redact passwords, tokens, cookies, authorization headers, API keys, and secrets.
 - Switching runtime mode clears pending authorization.
 - Project analysis is read-only; generated files are written only to the selected kit directory.
 - Secrets are runtime inputs and must not be stored in generated kit protocol files. Web Chat credentials live in local runtime state (`.agentbridge-runtime.json`), which should stay out of version control.
@@ -185,8 +208,11 @@ agentbridge mcp-config .agentbridge/my-system-kit --write
 | --- | --- |
 | `discover <paths>` | Print deterministic candidate capabilities |
 | `generate <paths> -o <kit>` | Generate a Claude-controllable Agent Integration Kit |
+| `generate <paths> -o <kit> --check` | Fail when the existing kit differs from regenerated output |
+| `diff <old-kit> <new-kit>` | Compare capability, risk, schema, transport, and guardrail changes |
 | `enhance <kit> <paths>` | Re-analyze and update an existing kit with Claude Agent SDK |
 | `validate <kit>` | Validate kit protocol and safety contracts |
+| `validate <kit> --migrate` | Apply additive v1 migrations before validation |
 | `doctor <kit>` | Check runtime readiness |
 | `web <kit>` | Start browser chat over the tool layer |
 | `chat <kit>` | Start terminal chat over the tool layer |

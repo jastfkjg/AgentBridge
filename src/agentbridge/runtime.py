@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from agentbridge.discovery import dedupe_capabilities
+from agentbridge.errors import structured_error
 from agentbridge.models import Capability
+from agentbridge.policy import normalize_permissions_policy, risk_is_denied, risk_policy_action, risk_requires_confirmation
 
 
 class DryRunError(ValueError):
@@ -22,22 +24,33 @@ def dry_run(kit_dir: Path, tool_name: str, args: dict[str, Any], confirmed: bool
     if not rule:
         raise DryRunError(f"Missing guardrail for tool: {tool_name}")
     validation = validate_args(capability.get("input_schema", {}), args)
-    allowed = not validation["errors"] and (not rule["confirm_required"] or confirmed)
+    risk = str(rule.get("risk", capability.get("risk", "read")))
+    policy_action = risk_policy_action(guardrails, risk)
+    denied = risk_is_denied(guardrails, risk)
+    requires_confirmation = False if denied else risk_requires_confirmation(
+        guardrails,
+        risk,
+        bool(rule.get("confirm_required", False)),
+    )
+    error = dry_run_error(tool_name, validation["errors"], risk, policy_action, requires_confirmation, confirmed)
+    allowed = not error and not denied and (not requires_confirmation or confirmed)
     return {
         "tool": tool_name,
         "allowed": allowed,
         "would_execute": False,
         "confirmed": confirmed,
-        "requires_confirmation": rule["confirm_required"],
-        "risk": rule["risk"],
+        "requires_confirmation": requires_confirmation,
+        "risk": risk,
         "risk_reason": rule.get("reason", ""),
+        "policy_action": policy_action,
         "validation": validation,
         "transport": rule.get("transport", {}),
         "planned_call": {
             "type": rule.get("transport", {}).get("type", "unknown"),
             "args": args,
         },
-        "next_step": next_step(validation["errors"], rule["confirm_required"], confirmed),
+        "next_step": next_step(validation["errors"], denied, requires_confirmation, confirmed),
+        **({"error": error} if error else {}),
     }
 
 
@@ -89,6 +102,7 @@ def load_runtime_kit(kit_dir: Path) -> tuple[dict[str, dict[str, Any]], dict[str
 
     guardrails = dict(raw_guardrails)
     guardrails["tools"] = normalized_rules
+    guardrails["policy"] = normalize_permissions_policy(guardrails)
     return normalized_capabilities, guardrails
 
 
@@ -132,9 +146,43 @@ def matches_type(expected: str, value: Any) -> bool:
     return True
 
 
-def next_step(errors: list[str], confirm_required: bool, confirmed: bool) -> str:
+def dry_run_error(
+    tool_name: str,
+    validation_errors: list[str],
+    risk: str,
+    policy_action: str,
+    requires_confirmation: bool,
+    confirmed: bool,
+) -> dict[str, Any] | None:
+    if validation_errors:
+        return structured_error(
+            "schema_mismatch",
+            "; ".join(validation_errors),
+            "validation",
+            {"tool": tool_name},
+        )
+    if policy_action == "deny":
+        return structured_error(
+            "permission_denied",
+            f"Risk level {risk} is denied by kit policy.",
+            "policy",
+            {"tool": tool_name, "risk": risk},
+        )
+    if requires_confirmation and not confirmed:
+        return structured_error(
+            "permission_denied",
+            f"Risk level {risk} requires explicit human confirmation.",
+            "policy",
+            {"tool": tool_name, "risk": risk},
+        )
+    return None
+
+
+def next_step(errors: list[str], denied: bool, confirm_required: bool, confirmed: bool) -> str:
     if errors:
         return "Fix invalid tool arguments before execution."
+    if denied:
+        return "This operation is denied by kit policy."
     if confirm_required and not confirmed:
         return "Ask a human to explicitly confirm this high-risk operation."
     return "Safe to execute through the host system adapter."

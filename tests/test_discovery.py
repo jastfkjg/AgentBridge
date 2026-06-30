@@ -245,6 +245,132 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(cap.transport["parameters"]["header"], {"x_tenant": "X-Tenant"})
         self.assertEqual(cap.transport["auth"][0]["runtime_header"], "X-API-Key")
 
+    def test_openapi_resolves_refs_and_preserves_complex_json_schema(self):
+        spec = {
+            "openapi": "3.0.0",
+            "components": {
+                "schemas": {
+                    "ChapterInput": {
+                        "type": "object",
+                        "required": ["title", "status"],
+                        "properties": {
+                            "title": {"type": "string", "example": "Opening"},
+                            "status": {"type": "string", "enum": ["draft", "published"]},
+                            "tags": {"type": "array", "items": {"type": "string"}},
+                            "metadata": {"type": "object", "nullable": True, "properties": {"source": {"type": "string"}}},
+                            "content": {"oneOf": [{"type": "string"}, {"type": "object", "properties": {"blocks": {"type": "array", "items": {"type": "string"}}}}]},
+                        },
+                    }
+                }
+            },
+            "paths": {
+                "/chapters": {
+                    "post": {
+                        "operationId": "createChapter",
+                        "requestBody": {
+                            "required": True,
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ChapterInput"}
+                                }
+                            },
+                        },
+                    }
+                }
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "openapi.json"
+            path.write_text(json.dumps(spec), encoding="utf-8")
+            capabilities = CapabilityDiscoverer().discover([path])
+
+        cap = capabilities[0]
+        schema = cap.input_schema
+        self.assertEqual(schema["required"], ["status", "title"])
+        self.assertEqual(schema["properties"]["status"]["enum"], ["draft", "published"])
+        self.assertEqual(schema["properties"]["tags"]["items"]["type"], "string")
+        self.assertTrue(schema["properties"]["metadata"]["nullable"])
+        self.assertEqual(schema["properties"]["title"]["example"], "Opening")
+        self.assertEqual(schema["properties"]["content"]["oneOf"][0]["type"], "string")
+        self.assertEqual(cap.transport["operation_id"], "createChapter")
+        self.assertGreaterEqual(cap.confidence, 0.9)
+        self.assertTrue(any(item["kind"] == "openapi_operation" and item["location"] == "POST /chapters" for item in cap.evidence))
+
+    def test_python_ast_scanner_records_route_call_chain_evidence(self):
+        source = '''
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.post("/projects/{project_id}/chapters")
+def create_chapter(project_id: str, payload: dict):
+    service = ChapterService()
+    return service.create(project_id, payload)
+
+class ChapterService:
+    def create(self, project_id, payload):
+        repo = ChapterRepository()
+        return repo.save(project_id, payload)
+
+class ChapterRepository:
+    def save(self, project_id, payload):
+        return {"id": project_id}
+'''
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "routes.py"
+            path.write_text(source, encoding="utf-8")
+            capabilities = CapabilityDiscoverer().discover([path])
+
+        cap = next(item for item in capabilities if item.name == "create_chapter")
+        self.assertEqual(cap.transport["handler"], "create_chapter")
+        self.assertGreaterEqual(cap.confidence, 0.7)
+        evidence_text = json.dumps(cap.evidence)
+        self.assertIn("ChapterService", evidence_text)
+        self.assertIn("ChapterRepository", evidence_text)
+        self.assertTrue(any(item["kind"] == "source_line" and item["location"].startswith("line ") for item in cap.evidence))
+
+    def test_typescript_source_tree_scanner_records_route_evidence(self):
+        source = """
+const router = require("express").Router();
+router.post("/projects/:projectId/chapters", async function createChapter(req, res) {
+  return chapterService.create(req.params.projectId, req.body);
+});
+"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "routes.ts"
+            path.write_text(source, encoding="utf-8")
+            capabilities = CapabilityDiscoverer().discover([path])
+
+        cap = next(item for item in capabilities if item.name == "create_chapter")
+        self.assertGreaterEqual(cap.confidence, 0.7)
+        self.assertTrue(any(item["kind"] == "source_tree" and "router.post" in item["detail"] for item in cap.evidence))
+        self.assertTrue(any(item["kind"] == "source_line" for item in cap.evidence))
+
+    def test_java_source_tree_scanner_records_route_evidence(self):
+        source = """
+@RestController
+@RequestMapping("/projects")
+class ChapterController {
+  @PostMapping("/{projectId}/chapters")
+  public Chapter createChapter(@PathVariable String projectId) {
+    return chapterService.create(projectId);
+  }
+}
+"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ChapterController.java"
+            path.write_text(source, encoding="utf-8")
+            capabilities = CapabilityDiscoverer().discover([path])
+
+        cap = next(item for item in capabilities if item.name == "create_chapter")
+        self.assertGreaterEqual(cap.confidence, 0.7)
+        self.assertTrue(any(item["kind"] == "source_tree" and "PostMapping" in item["detail"] for item in cap.evidence))
+        self.assertTrue(any(item["kind"] == "source_line" for item in cap.evidence))
+
     def test_graphql_variables_and_return_type_are_recorded(self):
         schema = """
         type Query {
