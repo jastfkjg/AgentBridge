@@ -949,13 +949,16 @@ class WebChatTests(unittest.TestCase):
 
             self.assertIn("/api/chat/agent-permission", html)
             self.assertIn("/api/chat/pending", html)
-            self.assertIn("currentPending.kind === 'agent_permission'", html)
+            self.assertIn("pending.kind === 'agent_permission'", html)
             self.assertIn("document.getElementById('confirmBtn').onclick = () => resolvePending(true)", html)
             self.assertIn("document.getElementById('cancelBtn').onclick = () => resolvePending(false)", html)
             self.assertIn("function setPendingBusy", html)
             self.assertIn("setPendingBusy(true,", html)
             self.assertIn("Permission resolve timed out", html)
-            self.assertIn("permission_id: currentPending.id", html)
+            self.assertIn("const pending = currentPending", html)
+            self.assertIn("permission_id: pending.id", html)
+            self.assertIn("await post('/api/chat/interrupt', payload(), 5000)", html)
+            self.assertIn("if (!allow && activeStreamController) activeStreamController.abort();", html)
             self.assertIn("Authorization request failed", html)
             self.assertNotIn("document.getElementById('confirmBtn').onclick = () => sendMessage('confirm')", html)
 

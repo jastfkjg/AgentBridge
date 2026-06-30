@@ -725,24 +725,30 @@ class AgentRunner:
             pass
 
     def resolve_permission(self, request_id: str, allow: bool) -> bool:
+        event: threading.Event | None = None
         with self._permission_lock:
             pending = self._pending_permission
             if not pending or pending.get("id") != request_id:
                 return False
             pending["allow"] = allow
-            event = pending.get("event")
-            if isinstance(event, threading.Event):
-                event.set()
-            return True
+            raw_event = pending.get("event")
+            if isinstance(raw_event, threading.Event):
+                event = raw_event
+        if event is not None:
+            event.set()
+        return True
 
     def interrupt(self) -> None:
+        event: threading.Event | None = None
         with self._permission_lock:
             pending = self._pending_permission
             if pending:
                 pending["allow"] = False
-                event = pending.get("event")
-                if isinstance(event, threading.Event):
-                    event.set()
+                raw_event = pending.get("event")
+                if isinstance(raw_event, threading.Event):
+                    event = raw_event
+        if event is not None:
+            event.set()
         loop = self._client_loop
         client = self._client
         if loop is None or client is None:

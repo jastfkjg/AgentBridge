@@ -374,6 +374,37 @@ class AgentProgressTests(unittest.TestCase):
         self.assertEqual(rest[0].result, "allowed")
         self.assertIsInstance(callback_result["result"], FakePermissionResultAllow)
 
+    def test_agent_runner_resolves_permission_after_releasing_permission_lock(self):
+        from agentbridge.agent import AgentRunner
+
+        class InspectingEvent(threading.Event):
+            def __init__(self, lock: threading.Lock) -> None:
+                super().__init__()
+                self.lock = lock
+                self.lock_was_held = False
+
+            def set(self) -> None:
+                acquired = self.lock.acquire(blocking=False)
+                self.lock_was_held = not acquired
+                if acquired:
+                    self.lock.release()
+                super().set()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = Path(tmp) / "kit"
+            kit.mkdir()
+            (kit / "capabilities.json").write_text("[]", encoding="utf-8")
+            (kit / "guardrails").mkdir()
+            (kit / "guardrails" / "permissions.json").write_text(json.dumps({"tools": {}}), encoding="utf-8")
+            runner = AgentRunner(kit, api_key="sk-test")
+            event = InspectingEvent(runner._permission_lock)
+            runner._pending_permission = {"id": "perm-1", "event": event, "allow": None}
+
+            self.assertTrue(runner.resolve_permission("perm-1", allow=False))
+
+            self.assertTrue(event.is_set())
+            self.assertFalse(event.lock_was_held)
+
     def test_agent_runner_auto_allows_read_only_bash_permission_requests(self):
         callback_result: dict[str, object] = {}
 

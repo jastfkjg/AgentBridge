@@ -2640,23 +2640,40 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     }}
     async function resolvePending(allow) {{
       if (!currentPending) return;
-      setPendingBusy(true, allow ? 'Authorizing...' : 'Cancelling...');
+      const pending = currentPending;
+      if (!allow) {{
+        renderPending(null);
+        setAwaitingAuthorization(false);
+        setSending(false);
+      }} else {{
+        setPendingBusy(true, 'Authorizing...');
+      }}
       try {{
-        if (currentPending.kind === 'agent_permission') {{
-          const data = await post('/api/chat/agent-permission', payload({{ permission_id: currentPending.id, allow }}), 15000);
+        if (pending.kind === 'agent_permission') {{
+          const data = await post('/api/chat/agent-permission', payload({{ permission_id: pending.id, allow }}), allow ? 15000 : 5000);
           if (data.error || data.status === 'not_found') throw new Error(data.error || data.message || 'No matching permission request is pending.');
           renderPending(null);
+          if (!allow && activeStreamController) activeStreamController.abort();
           return;
         }}
         const data = await post('/api/chat/pending', payload({{ allow }}));
         if (data.error) throw new Error(data.error);
         renderChatResponse(data);
       }} catch (error) {{
+        if (!allow) {{
+          try {{
+            await post('/api/chat/interrupt', payload(), 5000);
+          }} catch (interruptError) {{
+            // The permission stream may already be closed or unreachable.
+          }}
+          if (activeStreamController) activeStreamController.abort();
+          return;
+        }}
         const message = 'Authorization request failed: ' + (error && error.message ? error.message : error);
-        els.pendingText.textContent = message;
+        if (currentPending && currentPending.id === pending.id) els.pendingText.textContent = message;
         addMessage('assistant', message);
       }} finally {{
-        setPendingBusy(false);
+        if (currentPending && currentPending.id === pending.id) setPendingBusy(false);
       }}
     }}
     function formatNumber(value) {{
