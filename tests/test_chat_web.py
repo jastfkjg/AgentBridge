@@ -1132,10 +1132,32 @@ class WebChatTests(unittest.TestCase):
             self.assertIn(".composer", html)
             self.assertIn("position: sticky", html)
             self.assertIn("bottom: 0", html)
+            self.assertIn("grid-template-columns: minmax(0, 1fr) auto", html)
+            self.assertIn("grid-template-rows: auto", html)
+            self.assertIn("position: relative", html)
+            self.assertIn("bottom: auto", html)
+            self.assertIn("@media (max-height: 640px)", html)
+            self.assertIn("max-height: 104px", html)
             self.assertIn("Session memory is grouped by user and session.", html)
             self.assertIn("Start with --allow-kit-switch to edit this path.", html)
             self.assertIn('id="kit"', html)
             self.assertIn("disabled", html)
+
+    def test_rendered_web_ui_keeps_short_viewport_actions_scrollable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("overflow-y: auto", html)
+            self.assertIn("overscroll-behavior: contain", html)
+            self.assertIn("min-height: 42px", html)
+            self.assertIn("min-height: 100%", html)
+            self.assertIn("max(96px, calc(64px + env(safe-area-inset-bottom)))", html)
+            self.assertIn(".settings-actions button", html)
+            self.assertIn("min-height: 44px", html)
+            self.assertIn("activeRailButton.scrollIntoView", html)
 
     def test_rendered_web_ui_allows_kit_switch_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:

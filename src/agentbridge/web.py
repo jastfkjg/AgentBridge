@@ -2015,6 +2015,11 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       gap: 4px;
       border-color: var(--line);
       background: #0e1411;
+      min-height: 0;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+      scrollbar-color: #33413b transparent;
     }}
     .brand-lockup {{
       min-height: 52px;
@@ -2058,6 +2063,8 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     .rail-button {{
       width: 100%;
       height: 42px;
+      min-height: 42px;
+      flex: 0 0 auto;
       padding: 0 10px;
       border-radius: 9px;
       display: flex;
@@ -2112,6 +2119,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       min-width: 0;
       min-height: 0;
       position: relative;
+      overflow: hidden;
     }}
     .console-view {{
       display: none;
@@ -2163,12 +2171,42 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       color: var(--accent);
     }}
     .composer, .composer-dock {{
+      position: relative;
+      bottom: auto;
+      min-height: 0;
+      padding: 10px clamp(20px, 6vw, 88px) max(14px, env(safe-area-inset-bottom));
       background: linear-gradient(180deg, rgba(11,16,14,0) 0%, var(--surface) 26%, var(--surface) 100%);
     }}
     .composer-shell, .composer-card {{
       border-color: #34423c;
       background: #171f1c;
       box-shadow: var(--shadow);
+    }}
+    .composer-row {{
+      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-rows: auto;
+      align-items: end;
+      gap: 10px;
+    }}
+    .composer textarea {{
+      min-width: 0;
+      min-height: 44px;
+      grid-column: 1;
+      grid-row: 1;
+      padding: 10px;
+    }}
+    .composer-actions {{
+      min-width: 0;
+      grid-column: 2;
+      grid-row: 1;
+      align-self: end;
+      justify-content: flex-end;
+    }}
+    .composer-tools {{
+      min-width: 0;
+    }}
+    .send-button {{
+      flex: 0 0 40px;
     }}
     .composer textarea, input, textarea, select {{
       border-color: var(--line);
@@ -2242,8 +2280,9 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     }}
     .workspace-page {{
       width: min(100%, 1440px);
+      min-height: 100%;
       margin: 0 auto;
-      padding: 34px clamp(22px, 4vw, 56px) 64px;
+      padding: 34px clamp(22px, 4vw, 56px) max(96px, calc(64px + env(safe-area-inset-bottom)));
     }}
     .page-heading {{
       padding-bottom: 26px;
@@ -2491,9 +2530,13 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     }}
     .settings-actions {{
       margin-top: 24px;
+      padding-bottom: 16px;
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
+    }}
+    .settings-actions button {{
+      min-height: 44px;
     }}
     .mobile-navigation {{
       display: grid;
@@ -2550,7 +2593,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         grid-template-rows: auto minmax(0, 1fr);
       }}
       .workspace-page {{
-        padding: 24px 16px 48px;
+        padding: 24px 16px max(80px, calc(48px + env(safe-area-inset-bottom)));
       }}
       .page-heading {{
         align-items: flex-start;
@@ -2592,12 +2635,46 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       .runtime-controls {{
         padding-left: 0;
       }}
+      .composer, .composer-dock {{
+        padding: 8px 12px max(10px, env(safe-area-inset-bottom));
+      }}
+      .composer-row {{
+        gap: 8px;
+      }}
       .mobile-navigation .rail-button {{
         width: 100%;
         justify-content: flex-start;
       }}
       .mobile-navigation .rail-button span {{
         display: inline;
+      }}
+    }}
+    @media (max-height: 640px) {{
+      .console-main {{
+        grid-template-rows: 60px minmax(0, 1fr);
+      }}
+      .top, .chat-header {{
+        min-height: 60px;
+        padding-block: 7px;
+      }}
+      .composer, .composer-dock {{
+        padding-top: 6px;
+        padding-bottom: max(8px, env(safe-area-inset-bottom));
+      }}
+      .composer-shell, .composer-card {{
+        padding: 7px;
+      }}
+      .composer textarea {{
+        min-height: 40px;
+        max-height: 104px;
+        padding-block: 8px;
+      }}
+      .composer-hint {{
+        display: none;
+      }}
+      .workspace-page {{
+        padding-top: 22px;
+        padding-bottom: max(104px, calc(72px + env(safe-area-inset-bottom)));
       }}
     }}
   </style>
@@ -3154,6 +3231,8 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         button.classList.toggle('active', active);
         button.setAttribute('aria-current', active ? 'page' : 'false');
       }});
+      const activeRailButton = document.querySelector('.navigation-rail [data-view-target="' + target + '"]');
+      if (activeRailButton) requestAnimationFrame(() => activeRailButton.scrollIntoView({{ block: 'nearest' }}));
       els.pageTitle.textContent = viewCopy[target][0];
       els.pageMeta.textContent = viewCopy[target][1];
       if (updateHash && window.location.hash !== '#' + target) {{
