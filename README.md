@@ -102,21 +102,19 @@ Use `--resume` to reuse valid batch checkpoints:
 agentbridge enhance .agentbridge/my-system-kit ./my-system --resume
 ```
 
-## Start the Web Chat
+## Start the System Control Console
 
 ```bash
 agentbridge web .agentbridge/my-system-kit --port 8765
 ```
 
-Open the printed URL. The Web UI acts as a Claude Agent chat control surface over the parsed system capabilities and supports:
+Open the printed URL. The Web home page is a responsive System Control Console over the parsed system:
 
-- Dry-run and real-system mode switching.
-- Base URL validation and connectivity testing.
-- Saved login-account selection and management per kit, with an optional Save login toggle.
-- A permission-policy drawer for reviewing and editing `guardrails/permissions.json`.
-- Clickable tools that insert `/run` commands and required parameters.
-- Visible authorization buttons for high-risk operations and Claude Agent SDK tool permission prompts, including business-operation summaries such as Login or Create script.
-- Real-time SSE streaming, collapsible command details in chat, interrupt control, recent conversation rename/delete/new-chat actions, file attachments, Markdown responses, and token usage history.
+- Seven deep-linked workspaces: Chat, Tools, Capabilities, Policy, Audit, Workflows, and Settings.
+- Searchable risk-aware tool and capability catalogs; preparing a tool returns to Chat without executing it.
+- Editable generated policy, redacted audit events, inferred workflow guidance, and kit/runtime settings.
+- Dry-run and real-system switching, Base URL connectivity checks, saved accounts, token usage, and responsive mobile navigation.
+- Real-time SSE chat, command details, interrupt control, conversation management, attachments, Markdown, and explicit high-risk authorization.
 
 Real-system mode still enforces generated guardrails and confirmation requirements. By default, read tools may execute when execute mode is enabled, write tools require confirmation, destructive tools are denied, and external-side-effect tools require confirmation.
 

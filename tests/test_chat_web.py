@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
+from agentbridge.audit import append_audit_event
 from agentbridge.chat import ChatConfig, ChatSession, load_kit_runtime_state, save_kit_runtime_state
 from agentbridge.web import QuietThreadingHTTPServer, build_handler, normalize_target_base_url, render_index
 
@@ -883,6 +884,27 @@ class WebChatTests(unittest.TestCase):
             self.assertNotIn("tool-rail", html)
             self.assertIn("@media (max-width: 760px)", html)
 
+    def test_rendered_web_ui_is_a_deep_linked_system_control_console(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            kit = _make_kit(Path(tmp))
+            config = ChatConfig(kit_dir=kit, memory_enabled=False)
+
+            html = render_index(config, allow_kit_switch=False)
+
+            self.assertIn("<title>AgentBridge System Control Console</title>", html)
+            for view in ["chat", "tools", "capabilities", "policy", "audit", "workflows", "settings"]:
+                self.assertIn(f'data-view="{view}"', html)
+                self.assertIn(f'data-view-target="{view}"', html)
+            self.assertIn('aria-label="Console sections"', html)
+            self.assertIn("window.addEventListener('hashchange'", html)
+            self.assertIn("history.replaceState(null, '', '#' + target)", html)
+            self.assertIn("/api/console", html)
+            self.assertIn("renderToolCatalog", html)
+            self.assertIn("renderCapabilities", html)
+            self.assertIn("renderAudit", html)
+            self.assertIn("renderWorkflows", html)
+            self.assertIn("renderSettings", html)
+
     def test_rendered_web_ui_uses_sse_streaming_and_interrupt_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             kit = _make_kit(Path(tmp))
@@ -1256,6 +1278,58 @@ class WebChatTests(unittest.TestCase):
 
             self.assertEqual(response["status"], "tools")
             self.assertIn("list_chapter", response["message"])
+
+    def test_web_console_api_aggregates_capabilities_workflows_audit_and_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kit = _make_kit(root)
+            _write_json(kit / "manifest.json", {"name": "Writing System", "protocol": "agentbridge-kit/v1", "version": "0.1.0"})
+            _write_json(
+                kit / "analysis" / "agent_analysis.json",
+                {
+                    "workflows": [
+                        {
+                            "name": "Publish chapter",
+                            "description": "Review and publish a chapter.",
+                            "steps": ["list_chapter", "publish_chapter"],
+                        }
+                    ]
+                },
+            )
+            audit_log = root / "audit.jsonl"
+            append_audit_event(
+                audit_log,
+                {
+                    "ts": "2026-07-26T10:20:00+08:00",
+                    "user": "alice",
+                    "session_id": "review",
+                    "tool": "login",
+                    "risk": "external_side_effect",
+                    "outcome": "blocked",
+                    "password": "secret",
+                },
+            )
+            config = ChatConfig(kit_dir=kit, memory_enabled=False, audit_log=audit_log)
+
+            from http.server import ThreadingHTTPServer
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), build_handler(config))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.shutdown)
+            self.addCleanup(server.server_close)
+            base = f"http://127.0.0.1:{server.server_port}"
+
+            payload = json.loads(urllib.request.urlopen(base + "/api/console").read().decode("utf-8"))
+
+            self.assertEqual(payload["manifest"]["name"], "Writing System")
+            self.assertEqual(payload["summary"]["capability_count"], 3)
+            self.assertEqual(payload["summary"]["workflow_count"], 1)
+            self.assertEqual(payload["workflows"][0]["name"], "Publish chapter")
+            self.assertTrue(payload["audit"]["enabled"])
+            self.assertEqual(payload["audit"]["events"][0]["tool"], "login")
+            self.assertEqual(payload["audit"]["events"][0]["password"], "<redacted>")
+            self.assertEqual(payload["settings"]["audit_log"], str(audit_log))
 
     def test_web_policy_api_loads_and_updates_permissions_policy(self):
         with tempfile.TemporaryDirectory() as tmp:

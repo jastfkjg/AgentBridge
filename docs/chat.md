@@ -42,28 +42,23 @@ cancel
 
 Operations marked `confirm` by policy pause before execution and show the planned call, risk reason, request URL, redacted headers, body, and arguments. Type `confirm` to continue or `cancel` to clear the pending operation. The generated default policy allows reads, requires confirmation for writes and external side effects, and denies destructive tools.
 
-## Web Chat
+## System Control Console
 
 ```bash
 agentbridge web .agentbridge/openapi-kit --port 8765
 ```
 
-Open the printed URL in a browser. The UI exposes the parsed system capabilities as a browser-based Claude Agent chat control surface and includes:
+Open the printed URL in a browser. The Web home page is a responsive System Control Console with seven first-class, hash-addressable workspaces:
 
-- user and session selectors
-- active kit display
-- Dry-run / Real system runtime selector
-- Base URL validation and target-system connectivity test
-- saved login-account selector, optional Save login toggle, and account add/edit/delete controls
-- permission policy drawer for viewing and editing `guardrails/permissions.json`
-- clickable tool list that inserts `/run` commands and required parameters
-- chat transcript
-- visible Authorize/Cancel controls for pending operations with operation summaries such as Login or Create script
-- SSE streaming for Agent replies and tool events
-- collapsible chat messages for concrete commands such as `curl` or `python`
-- interrupt control for the current Agent request
-- token usage totals and the most recent 100 token history entries
-- recent conversation new-chat, rename, and delete actions
+- **Chat** (`#chat`) keeps the Claude Agent transcript, SSE streaming, file attachments, interrupt control, recent conversations, and visible Authorize/Cancel controls.
+- **Tools** (`#tools`) searches and filters generated tools by risk. **Prepare** inserts a typed `/run` command into Chat without executing it.
+- **Capabilities** (`#capabilities`) exposes the normalized business contract with domain, source, confidence, transport context, and risk.
+- **Policy** (`#policy`) summarizes the effective action for every risk class and edits `guardrails/permissions.json`.
+- **Audit** (`#audit`) filters the most recent 200 redacted JSONL runtime events. Start with `--audit-log PATH` to enable capture.
+- **Workflows** (`#workflows`) shows multi-step operating patterns from `analysis/agent_analysis.json`; these remain guidance and are never executed automatically.
+- **Settings** (`#settings`) summarizes kit identity, protocol, runtime overrides, memory, configured adapters, saved-account management, and current-session token usage.
+
+The persistent desktop navigation collapses to a full mobile navigation drawer below 760px. The Dry-run / Real system selector remains visible across all workspaces. Base URL validation, target connectivity testing, login-account selection, and account add/edit/delete controls continue to use the same guarded runtime.
 
 Run in execution mode:
 
@@ -75,7 +70,9 @@ agentbridge web .agentbridge/openapi-kit \
   --read-only
 ```
 
-The mode can also be changed directly in the Web UI. Real system mode requires an `http://` or `https://` Base URL. The connectivity test sends `HEAD` to the Base URL and falls back to `GET` when `HEAD` is not supported; any HTTP response means the system is reachable. Switching modes clears any pending confirmation before rebuilding the runtime, while guardrails and human confirmation remain enforced. Policy edits in the Web UI are written back to `guardrails/permissions.json`. The Web Chat server prints concise request, stream, permission, and error logs to the terminal with secrets redacted.
+The mode can also be changed directly in the Console. Real system mode requires an `http://` or `https://` Base URL. The connectivity test sends `HEAD` to the Base URL and falls back to `GET` when `HEAD` is not supported; any HTTP response means the system is reachable. Switching modes clears any pending confirmation before rebuilding the runtime, while guardrails and human confirmation remain enforced. Policy edits are written back to `guardrails/permissions.json`. The server prints concise request, stream, permission, and error logs to the terminal with secrets redacted.
+
+`GET /api/console` supplies the read-only manifest, capability, workflow, audit, summary, and non-secret settings data used by the Console. Policy changes continue to use the dedicated `POST /api/policy` endpoint.
 
 Terminal chat exposes the same core workflows through `/use`, `/mode`, `/connect`, and `/usage`. `/use` lists numbered tools and prompts for required parameters. Confirm-required calls present an explicit Authorize/Cancel selection.
 

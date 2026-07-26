@@ -42,28 +42,23 @@ cancel
 
 被策略标记为 `confirm` 的操作会先暂停，并展示计划调用、风险理由、请求 URL、脱敏 headers、body 和参数。输入 `confirm` 继续，输入 `cancel` 清除待确认操作。生成默认策略允许 read，write 和 external side effect 需要确认，destructive 默认拒绝。
 
-## Web Chat
+## System Control Console
 
 ```bash
 agentbridge web .agentbridge/openapi-kit --port 8765
 ```
 
-打开命令输出的 URL。Web UI 将已解析系统能力暴露为浏览器中的 Claude Agent Chat 控制入口，包含：
+打开命令输出的 URL。Web 首页是响应式 System Control Console，包含七个可通过 URL hash 直接访问的一级工作区：
 
-- 用户和会话选择
-- 当前 kit 展示
-- Dry-run / 真实系统运行模式切换
-- Base URL 校验和目标系统连通测试
-- 已保存登录账号选择、是否保存登录账号开关，以及账号新增/修改/删除控件
-- 权限策略抽屉，可查看和编辑 `guardrails/permissions.json`
-- 可点击的工具列表，自动填入 `/run` 命令和必填参数
-- 聊天记录
-- 高风险操作和 Claude Agent SDK 工具权限请求的 Authorize/Cancel 控件，并显示 Login、Create script 等具体操作摘要
-- Agent 回复和工具事件的 SSE 流式响应
-- 对 `curl`、`python` 等实际命令在聊天消息中提供默认折叠的详情
-- 中断当前 Agent 请求的控制按钮
-- token 输入/输出/总量统计，以及最近 100 条 token 消耗历史
-- Recent conversations 支持 New chat、重命名和删除
+- **Chat**（`#chat`）：保留 Claude Agent 对话、SSE 流式响应、文件上传、中断、最近会话，以及高风险操作的 Authorize/Cancel。
+- **Tools**（`#tools`）：按名称和风险搜索生成工具；点击 **Prepare** 只会把带必填参数的 `/run` 命令填入 Chat，不会直接执行。
+- **Capabilities**（`#capabilities`）：查看标准化业务能力的领域、来源、置信度、传输信息和风险。
+- **Policy**（`#policy`）：汇总各风险等级的生效动作，并编辑 `guardrails/permissions.json`。
+- **Audit**（`#audit`）：筛选最近 200 条已脱敏 JSONL 运行事件；启动时传入 `--audit-log PATH` 才会记录。
+- **Workflows**（`#workflows`）：展示 `analysis/agent_analysis.json` 中的多步骤业务流程；这些内容仅作为操作指导，不会自动执行。
+- **Settings**（`#settings`）：汇总 kit、协议、运行时覆盖、会话记忆、适配器、登录账号管理和当前会话 token 用量。
+
+桌面端使用持续可见的侧栏导航，760px 以下切换为完整的移动抽屉。Dry-run / 真实系统切换在所有工作区持续可见；Base URL 校验、连通测试和多账号管理仍复用同一套受 Guardrail 保护的运行时。
 
 执行模式：
 
@@ -75,7 +70,9 @@ agentbridge web .agentbridge/openapi-kit \
   --read-only
 ```
 
-也可以直接在 Web 页面切换运行模式。真实系统模式必须填写 `http://` 或 `https://` Base URL。连通测试先向 Base URL 发送 `HEAD`，目标不支持时回退到 `GET`；只要收到 HTTP 响应，就判定系统网络可达。切换模式会先清除待确认操作并重建运行时，原有 guardrail 和人工确认仍然生效。Web UI 中的策略修改会写回 `guardrails/permissions.json`。Web Chat 会把当前 Base URL 保存到 `<kit>/.agentbridge-runtime.json`，重新打开同一个 kit 时自动恢复。Web Chat 服务端会在终端输出必要的请求、流式事件、授权和错误日志，并对密码、token、cookie、API key 等敏感值做脱敏。
+也可以直接在 Console 切换运行模式。真实系统模式必须填写 `http://` 或 `https://` Base URL。连通测试先向 Base URL 发送 `HEAD`，目标不支持时回退到 `GET`；只要收到 HTTP 响应，就判定系统网络可达。切换模式会先清除待确认操作并重建运行时，原有 guardrail 和人工确认仍然生效。策略修改会写回 `guardrails/permissions.json`。Console 会把当前 Base URL 保存到 `<kit>/.agentbridge-runtime.json`，重新打开同一个 kit 时自动恢复。服务端会在终端输出必要的请求、流式事件、授权和错误日志，并对密码、token、cookie、API key 等敏感值做脱敏。
+
+`GET /api/console` 为 Console 提供只读的 manifest、capabilities、workflows、audit、汇总信息和非敏感 settings；策略写入仍使用独立的 `POST /api/policy`。
 
 真实执行模式下，如果开启 Save login，且登录类 HTTP/GraphQL 工具使用 username/password 参数，或返回 `access_token`、`token`、`jwt`、`Authorization` 响应头、`Set-Cookie`，Web Chat 会把对应运行时凭证保存到 `<kit>/.agentbridge-runtime.json`，并在后续工具调用中自动复用。同一个 kit 可以保存多个登录账号，页面会提供已保存账号下拉选择以及新增、修改、删除控件；普通聊天请求只提交选中账号 id，账号密码仍由本地 runtime state 读取。生成的 HTTP 工具遇到 HTTP 401 且响应显示 token expired 时，会优先用选中的已保存账号重新登录一次，再重试原工具；如果无法刷新，会明确提示用户重新选择账号或登录。该文件已加入 gitignore，不属于生成的 kit 协议文件。
 

@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen as url_open
 
+from agentbridge.audit import read_audit_events
 from agentbridge.chat import ChatConfig, ChatSession, public_login_accounts
 from agentbridge.io import write_json
 from agentbridge.policy import normalize_permissions_policy
@@ -151,6 +152,76 @@ def save_permissions_payload(kit_dir: Path, payload: dict[str, Any]) -> dict[str
     return load_permissions_payload(kit_dir)
 
 
+def _load_json(path: Path, fallback: Any) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return fallback
+
+
+def load_console_payload(config: ChatConfig, kit_dir: Path) -> dict[str, Any]:
+    manifest = _load_json(kit_dir / "manifest.json", {})
+    if not isinstance(manifest, dict):
+        manifest = {}
+    capabilities = _load_json(kit_dir / "capabilities.json", [])
+    if not isinstance(capabilities, list):
+        capabilities = []
+    capabilities = [item for item in capabilities if isinstance(item, dict)]
+    analysis = _load_json(kit_dir / "analysis" / "agent_analysis.json", {})
+    if not isinstance(analysis, dict):
+        analysis = {}
+    workflows = analysis.get("workflows", [])
+    if not isinstance(workflows, list):
+        workflows = []
+    workflows = [item for item in workflows if isinstance(item, dict)]
+
+    audit_path = config.audit_log
+    audit_events = read_audit_events(audit_path) if audit_path else []
+    audit_events = list(reversed(audit_events[-200:]))
+    risk_summary = {risk: 0 for risk in ["read", "write", "destructive", "external_side_effect"]}
+    domains: dict[str, int] = {}
+    for capability in capabilities:
+        risk = str(capability.get("risk") or "read")
+        risk_summary[risk] = risk_summary.get(risk, 0) + 1
+        domain = str(capability.get("domain") or "other")
+        domains[domain] = domains.get(domain, 0) + 1
+
+    return {
+        "manifest": {
+            "name": manifest.get("name") or kit_dir.name,
+            "protocol": manifest.get("protocol") or "unknown",
+            "version": manifest.get("version") or "",
+        },
+        "capabilities": capabilities,
+        "workflows": workflows,
+        "audit": {
+            "enabled": audit_path is not None,
+            "path": str(audit_path) if audit_path else "",
+            "events": audit_events,
+        },
+        "summary": {
+            "capability_count": len(capabilities),
+            "workflow_count": len(workflows),
+            "risk_summary": risk_summary,
+            "domains": domains,
+        },
+        "settings": {
+            "kit_dir": str(kit_dir),
+            "user": config.user,
+            "session_id": config.session_id,
+            "memory_enabled": config.memory_enabled,
+            "max_history": config.max_history,
+            "read_only": config.read_only,
+            "deny_risks": sorted(config.deny_risks),
+            "allow_tools": sorted(config.allow_tools),
+            "audit_log": str(audit_path) if audit_path else "",
+            "graphql_endpoint_configured": bool(config.graphql_endpoint),
+            "database_configured": bool(config.database_url),
+            "grpc_target_configured": bool(config.grpc_target),
+        },
+    }
+
+
 def rename_conversation(config: ChatConfig, user: str, kit_dir: Path, session_id: str, title: str) -> None:
     title = title.strip()
     if not title:
@@ -193,12 +264,12 @@ def _write_memory_file(path: Path, data: dict[str, Any]) -> None:
 def run_web_chat(config: ChatConfig, host: str = "127.0.0.1", port: int = 8765, allow_kit_switch: bool = False) -> int:
     handler = build_handler(config, allow_kit_switch=allow_kit_switch)
     server = QuietThreadingHTTPServer((host, port), handler)
-    print(f"AgentBridge Web Chat control surface: http://{host}:{server.server_port}", flush=True)
+    print(f"AgentBridge System Control Console: http://{host}:{server.server_port}", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nStopping AgentBridge Web Chat.")
+        print("\nStopping AgentBridge System Control Console.")
     finally:
         server.server_close()
     return 0
@@ -229,6 +300,11 @@ def build_handler(base_config: ChatConfig, allow_kit_switch: bool = False) -> ty
                 values = parse_qs(parsed.query)
                 kit_dir = values.get("kit", [str(base_config.kit_dir)])[0] if allow_kit_switch else str(base_config.kit_dir)
                 self._send_json(load_permissions_payload(Path(kit_dir)))
+                return
+            if parsed.path == "/api/console":
+                values = parse_qs(parsed.query)
+                kit_dir = values.get("kit", [str(base_config.kit_dir)])[0] if allow_kit_switch else str(base_config.kit_dir)
+                self._send_json(load_console_payload(base_config, Path(kit_dir)))
                 return
             if parsed.path == "/api/conversations":
                 values = parse_qs(parsed.query)
@@ -616,7 +692,8 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AgentBridge Chat</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2317251f'/%3E%3Ctext x='16' y='21' text-anchor='middle' font-size='12' font-family='sans-serif' font-weight='700' fill='%2367d6aa'%3EAB%3C/text%3E%3C/svg%3E">
+  <title>AgentBridge System Control Console</title>
   <style>
     :root {{
       color-scheme: light;
@@ -1908,41 +1985,683 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         transition-duration: .01ms !important;
       }}
     }}
+    /* System Control Console */
+    :root {{
+      color-scheme: dark;
+      --ink: #edf5f0;
+      --muted: #91a098;
+      --line: #28332e;
+      --surface: #0b100e;
+      --surface-strong: #111814;
+      --panel: #141b18;
+      --panel-raised: #1a231f;
+      --accent: #67d6aa;
+      --accent-ink: #07110d;
+      --danger: #ff8585;
+      --warning: #e7c36a;
+      --shadow: 0 22px 56px rgba(0, 0, 0, .34);
+    }}
+    body {{
+      color: var(--ink);
+      background: var(--surface);
+    }}
+    .app, .workspace-shell {{
+      grid-template-columns: 232px minmax(0, 1fr) auto;
+      background: var(--surface);
+    }}
+    .navigation-rail {{
+      padding: 16px 12px;
+      align-items: stretch;
+      gap: 4px;
+      border-color: var(--line);
+      background: #0e1411;
+    }}
+    .brand-lockup {{
+      min-height: 52px;
+      margin: 0 6px 18px;
+      display: flex;
+      align-items: center;
+      gap: 11px;
+    }}
+    .brand-mark {{
+      width: 36px;
+      height: 36px;
+      margin: 0;
+      flex: 0 0 36px;
+      border: 1px solid #345045;
+      border-radius: 10px;
+      background: #17251f;
+      color: var(--accent);
+      font-size: 14px;
+    }}
+    .brand-name {{
+      display: block;
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 720;
+      letter-spacing: -.01em;
+    }}
+    .brand-caption {{
+      display: block;
+      margin-top: 1px;
+      color: var(--muted);
+      font-size: 11px;
+    }}
+    .nav-group-label {{
+      margin: 12px 10px 6px;
+      color: #6f7f77;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }}
+    .rail-button {{
+      width: 100%;
+      height: 42px;
+      padding: 0 10px;
+      border-radius: 9px;
+      display: flex;
+      justify-content: flex-start;
+      gap: 10px;
+      color: #9caaa3;
+      font-size: 13px;
+      font-weight: 590;
+    }}
+    .rail-button svg {{
+      width: 18px;
+      height: 18px;
+      flex: 0 0 18px;
+    }}
+    .rail-button:hover, .rail-button.active {{
+      background: #18221e;
+      color: var(--ink);
+    }}
+    .rail-button.active {{
+      box-shadow: inset 2px 0 var(--accent);
+    }}
+    .nav-count {{
+      min-width: 22px;
+      margin-left: auto;
+      padding: 1px 6px;
+      border: 1px solid #33413b;
+      border-radius: 999px;
+      color: #a7b5ae;
+      font: 10px/16px ui-monospace, SFMono-Regular, Menlo, monospace;
+      text-align: center;
+    }}
+    .console-main {{
+      height: 100svh;
+      display: grid;
+      grid-template-rows: 68px minmax(0, 1fr);
+      background: var(--surface);
+    }}
+    .top, .chat-header {{
+      min-height: 68px;
+      padding: 10px 24px;
+      border-color: var(--line);
+      background: rgba(11, 16, 14, .92);
+    }}
+    .header-title {{
+      color: var(--ink);
+      font-size: 14px;
+    }}
+    .header-meta {{
+      color: var(--muted);
+    }}
+    .view-stack {{
+      min-width: 0;
+      min-height: 0;
+      position: relative;
+    }}
+    .console-view {{
+      display: none;
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+      min-height: 0;
+      overflow: auto;
+      animation: console-in 180ms ease-out;
+    }}
+    .console-view.active {{
+      display: block;
+    }}
+    .chat-view.active {{
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) auto;
+      overflow: hidden;
+    }}
+    .messages, .message-stream {{
+      background:
+        radial-gradient(circle at 15% 0%, rgba(103, 214, 170, .045), transparent 32%),
+        var(--surface);
+    }}
+    .msg.assistant .role::before, .brand {{
+      background: #1b2b24;
+      color: var(--accent);
+    }}
+    .msg.user .bubble {{
+      border-color: #33413b;
+      background: #1b2420;
+      color: var(--ink);
+    }}
+    .markdown-body, .markdown-body h1, .markdown-body h2,
+    .markdown-body h3, .markdown-body h4, .markdown-body h5,
+    .markdown-body h6 {{
+      color: var(--ink);
+    }}
+    .markdown-body code, .markdown-body pre,
+    .command-run-group, .command-run-item {{
+      border-color: var(--line);
+      background: #111714;
+      color: var(--ink);
+    }}
+    .markdown-body blockquote {{
+      border-color: #456458;
+      color: #a8b5af;
+    }}
+    .markdown-body a {{
+      color: var(--accent);
+    }}
+    .composer, .composer-dock {{
+      background: linear-gradient(180deg, rgba(11,16,14,0) 0%, var(--surface) 26%, var(--surface) 100%);
+    }}
+    .composer-shell, .composer-card {{
+      border-color: #34423c;
+      background: #171f1c;
+      box-shadow: var(--shadow);
+    }}
+    .composer textarea, input, textarea, select {{
+      border-color: var(--line);
+      background: #111714;
+      color: var(--ink);
+    }}
+    input:disabled {{
+      color: #76847d;
+      background: #151b18;
+    }}
+    button {{
+      background: var(--accent);
+      color: var(--accent-ink);
+    }}
+    button.secondary, button.icon, .connection-button {{
+      background: #202a26;
+      color: var(--ink);
+    }}
+    button.secondary:hover, button.icon:hover, .connection-button:hover {{
+      background: #293630;
+    }}
+    .runtime-mode, .runtime-target {{
+      border-color: var(--line);
+      background: #111714;
+    }}
+    .runtime-mode button {{
+      color: var(--muted);
+    }}
+    .runtime-mode button.active {{
+      background: #27342e;
+      color: var(--ink);
+      box-shadow: none;
+    }}
+    .runtime-target input, .login-account-select {{
+      background: #0d1310;
+    }}
+    .mode {{
+      color: {("#ff9a9a" if config.execute else "#7de3bc")};
+      background: {("rgba(255,133,133,.10)" if config.execute else "rgba(103,214,170,.10)")};
+    }}
+    .context-drawer, .drawer-panel {{
+      border-color: var(--line);
+      background: #101613;
+    }}
+    .drawer-header {{
+      border-color: var(--line);
+    }}
+    .conversation:hover, .suggestion:hover, .tool-button:hover,
+    .account-card:hover, .account-card.active, .conversation.active {{
+      background: #1c2722;
+    }}
+    .conversation-popover, .account-popover, .command-menu {{
+      border-color: var(--line);
+      background: #171f1c;
+      box-shadow: var(--shadow);
+    }}
+    .usage-stat, .usage-history-item, .timeline-item {{
+      border-color: var(--line);
+      background: #111714;
+    }}
+    .usage-stat strong {{
+      color: var(--ink);
+    }}
+    .approval-card {{
+      border-color: #604d2b;
+      background: #211b11;
+      color: #f5e7c4;
+    }}
+    .authorization-summary {{
+      color: #fff4d6;
+    }}
+    .workspace-page {{
+      width: min(100%, 1440px);
+      margin: 0 auto;
+      padding: 34px clamp(22px, 4vw, 56px) 64px;
+    }}
+    .page-heading {{
+      padding-bottom: 26px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+    }}
+    .eyebrow {{
+      margin-bottom: 7px;
+      color: var(--accent);
+      font-size: 10px;
+      font-weight: 750;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }}
+    .page-heading h1 {{
+      margin: 0;
+      color: var(--ink);
+      font-size: clamp(24px, 3vw, 38px);
+      line-height: 1.05;
+      letter-spacing: -.035em;
+    }}
+    .page-heading p {{
+      max-width: 610px;
+      margin: 9px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+    }}
+    .page-actions {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+    }}
+    .page-actions button {{
+      min-height: 40px;
+    }}
+    .metric-strip {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      border-bottom: 1px solid var(--line);
+    }}
+    .metric {{
+      min-width: 0;
+      padding: 22px 20px 22px 0;
+    }}
+    .metric + .metric {{
+      padding-left: 20px;
+      border-left: 1px solid var(--line);
+    }}
+    .metric-label {{
+      color: var(--muted);
+      font-size: 11px;
+    }}
+    .metric-value {{
+      display: block;
+      margin-top: 4px;
+      color: var(--ink);
+      font: 650 25px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: -.04em;
+    }}
+    .toolbar {{
+      padding: 18px 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-bottom: 1px solid var(--line);
+    }}
+    .toolbar input, .toolbar select {{
+      width: auto;
+      min-width: 180px;
+      height: 40px;
+      margin: 0;
+    }}
+    .toolbar input {{
+      flex: 1;
+      max-width: 420px;
+    }}
+    .catalog {{
+      display: grid;
+    }}
+    .catalog-row {{
+      min-width: 0;
+      padding: 17px 0;
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      grid-template-columns: minmax(200px, 1.1fr) minmax(240px, 1.7fr) minmax(120px, .7fr) auto;
+      align-items: center;
+      gap: 22px;
+    }}
+    .catalog-row:hover {{
+      background: rgba(255,255,255,.018);
+    }}
+    .catalog-name {{
+      min-width: 0;
+      color: var(--ink);
+      font: 620 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+      overflow-wrap: anywhere;
+    }}
+    .catalog-description {{
+      min-width: 0;
+      color: #aab7b0;
+      font-size: 13px;
+    }}
+    .catalog-meta {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .catalog-action {{
+      min-width: 74px;
+      min-height: 36px;
+      padding: 7px 10px;
+      font-size: 12px;
+    }}
+    .status-pill {{
+      width: fit-content;
+      padding: 3px 7px;
+      border: 1px solid #35433d;
+      border-radius: 999px;
+      color: #aab7b0;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }}
+    .status-pill[data-risk="destructive"], .status-pill[data-risk="blocked"] {{
+      border-color: rgba(255,133,133,.34);
+      color: #ff9b9b;
+    }}
+    .status-pill[data-risk="write"], .status-pill[data-risk="external_side_effect"] {{
+      border-color: rgba(231,195,106,.34);
+      color: #e7ca83;
+    }}
+    .status-pill[data-risk="read"], .status-pill[data-risk="allowed"],
+    .status-pill[data-risk="success"] {{
+      border-color: rgba(103,214,170,.34);
+      color: #78ddb7;
+    }}
+    .empty-state {{
+      min-height: 260px;
+      padding: 48px 0;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      text-align: center;
+    }}
+    .empty-state strong {{
+      display: block;
+      margin-bottom: 6px;
+      color: var(--ink);
+      font-size: 15px;
+    }}
+    .policy-layout, .settings-layout {{
+      padding-top: 24px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(320px, .8fr);
+      gap: 36px;
+    }}
+    .section-title {{
+      margin: 0 0 4px;
+      color: var(--ink);
+      font-size: 15px;
+    }}
+    .section-copy {{
+      margin: 0 0 16px;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .policy-risk-list, .settings-list {{
+      border-top: 1px solid var(--line);
+    }}
+    .policy-risk-row, .settings-row {{
+      min-height: 64px;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }}
+    .policy-risk-row strong, .settings-row strong {{
+      display: block;
+      color: var(--ink);
+      font-size: 13px;
+    }}
+    .policy-risk-row span, .settings-row span {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .policy-editor {{
+      padding-left: 28px;
+      border-left: 1px solid var(--line);
+    }}
+    .policy-editor label {{
+      margin-top: 0;
+    }}
+    .policy-editor textarea {{
+      min-height: 420px;
+      resize: vertical;
+      font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }}
+    .workflow-row {{
+      padding: 22px 0;
+      border-bottom: 1px solid var(--line);
+    }}
+    .workflow-row h3 {{
+      margin: 0;
+      color: var(--ink);
+      font-size: 16px;
+    }}
+    .workflow-row p {{
+      max-width: 760px;
+      margin: 7px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }}
+    .workflow-steps {{
+      margin-top: 14px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 7px;
+    }}
+    .workflow-step {{
+      padding: 5px 8px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: #b5c0ba;
+      font: 11px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }}
+    .workflow-arrow {{
+      color: #58675f;
+    }}
+    .audit-time {{
+      color: var(--muted);
+      font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }}
+    .settings-value {{
+      max-width: 52%;
+      color: #c8d3cd !important;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      text-align: right;
+      overflow-wrap: anywhere;
+    }}
+    .settings-actions {{
+      margin-top: 24px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }}
+    .mobile-navigation {{
+      display: grid;
+      gap: 5px;
+    }}
+    .mobile-navigation .rail-button {{
+      width: 100%;
+      justify-content: flex-start;
+    }}
+    @keyframes console-in {{
+      from {{ opacity: 0; transform: translateY(5px); }}
+      to {{ opacity: 1; transform: translateY(0); }}
+    }}
+    @media (max-width: 980px) {{
+      .app, .workspace-shell {{
+        grid-template-columns: 72px minmax(0, 1fr) auto;
+      }}
+      .navigation-rail {{
+        padding-inline: 10px;
+        align-items: center;
+      }}
+      .brand-lockup {{
+        margin-inline: 0;
+      }}
+      .brand-lockup > div:last-child, .rail-button span:not(.nav-count),
+      .nav-group-label, .nav-count {{
+        display: none;
+      }}
+      .rail-button {{
+        width: 44px;
+        padding: 0;
+        justify-content: center;
+      }}
+      .policy-layout, .settings-layout {{
+        grid-template-columns: 1fr;
+      }}
+      .policy-editor {{
+        padding: 24px 0 0;
+        border-top: 1px solid var(--line);
+        border-left: 0;
+      }}
+      .catalog-row {{
+        grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.5fr) auto;
+      }}
+      .catalog-row .catalog-meta {{
+        display: none;
+      }}
+    }}
+    @media (max-width: 760px) {{
+      .app, .workspace-shell {{
+        grid-template-columns: minmax(0, 1fr);
+      }}
+      .console-main {{
+        grid-template-rows: auto minmax(0, 1fr);
+      }}
+      .workspace-page {{
+        padding: 24px 16px 48px;
+      }}
+      .page-heading {{
+        align-items: flex-start;
+        flex-direction: column;
+      }}
+      .metric-strip {{
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }}
+      .metric:nth-child(3) {{
+        padding-left: 0;
+        border-left: 0;
+        border-top: 1px solid var(--line);
+      }}
+      .metric:nth-child(4) {{
+        border-top: 1px solid var(--line);
+      }}
+      .toolbar {{
+        align-items: stretch;
+        flex-direction: column;
+      }}
+      .toolbar input, .toolbar select {{
+        width: 100%;
+        max-width: none;
+      }}
+      .catalog-row {{
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px 14px;
+      }}
+      .catalog-description {{
+        grid-column: 1 / -1;
+      }}
+      .catalog-row .catalog-meta {{
+        display: block;
+      }}
+      .catalog-action {{
+        grid-column: 2;
+        grid-row: 1;
+      }}
+      .runtime-controls {{
+        padding-left: 0;
+      }}
+      .mobile-navigation .rail-button {{
+        width: 100%;
+        justify-content: flex-start;
+      }}
+      .mobile-navigation .rail-button span {{
+        display: inline;
+      }}
+    }}
   </style>
 </head>
 <body>
   <div class="app workspace-shell">
     <nav class="navigation-rail" aria-label="Workspace navigation">
-      <div class="brand-mark" title="AgentBridge">A</div>
-      <button class="rail-button" type="button" data-drawer="conversations" title="Recent conversations" aria-label="Recent conversations">
+      <div class="brand-lockup">
+        <div class="brand-mark" title="AgentBridge">AB</div>
+        <div>
+          <span class="brand-name">AgentBridge</span>
+          <span class="brand-caption">System Console</span>
+        </div>
+      </div>
+      <div class="nav-group-label">Operate</div>
+      <button class="rail-button active" type="button" data-view-target="chat" title="Chat" aria-label="Chat">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8.5 8.5 0 0 1-9 8.5 9.5 9.5 0 0 1-4-.9L3 21l1.4-4A8.5 8.5 0 1 1 21 12Z"></path></svg>
+        <span>Chat</span>
       </button>
-      <button class="rail-button" type="button" data-drawer="context" title="Chat context" aria-label="Chat context">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"></circle><path d="M5.5 20a6.5 6.5 0 0 1 13 0"></path></svg>
-      </button>
-      <button class="rail-button" type="button" data-drawer="tools" title="Available tools" aria-label="Available tools">
+      <button class="rail-button" type="button" data-view-target="tools" title="Tools" aria-label="Tools">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.7 6.3 3-3a4.2 4.2 0 0 1-5.4 5.4l-7.6 7.6a2.1 2.1 0 0 0 3 3l7.6-7.6a4.2 4.2 0 0 0 5.4-5.4l-3 3"></path></svg>
+        <span>Tools</span><span class="nav-count" id="navToolCount">0</span>
       </button>
-      <button class="rail-button" type="button" data-drawer="policy" title="Permission policy" aria-label="Permission policy">
+      <button class="rail-button" type="button" data-view-target="capabilities" title="Capabilities" aria-label="Capabilities">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h6v5H4zM14 6h6v5h-6zM4 15h6v3H4zM14 15h6v3h-6z"></path></svg>
+        <span>Capabilities</span><span class="nav-count" id="navCapabilityCount">0</span>
+      </button>
+      <div class="nav-group-label">Govern</div>
+      <button class="rail-button" type="button" data-view-target="policy" title="Policy" aria-label="Policy">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.4 2.9 8.4 7 10 4.1-1.6 7-5.6 7-10V6l-7-3Z"></path><path d="m9 12 2 2 4-5"></path></svg>
+        <span>Policy</span>
       </button>
-      <button class="rail-button" id="usageButton" type="button" data-drawer="usage" title="AI usage" aria-label="AI usage">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V9m7 10V5m7 14v-7"></path></svg>
+      <span data-drawer="policy" hidden aria-hidden="true"></span>
+      <button class="rail-button" type="button" data-view-target="audit" title="Audit" aria-label="Audit">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"></path></svg>
+        <span>Audit</span><span class="nav-count" id="navAuditCount">0</span>
+      </button>
+      <button class="rail-button" type="button" data-view-target="workflows" title="Workflows" aria-label="Workflows">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="2"></circle><circle cx="18" cy="18" r="2"></circle><path d="M8 6h5a3 3 0 0 1 3 3v7M8 18h8"></path></svg>
+        <span>Workflows</span><span class="nav-count" id="navWorkflowCount">0</span>
       </button>
       <div class="rail-spacer"></div>
+      <button class="rail-button" type="button" data-drawer="conversations" title="Recent conversations" aria-label="Recent conversations">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v11H9l-4 3V5Z"></path></svg>
+        <span>Conversations</span>
+      </button>
+      <button class="rail-button" id="usageButton" type="button" data-view-target="settings" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"></path></svg>
+        <span>Settings</span>
+      </button>
       <button class="rail-button" id="newChatBtn" type="button" title="New chat" aria-label="New chat">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+        <span>New chat</span>
       </button>
     </nav>
-    <main class="main chat-panel">
+    <main class="main console-main">
       <div class="top chat-header">
         <div class="header-leading">
           <button class="mobile-menu" id="mobileMenuBtn" type="button" aria-label="Open navigation">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
           </button>
           <div class="header-copy">
-            <strong class="header-title">AgentBridge</strong>
-            <div class="header-meta">Control parsed system capabilities through Claude Agent chat</div>
+            <strong class="header-title" id="pageTitle">Chat</strong>
+            <div class="header-meta" id="pageMeta">Operate the parsed system through Claude Agent</div>
           </div>
         </div>
         <div class="runtime-controls">
@@ -1968,8 +2687,10 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
           </div>
         </div>
       </div>
-      <div class="messages message-stream reading-column" id="messages" aria-live="polite"></div>
-      <div class="composer composer-dock">
+      <div class="view-stack">
+        <section class="console-view chat-view active" data-view="chat" aria-labelledby="pageTitle">
+          <div class="messages message-stream reading-column" id="messages" aria-live="polite"></div>
+          <div class="composer composer-dock">
         <div class="approval-card" id="pending">
           <div class="approval-copy">
             <div class="approval-title">Authorization required</div>
@@ -2015,7 +2736,166 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
               </button>
             </div>
           </div>
-        </div>
+            </div>
+          </div>
+        </section>
+        <section class="console-view" data-view="tools" aria-labelledby="toolsHeading">
+          <div class="workspace-page">
+            <div class="page-heading">
+              <div>
+                <div class="eyebrow">Execution surface</div>
+                <h1 id="toolsHeading">Tools</h1>
+                <p>Generated operations exposed to Chat and MCP. Select a tool to prepare a command in Chat without executing it.</p>
+              </div>
+              <div class="page-actions"><button id="toolsOpenChatBtn" type="button">Open Chat</button></div>
+            </div>
+            <div class="metric-strip">
+              <div class="metric"><span class="metric-label">Available tools</span><strong class="metric-value" id="toolMetricTotal">0</strong></div>
+              <div class="metric"><span class="metric-label">Read</span><strong class="metric-value" id="toolMetricRead">0</strong></div>
+              <div class="metric"><span class="metric-label">Confirmation</span><strong class="metric-value" id="toolMetricConfirm">0</strong></div>
+              <div class="metric"><span class="metric-label">Blocked by default</span><strong class="metric-value" id="toolMetricBlocked">0</strong></div>
+            </div>
+            <div class="toolbar">
+              <input id="toolSearch" type="search" placeholder="Search tools, descriptions, or parameters" aria-label="Search tools">
+              <select id="toolRiskFilter" aria-label="Filter tools by risk">
+                <option value="">All risk levels</option>
+                <option value="read">Read</option>
+                <option value="write">Write</option>
+                <option value="destructive">Destructive</option>
+                <option value="external_side_effect">External side effect</option>
+              </select>
+            </div>
+            <div class="catalog" id="toolCatalog"></div>
+          </div>
+        </section>
+        <section class="console-view" data-view="capabilities" aria-labelledby="capabilitiesHeading">
+          <div class="workspace-page">
+            <div class="page-heading">
+              <div>
+                <div class="eyebrow">System model</div>
+                <h1 id="capabilitiesHeading">Capabilities</h1>
+                <p>Normalized business capabilities inferred from project evidence, including source, transport, confidence, and risk.</p>
+              </div>
+            </div>
+            <div class="metric-strip">
+              <div class="metric"><span class="metric-label">Capabilities</span><strong class="metric-value" id="capMetricTotal">0</strong></div>
+              <div class="metric"><span class="metric-label">Domains</span><strong class="metric-value" id="capMetricDomains">0</strong></div>
+              <div class="metric"><span class="metric-label">High risk</span><strong class="metric-value" id="capMetricHighRisk">0</strong></div>
+              <div class="metric"><span class="metric-label">Average confidence</span><strong class="metric-value" id="capMetricConfidence">—</strong></div>
+            </div>
+            <div class="toolbar">
+              <input id="capabilitySearch" type="search" placeholder="Search capabilities, domains, resources, or sources" aria-label="Search capabilities">
+              <select id="capabilityDomainFilter" aria-label="Filter capabilities by domain"><option value="">All domains</option></select>
+              <select id="capabilityRiskFilter" aria-label="Filter capabilities by risk">
+                <option value="">All risk levels</option>
+                <option value="read">Read</option>
+                <option value="write">Write</option>
+                <option value="destructive">Destructive</option>
+                <option value="external_side_effect">External side effect</option>
+              </select>
+            </div>
+            <div class="catalog" id="capabilityCatalog"></div>
+          </div>
+        </section>
+        <section class="console-view" data-view="policy" aria-labelledby="policyHeading">
+          <div class="workspace-page">
+            <div class="page-heading">
+              <div>
+                <div class="eyebrow">Guardrails</div>
+                <h1 id="policyHeading">Policy</h1>
+                <p>Review the effective risk defaults and edit the kit policy shared by dry-run, MCP, and Chat execution.</p>
+              </div>
+            </div>
+            <div class="policy-layout">
+              <div>
+                <h2 class="section-title">Risk actions</h2>
+                <p class="section-copy">Every mutating action remains subject to the generated per-tool guardrail.</p>
+                <div class="policy-risk-list" id="policyRiskList"></div>
+              </div>
+              <div class="policy-editor" id="policyPanel">
+                <label for="policyJson">Policy JSON</label>
+                <textarea id="policyJson" rows="18" spellcheck="false"></textarea>
+                <div class="drawer-action-row">
+                  <button id="savePolicyBtn" type="button">Save policy</button>
+                  <button class="secondary" id="reloadPolicyBtn" type="button">Reload</button>
+                </div>
+                <div class="field-help" id="policyStatus" aria-live="polite"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="console-view" data-view="audit" aria-labelledby="auditHeading">
+          <div class="workspace-page">
+            <div class="page-heading">
+              <div>
+                <div class="eyebrow">Traceability</div>
+                <h1 id="auditHeading">Audit</h1>
+                <p>Recent redacted tool decisions and execution outcomes from the configured JSONL audit log.</p>
+              </div>
+              <div class="page-actions"><button class="secondary" id="refreshAuditBtn" type="button">Refresh</button></div>
+            </div>
+            <div class="metric-strip">
+              <div class="metric"><span class="metric-label">Loaded events</span><strong class="metric-value" id="auditMetricTotal">0</strong></div>
+              <div class="metric"><span class="metric-label">Succeeded</span><strong class="metric-value" id="auditMetricSuccess">0</strong></div>
+              <div class="metric"><span class="metric-label">Blocked</span><strong class="metric-value" id="auditMetricBlocked">0</strong></div>
+              <div class="metric"><span class="metric-label">Audit status</span><strong class="metric-value" id="auditMetricStatus">Off</strong></div>
+            </div>
+            <div class="toolbar">
+              <input id="auditSearch" type="search" placeholder="Search tool, user, session, or outcome" aria-label="Search audit events">
+              <select id="auditRiskFilter" aria-label="Filter audit events by risk">
+                <option value="">All risk levels</option>
+                <option value="read">Read</option>
+                <option value="write">Write</option>
+                <option value="destructive">Destructive</option>
+                <option value="external_side_effect">External side effect</option>
+              </select>
+            </div>
+            <div class="catalog" id="auditCatalog"></div>
+          </div>
+        </section>
+        <section class="console-view" data-view="workflows" aria-labelledby="workflowsHeading">
+          <div class="workspace-page">
+            <div class="page-heading">
+              <div>
+                <div class="eyebrow">Business orchestration</div>
+                <h1 id="workflowsHeading">Workflows</h1>
+                <p>Multi-step operating patterns inferred during project analysis. They are guidance, not automatic execution.</p>
+              </div>
+            </div>
+            <div id="workflowCatalog"></div>
+          </div>
+        </section>
+        <section class="console-view" data-view="settings" aria-labelledby="settingsHeading">
+          <div class="workspace-page">
+            <div class="page-heading">
+              <div>
+                <div class="eyebrow">Console configuration</div>
+                <h1 id="settingsHeading">Settings</h1>
+                <p>Inspect kit identity, runtime defaults, memory, adapters, accounts, and AI usage for this local console.</p>
+              </div>
+            </div>
+            <div class="settings-layout">
+              <div>
+                <h2 class="section-title">Kit and runtime</h2>
+                <p class="section-copy">Sensitive credentials are never returned by the Console API.</p>
+                <div class="settings-list" id="settingsList"></div>
+                <div class="settings-actions">
+                  <button id="settingsContextBtn" type="button">Edit context</button>
+                  <button class="secondary" id="settingsAccountsBtn" type="button">Manage accounts</button>
+                </div>
+              </div>
+              <div id="usagePanel">
+                <h2 class="section-title">AI usage</h2>
+                <p class="section-copy">Claude Agent SDK tokens used in the current Chat session.</p>
+                <div class="usage-grid">
+                  <div class="usage-stat"><span class="subtle">Session input</span><strong id="usageInput">0.0k</strong></div>
+                  <div class="usage-stat"><span class="subtle">Session output</span><strong id="usageOutput">0.0k</strong></div>
+                </div>
+                <div class="usage-history" id="usageHistory"></div>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
     </main>
     <aside class="context-drawer drawer-panel" id="contextDrawer" aria-label="Workspace details">
@@ -2026,6 +2906,17 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         </button>
       </div>
       <div class="drawer-content">
+        <section class="drawer-pane" data-pane="navigation">
+          <div class="mobile-navigation" aria-label="Console sections">
+            <button class="rail-button" type="button" data-view-target="chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a8.5 8.5 0 0 1-9 8.5 9.5 9.5 0 0 1-4-.9L3 21l1.4-4A8.5 8.5 0 1 1 21 12Z"></path></svg><span>Chat</span></button>
+            <button class="rail-button" type="button" data-view-target="tools"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.7 6.3 3-3a4.2 4.2 0 0 1-5.4 5.4l-7.6 7.6a2.1 2.1 0 0 0 3 3l7.6-7.6a4.2 4.2 0 0 0 5.4-5.4l-3 3"></path></svg><span>Tools</span></button>
+            <button class="rail-button" type="button" data-view-target="capabilities"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h6v5H4zM14 6h6v5h-6zM4 15h6v3H4zM14 15h6v3h-6z"></path></svg><span>Capabilities</span></button>
+            <button class="rail-button" type="button" data-view-target="policy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.4 2.9 8.4 7 10 4.1-1.6 7-5.6 7-10V6l-7-3Z"></path><path d="m9 12 2 2 4-5"></path></svg><span>Policy</span></button>
+            <button class="rail-button" type="button" data-view-target="audit"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"></path></svg><span>Audit</span></button>
+            <button class="rail-button" type="button" data-view-target="workflows"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="2"></circle><circle cx="18" cy="18" r="2"></circle><path d="M8 6h5a3 3 0 0 1 3 3v7M8 18h8"></path></svg><span>Workflows</span></button>
+            <button class="rail-button" type="button" data-view-target="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"></path></svg><span>Settings</span></button>
+          </div>
+        </section>
         <section class="drawer-pane active" data-pane="conversations">
           <div class="subtle">Continue a previous session or start a new chat.</div>
           <div class="drawer-action-row">
@@ -2070,24 +2961,6 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         <section class="drawer-pane" data-pane="tools">
           <div class="subtle">Select a tool to insert a runnable command and its required parameters.</div>
           <div class="tools" id="tools"></div>
-        </section>
-        <section class="drawer-pane" data-pane="policy" id="policyPanel">
-          <div class="subtle">Review or edit the kit permission policy used by dry-run, MCP, and chat execution.</div>
-          <label for="policyJson">Policy JSON</label>
-          <textarea id="policyJson" rows="16" spellcheck="false"></textarea>
-          <div class="drawer-action-row">
-            <button id="savePolicyBtn" type="button">Save policy</button>
-            <button class="secondary" id="reloadPolicyBtn" type="button">Reload</button>
-          </div>
-          <div class="field-help" id="policyStatus"></div>
-        </section>
-        <section class="drawer-pane" data-pane="usage" id="usagePanel">
-          <div class="subtle">Claude Agent SDK token usage for the current session.</div>
-          <div class="usage-grid">
-            <div class="usage-stat"><span class="subtle">Session input</span><strong id="usageInput">0.0k</strong></div>
-            <div class="usage-stat"><span class="subtle">Session output</span><strong id="usageOutput">0.0k</strong></div>
-          </div>
-          <div class="usage-history" id="usageHistory"></div>
         </section>
       </div>
     </aside>
@@ -2144,9 +3017,25 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       policyJson: document.getElementById('policyJson'),
       savePolicy: document.getElementById('savePolicyBtn'),
       reloadPolicy: document.getElementById('reloadPolicyBtn'),
-      policyStatus: document.getElementById('policyStatus')
+      policyStatus: document.getElementById('policyStatus'),
+      pageTitle: document.getElementById('pageTitle'),
+      pageMeta: document.getElementById('pageMeta'),
+      toolCatalog: document.getElementById('toolCatalog'),
+      toolSearch: document.getElementById('toolSearch'),
+      toolRiskFilter: document.getElementById('toolRiskFilter'),
+      capabilityCatalog: document.getElementById('capabilityCatalog'),
+      capabilitySearch: document.getElementById('capabilitySearch'),
+      capabilityDomainFilter: document.getElementById('capabilityDomainFilter'),
+      capabilityRiskFilter: document.getElementById('capabilityRiskFilter'),
+      policyRiskList: document.getElementById('policyRiskList'),
+      auditCatalog: document.getElementById('auditCatalog'),
+      auditSearch: document.getElementById('auditSearch'),
+      auditRiskFilter: document.getElementById('auditRiskFilter'),
+      workflowCatalog: document.getElementById('workflowCatalog'),
+      settingsList: document.getElementById('settingsList')
     }};
     let toolsCache = [];
+    let consoleCache = {{ capabilities: [], workflows: [], audit: {{ events: [] }}, summary: {{}}, settings: {{}} }};
     let loginAccountsCache = [];
     let attachments = [];
     let sendInFlight = false;
@@ -2172,12 +3061,20 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       'TABLE', 'TBODY', 'TD', 'TH', 'THEAD', 'TR', 'UL'
     ]);
     const drawerTitles = {{
+      navigation: 'System Control Console',
       conversations: 'Recent conversations',
       context: 'Chat context',
       accounts: 'Saved accounts',
-      tools: 'Available tools',
-      policy: 'Permission policy',
-      usage: 'AI usage'
+      tools: 'Available tools'
+    }};
+    const viewCopy = {{
+      chat: ['Chat', 'Operate the parsed system through Claude Agent'],
+      tools: ['Tools', 'Prepare generated operations for guarded execution'],
+      capabilities: ['Capabilities', 'Inspect the normalized control contract'],
+      policy: ['Policy', 'Review and edit execution guardrails'],
+      audit: ['Audit', 'Trace redacted runtime decisions and outcomes'],
+      workflows: ['Workflows', 'Review inferred multi-step operating patterns'],
+      settings: ['Settings', 'Inspect kit, runtime, accounts, and usage']
     }};
     function payload(extra = {{}}) {{
       return Object.assign({{
@@ -2207,6 +3104,7 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       const data = await fetch('/api/policy?' + stateQuery(false).toString()).then(r => r.json());
       els.policyJson.value = JSON.stringify(data, null, 2);
       els.policyStatus.textContent = 'Policy loaded.';
+      renderPolicySummary(data);
     }}
     async function savePolicy() {{
       let parsed;
@@ -2219,7 +3117,324 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
       const data = await post('/api/policy', payload(parsed));
       els.policyJson.value = JSON.stringify(data, null, 2);
       els.policyStatus.textContent = 'Policy saved.';
+      renderPolicySummary(data);
       loadState(false);
+    }}
+    function emptyState(title, detail) {{
+      const node = document.createElement('div');
+      node.className = 'empty-state';
+      const copy = document.createElement('div');
+      const strong = document.createElement('strong');
+      const text = document.createElement('span');
+      strong.textContent = title;
+      text.textContent = detail;
+      copy.appendChild(strong);
+      copy.appendChild(text);
+      node.appendChild(copy);
+      return node;
+    }}
+    function statusPill(value) {{
+      const pill = document.createElement('span');
+      pill.className = 'status-pill';
+      pill.dataset.risk = String(value || '').toLowerCase();
+      pill.textContent = String(value || 'unknown').replaceAll('_', ' ');
+      return pill;
+    }}
+    function setMetric(id, value) {{
+      const node = document.getElementById(id);
+      if (node) node.textContent = String(value);
+    }}
+    function setView(name, updateHash = true) {{
+      const target = viewCopy[name] ? name : 'chat';
+      document.querySelectorAll('.console-view').forEach(view => {{
+        view.classList.toggle('active', view.dataset.view === target);
+      }});
+      document.querySelectorAll('[data-view-target]').forEach(button => {{
+        const active = button.dataset.viewTarget === target;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-current', active ? 'page' : 'false');
+      }});
+      els.pageTitle.textContent = viewCopy[target][0];
+      els.pageMeta.textContent = viewCopy[target][1];
+      if (updateHash && window.location.hash !== '#' + target) {{
+        history.replaceState(null, '', '#' + target);
+      }}
+      if (target === 'policy') loadPolicy();
+      if (target === 'audit') loadConsoleData();
+      if (window.innerWidth <= 760) closeDrawer();
+    }}
+    function renderPolicySummary(data) {{
+      const actions = (data && data.policy && data.policy.risk_actions) || {{}};
+      const descriptions = {{
+        read: 'Non-mutating inspection operations',
+        write: 'Create or update system state',
+        destructive: 'Delete or irreversibly change state',
+        external_side_effect: 'Send, publish, authenticate, or trigger external work'
+      }};
+      els.policyRiskList.replaceChildren();
+      ['read', 'write', 'destructive', 'external_side_effect'].forEach(risk => {{
+        const row = document.createElement('div');
+        row.className = 'policy-risk-row';
+        const copy = document.createElement('div');
+        const title = document.createElement('strong');
+        const detail = document.createElement('span');
+        title.textContent = risk.replaceAll('_', ' ');
+        detail.textContent = descriptions[risk];
+        copy.appendChild(title);
+        copy.appendChild(detail);
+        row.appendChild(copy);
+        row.appendChild(statusPill(actions[risk] || 'unknown'));
+        els.policyRiskList.appendChild(row);
+      }});
+    }}
+    function renderToolCatalog() {{
+      const query = (els.toolSearch.value || '').trim().toLowerCase();
+      const risk = els.toolRiskFilter.value;
+      const filtered = toolsCache.filter(tool => {{
+        const haystack = [tool.name, tool.description, ...(tool.required || [])].join(' ').toLowerCase();
+        return (!query || haystack.includes(query)) && (!risk || tool.risk === risk);
+      }});
+      els.toolCatalog.replaceChildren();
+      if (!filtered.length) {{
+        els.toolCatalog.appendChild(emptyState('No tools match this view', 'Clear the search or choose another risk level.'));
+        return;
+      }}
+      filtered.forEach(tool => {{
+        const row = document.createElement('div');
+        row.className = 'catalog-row';
+        const name = document.createElement('div');
+        name.className = 'catalog-name';
+        name.textContent = tool.name;
+        const description = document.createElement('div');
+        description.className = 'catalog-description';
+        description.textContent = tool.description || 'No description generated.';
+        const meta = document.createElement('div');
+        meta.className = 'catalog-meta';
+        const required = tool.required || [];
+        meta.textContent = required.length ? required.length + ' required · ' + required.join(', ') : 'No required parameters';
+        const action = document.createElement('button');
+        action.type = 'button';
+        action.className = 'catalog-action';
+        action.textContent = 'Prepare';
+        action.onclick = () => {{
+          insertToolCommand(tool);
+          setView('chat');
+        }};
+        const nameWrap = document.createElement('div');
+        nameWrap.appendChild(name);
+        nameWrap.appendChild(statusPill(tool.risk));
+        row.appendChild(nameWrap);
+        row.appendChild(description);
+        row.appendChild(meta);
+        row.appendChild(action);
+        els.toolCatalog.appendChild(row);
+      }});
+    }}
+    function renderCapabilities() {{
+      const capabilities = consoleCache.capabilities || [];
+      const domains = [...new Set(capabilities.map(item => item.domain || 'other'))].sort();
+      const selectedDomain = els.capabilityDomainFilter.value;
+      els.capabilityDomainFilter.innerHTML = '<option value="">All domains</option>';
+      domains.forEach(domain => {{
+        const option = document.createElement('option');
+        option.value = domain;
+        option.textContent = domain;
+        els.capabilityDomainFilter.appendChild(option);
+      }});
+      if (domains.includes(selectedDomain)) els.capabilityDomainFilter.value = selectedDomain;
+      const query = (els.capabilitySearch.value || '').trim().toLowerCase();
+      const risk = els.capabilityRiskFilter.value;
+      const domain = els.capabilityDomainFilter.value;
+      const filtered = capabilities.filter(item => {{
+        const source = item.source || {{}};
+        const haystack = [item.name, item.description, item.domain, item.resource, item.action, source.kind, source.path].join(' ').toLowerCase();
+        return (!query || haystack.includes(query)) && (!risk || item.risk === risk) && (!domain || item.domain === domain);
+      }});
+      els.capabilityCatalog.replaceChildren();
+      if (!filtered.length) {{
+        els.capabilityCatalog.appendChild(emptyState('No capabilities match this view', 'Clear the search or adjust the filters.'));
+      }}
+      filtered.forEach(item => {{
+        const row = document.createElement('div');
+        row.className = 'catalog-row';
+        const identity = document.createElement('div');
+        const name = document.createElement('div');
+        name.className = 'catalog-name';
+        name.textContent = item.name || 'Unnamed capability';
+        identity.appendChild(name);
+        identity.appendChild(statusPill(item.risk));
+        const description = document.createElement('div');
+        description.className = 'catalog-description';
+        description.textContent = item.description || [item.action, item.resource].filter(Boolean).join(' ');
+        const source = item.source || {{}};
+        const meta = document.createElement('div');
+        meta.className = 'catalog-meta';
+        const confidence = Number(item.confidence);
+        meta.textContent = (item.domain || 'other') + ' · ' + (source.kind || 'unknown') +
+          (Number.isFinite(confidence) ? ' · ' + Math.round(confidence * 100) + '%' : '');
+        const action = document.createElement('button');
+        action.type = 'button';
+        action.className = 'catalog-action secondary';
+        action.textContent = 'Use in Chat';
+        action.onclick = () => {{
+          insertToolCommand({{ name: item.name, required: ((item.input_schema || {{}}).required || []) }});
+          setView('chat');
+        }};
+        row.appendChild(identity);
+        row.appendChild(description);
+        row.appendChild(meta);
+        row.appendChild(action);
+        els.capabilityCatalog.appendChild(row);
+      }});
+      const highRisk = capabilities.filter(item => ['destructive', 'external_side_effect'].includes(item.risk)).length;
+      const confidenceValues = capabilities.map(item => Number(item.confidence)).filter(Number.isFinite);
+      const average = confidenceValues.length
+        ? Math.round(confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length * 100) + '%'
+        : '—';
+      setMetric('capMetricTotal', capabilities.length);
+      setMetric('capMetricDomains', domains.length);
+      setMetric('capMetricHighRisk', highRisk);
+      setMetric('capMetricConfidence', average);
+    }}
+    function renderAudit() {{
+      const audit = consoleCache.audit || {{ events: [] }};
+      const events = audit.events || [];
+      const query = (els.auditSearch.value || '').trim().toLowerCase();
+      const risk = els.auditRiskFilter.value;
+      const filtered = events.filter(event => {{
+        const haystack = [event.tool, event.user, event.session_id, event.outcome, event.action, event.error].join(' ').toLowerCase();
+        return (!query || haystack.includes(query)) && (!risk || event.risk === risk);
+      }});
+      els.auditCatalog.replaceChildren();
+      if (!audit.enabled) {{
+        els.auditCatalog.appendChild(emptyState('Audit logging is not enabled', 'Restart the console with --audit-log PATH to capture redacted runtime events.'));
+      }} else if (!filtered.length) {{
+        els.auditCatalog.appendChild(emptyState('No audit events found', 'Execute or dry-run a tool, then refresh this view.'));
+      }}
+      filtered.forEach(event => {{
+        const row = document.createElement('div');
+        row.className = 'catalog-row';
+        const identity = document.createElement('div');
+        const name = document.createElement('div');
+        name.className = 'catalog-name';
+        name.textContent = event.tool || event.action || 'Runtime event';
+        identity.appendChild(name);
+        identity.appendChild(statusPill(event.risk || event.outcome || 'unknown'));
+        const description = document.createElement('div');
+        description.className = 'catalog-description';
+        description.textContent = event.error || event.message || event.outcome || 'Recorded runtime decision';
+        const meta = document.createElement('div');
+        meta.className = 'catalog-meta';
+        meta.textContent = [event.user, event.session_id].filter(Boolean).join(' · ') || 'Local operator';
+        const time = document.createElement('time');
+        time.className = 'audit-time';
+        time.textContent = event.ts ? new Date(event.ts).toLocaleString() : '—';
+        row.appendChild(identity);
+        row.appendChild(description);
+        row.appendChild(meta);
+        row.appendChild(time);
+        els.auditCatalog.appendChild(row);
+      }});
+      const succeeded = events.filter(event => ['success', 'executed', 'allowed'].includes(String(event.outcome || '').toLowerCase())).length;
+      const blocked = events.filter(event => ['blocked', 'denied', 'error'].includes(String(event.outcome || '').toLowerCase())).length;
+      setMetric('auditMetricTotal', events.length);
+      setMetric('auditMetricSuccess', succeeded);
+      setMetric('auditMetricBlocked', blocked);
+      setMetric('auditMetricStatus', audit.enabled ? 'On' : 'Off');
+    }}
+    function workflowSteps(workflow) {{
+      const candidates = workflow.steps || workflow.tools || workflow.capabilities || [];
+      if (!Array.isArray(candidates)) return [];
+      return candidates.map(step => {{
+        if (typeof step === 'string') return step;
+        if (!step || typeof step !== 'object') return '';
+        return step.name || step.tool || step.capability || step.action || step.description || '';
+      }}).filter(Boolean);
+    }}
+    function renderWorkflows() {{
+      const workflows = consoleCache.workflows || [];
+      els.workflowCatalog.replaceChildren();
+      if (!workflows.length) {{
+        els.workflowCatalog.appendChild(emptyState('No workflows were inferred', 'Regenerate or enhance the kit with AI analysis to discover multi-step business operations.'));
+        return;
+      }}
+      workflows.forEach((workflow, index) => {{
+        const row = document.createElement('article');
+        row.className = 'workflow-row';
+        const title = document.createElement('h3');
+        title.textContent = workflow.name || workflow.title || 'Workflow ' + (index + 1);
+        const description = document.createElement('p');
+        description.textContent = workflow.description || workflow.goal || 'Inferred operating sequence.';
+        row.appendChild(title);
+        row.appendChild(description);
+        const steps = workflowSteps(workflow);
+        if (steps.length) {{
+          const track = document.createElement('div');
+          track.className = 'workflow-steps';
+          steps.forEach((step, stepIndex) => {{
+            if (stepIndex) {{
+              const arrow = document.createElement('span');
+              arrow.className = 'workflow-arrow';
+              arrow.textContent = '→';
+              track.appendChild(arrow);
+            }}
+            const chip = document.createElement('span');
+            chip.className = 'workflow-step';
+            chip.textContent = step;
+            track.appendChild(chip);
+          }});
+          row.appendChild(track);
+        }}
+        els.workflowCatalog.appendChild(row);
+      }});
+    }}
+    function renderSettings() {{
+      const settings = consoleCache.settings || {{}};
+      const manifest = consoleCache.manifest || {{}};
+      const rows = [
+        ['Kit', manifest.name || 'Unknown', settings.kit_dir || ''],
+        ['Protocol', manifest.protocol || 'Unknown', manifest.version || 'No semantic version'],
+        ['Operator', settings.user || els.user.value, 'Session ' + (settings.session_id || els.session.value)],
+        ['Memory', settings.memory_enabled ? 'Enabled' : 'Disabled', 'History limit ' + (settings.max_history || 0)],
+        ['Runtime policy', settings.read_only ? 'Read only' : 'Guarded', (settings.deny_risks || []).length ? 'Denied: ' + settings.deny_risks.join(', ') : 'No CLI risk overrides'],
+        ['Audit log', settings.audit_log || 'Not configured', settings.audit_log ? 'Redacted JSONL' : 'Use --audit-log PATH to enable'],
+        ['Adapters', [
+          settings.graphql_endpoint_configured ? 'GraphQL' : '',
+          settings.database_configured ? 'Database' : '',
+          settings.grpc_target_configured ? 'gRPC' : ''
+        ].filter(Boolean).join(', ') || 'HTTP / kit defaults', 'Runtime targets are configured at server start']
+      ];
+      els.settingsList.replaceChildren();
+      rows.forEach(([label, value, detail]) => {{
+        const row = document.createElement('div');
+        row.className = 'settings-row';
+        const copy = document.createElement('div');
+        const title = document.createElement('strong');
+        const hint = document.createElement('span');
+        title.textContent = label;
+        hint.textContent = detail;
+        copy.appendChild(title);
+        copy.appendChild(hint);
+        const output = document.createElement('span');
+        output.className = 'settings-value';
+        output.textContent = value;
+        row.appendChild(copy);
+        row.appendChild(output);
+        els.settingsList.appendChild(row);
+      }});
+    }}
+    async function loadConsoleData() {{
+      const data = await fetch('/api/console?' + stateQuery(false).toString()).then(r => r.json());
+      if (data.error) return;
+      consoleCache = data;
+      renderCapabilities();
+      renderAudit();
+      renderWorkflows();
+      renderSettings();
+      const summary = data.summary || {{}};
+      document.getElementById('navCapabilityCount').textContent = summary.capability_count || 0;
+      document.getElementById('navWorkflowCount').textContent = summary.workflow_count || 0;
+      document.getElementById('navAuditCount').textContent = ((data.audit || {{}}).events || []).length;
     }}
     function setConnectionStatus(message = '', state = '') {{
       els.connectionStatus.textContent = state === 'success' ? '✓' : (state === 'error' ? '×' : '');
@@ -2973,6 +4188,15 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         node.onclick = () => insertToolCommand(tool);
         els.tools.appendChild(node);
       }});
+      const read = tools.filter(tool => tool.risk === 'read').length;
+      const blocked = tools.filter(tool => tool.risk === 'destructive').length;
+      const confirmation = tools.filter(tool => ['write', 'external_side_effect'].includes(tool.risk) || tool.confirm_required).length;
+      setMetric('toolMetricTotal', tools.length);
+      setMetric('toolMetricRead', read);
+      setMetric('toolMetricConfirm', confirmation);
+      setMetric('toolMetricBlocked', blocked);
+      document.getElementById('navToolCount').textContent = tools.length;
+      renderToolCatalog();
       renderCommandMenu();
     }}
     function renderCommandMenu() {{
@@ -3157,6 +4381,20 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     els.savePolicy.onclick = savePolicy;
     els.reloadPolicy.onclick = loadPolicy;
     els.manageAccounts.onclick = openAccountManager;
+    document.getElementById('toolsOpenChatBtn').onclick = () => setView('chat');
+    document.getElementById('refreshAuditBtn').onclick = loadConsoleData;
+    document.getElementById('settingsContextBtn').onclick = () => setDrawer('context', true);
+    document.getElementById('settingsAccountsBtn').onclick = openAccountManager;
+    els.toolSearch.addEventListener('input', renderToolCatalog);
+    els.toolRiskFilter.addEventListener('change', renderToolCatalog);
+    els.capabilitySearch.addEventListener('input', renderCapabilities);
+    els.capabilityDomainFilter.addEventListener('change', renderCapabilities);
+    els.capabilityRiskFilter.addEventListener('change', renderCapabilities);
+    els.auditSearch.addEventListener('input', renderAudit);
+    els.auditRiskFilter.addEventListener('change', renderAudit);
+    document.querySelectorAll('[data-view-target]').forEach(button => {{
+      button.addEventListener('click', () => setView(button.dataset.viewTarget));
+    }});
     els.accountForm.addEventListener('submit', saveAccountForm);
     els.newAccountForm.onclick = newAccountForm;
     els.cancelAccountEdit.onclick = closeAccountEditor;
@@ -3176,10 +4414,13 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
         else setDrawer(button.dataset.drawer, true);
       }});
     }});
-    document.getElementById('mobileMenuBtn').onclick = () => setDrawer('conversations', true);
+    document.getElementById('mobileMenuBtn').onclick = () => setDrawer('navigation', true);
     document.getElementById('drawerCloseBtn').onclick = closeDrawer;
     els.drawerBackdrop.onclick = closeDrawer;
-    document.getElementById('newChatBtn').onclick = () => startNewChat(true);
+    document.getElementById('newChatBtn').onclick = () => {{
+      startNewChat(true);
+      setView('chat');
+    }};
     els.fileInput.addEventListener('change', async () => {{
       const selected = [];
       for (const file of Array.from(els.fileInput.files || [])) {{
@@ -3221,10 +4462,14 @@ def render_index(config: ChatConfig, allow_kit_switch: bool) -> str:
     [els.user, els.session, els.kit].forEach(el => el.addEventListener('change', () => {{
       loadState();
       loadConversations();
+      loadConsoleData();
     }}));
     applyRuntimeMode(initialExecuteMode ? 'execute' : 'dry-run', false);
+    window.addEventListener('hashchange', () => setView(window.location.hash.slice(1), false));
+    setView(window.location.hash.slice(1) || 'chat', false);
     loadState(false);
     loadConversations();
+    loadConsoleData();
   </script>
 </body>
 </html>"""

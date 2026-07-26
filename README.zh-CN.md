@@ -102,20 +102,19 @@ agentbridge enhance .agentbridge/my-system-kit ./my-system
 agentbridge enhance .agentbridge/my-system-kit ./my-system --resume
 ```
 
-## 启动 Web Chat
+## 启动 System Control Console
 
 ```bash
 agentbridge web .agentbridge/my-system-kit --port 8765
 ```
 
-打开命令输出的 URL。Web 页面是面向已解析系统能力的 Claude Agent Chat 控制入口，支持：
+打开命令输出的 URL。Web 首页是面向已解析系统的响应式 System Control Console，支持：
 
-- 切换 Dry-run 和真实系统模式。
-- Base URL 校验和连通测试。
-- 查看和编辑 `guardrails/permissions.json` 的权限策略。
-- 点击工具后自动填入 `/run` 命令和必填参数。
-- 高风险操作显示明确的授权/取消按钮。
-- SSE 流式响应、工具调用时间线、中断按钮、最近会话、文件上传、Markdown 响应和 Claude Agent SDK model/token/cost 用量。
+- Chat、Tools、Capabilities、Policy、Audit、Workflows、Settings 七个可深链工作区。
+- 可按风险搜索工具与能力；准备工具只会回填 Chat，不会直接执行。
+- 可编辑生成策略、查看脱敏审计事件、AI 推断工作流，以及 kit/运行时设置。
+- Dry-run / 真实系统切换、Base URL 连通测试、多账号、token 用量和响应式移动导航。
+- SSE 流式对话、命令详情、中断、最近会话、文件上传、Markdown 和明确的高风险授权。
 
 真实系统模式仍会执行生成的 Guardrail 和确认规则。默认策略是：read 可在执行模式下直接运行，write 必须确认，destructive 默认拒绝，external side effect 必须确认。
 
